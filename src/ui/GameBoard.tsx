@@ -25,7 +25,7 @@ import type { ResolvedMove, VariantMove } from '../engine/variant.ts';
 import { autodraft } from '../game/autodraft.ts';
 import { BoardPiece } from './BoardPiece.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
-import { OUTCOME_PRESENTATION, RESOLUTION_PRESENTATION, causeLabel } from './outcomes.ts';
+import { OUTCOME_PRESENTATION, RESOLUTION_PRESENTATION, causeLabel, coinString } from './outcomes.ts';
 import { ROLE_GLYPH, ROLE_LABEL } from './pieceRoles.ts';
 import { TYPE_COLORS, textColorOn } from './typeColors.ts';
 
@@ -484,8 +484,10 @@ function SidePanel({
                     {squareName(h.move.from)}→{squareName(h.move.to)}
                   </span>
                   <span style={{ color: p.color }}>{p.label}</span>
-                  {h.roll !== null && (
-                    <span style={{ color: 'var(--text-dim)' }}>d{h.roll}</span>
+                  {h.crit?.isCrit && (
+                    <span style={{ color: OUTCOME_PRESENTATION.super.color }} title="critical hit">
+                      crit
+                    </span>
                   )}
                 </li>
               );
@@ -499,7 +501,7 @@ function SidePanel({
 
 function ResolutionCard({ dex, resolved }: { dex: Dex; resolved: ResolvedMove }) {
   const p = RESOLUTION_PRESENTATION[resolved.resolution];
-  const cause = causeLabel(resolved.cause, resolved.roll);
+  const cause = causeLabel(resolved.cause, resolved.crit);
   return (
     <div
       style={{
@@ -515,20 +517,19 @@ function ResolutionCard({ dex, resolved }: { dex: Dex; resolved: ResolvedMove })
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
         <span style={{ color: p.color, fontWeight: 800 }}>{p.glyph}</span>
         <strong style={{ color: p.color, fontSize: '0.88rem' }}>{p.label}</strong>
-        {resolved.roll !== null && (
+        {resolved.crit && (
           <span
-            aria-label={`rolled ${resolved.roll}`}
+            aria-label={`coins: ${resolved.crit.coins.filter(Boolean).length} heads of ${resolved.crit.coins.length}`}
+            title="A critical hit needs every coin to come up heads"
             style={{
               marginLeft: 'auto',
-              background: '#0b0e13',
-              border: '1px solid var(--border)',
-              borderRadius: 5,
-              padding: '0.05rem 0.4rem',
-              fontWeight: 800,
-              fontVariantNumeric: 'tabular-nums',
+              display: 'inline-flex',
+              gap: '0.15rem',
+              letterSpacing: '0.05em',
+              color: resolved.crit.isCrit ? OUTCOME_PRESENTATION.super.color : 'var(--text-dim)',
             }}
           >
-            {resolved.roll}
+            {coinString(resolved.crit)}
           </span>
         )}
       </div>

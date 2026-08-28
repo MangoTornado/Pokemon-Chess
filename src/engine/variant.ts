@@ -12,17 +12,29 @@
  * | `1`        | neutral              | an ordinary chess capture                            |
  * | `> 1`      | super effective      | the capture succeeds and the piece **moves again**    |
  *
- * On top of that, every capture attempt rolls a six-sided die: a **1 misses** and destroys both pieces
- * anyway, and a **6 is a critical hit** that captures and grants the extra move regardless of type. The
- * die is not a gimmick bolted onto Pokémon — the trading card game resolves a great deal through coin
- * flips, so randomness on an attack is how the Pokémon board game already works.
+ * Randomness sits on top, but only where it belongs. **The capture outcome itself is deterministic**: the
+ * type chart decides it and the player can see the verdict before committing. What is random is the
+ * *bonus* — after a plain capture, four coins are flipped, and four heads is a critical hit that grants
+ * the extra move anyway.
+ *
+ * That split is not a compromise, it is what the measurements demanded. `recon-tcg.md` counted every
+ * attack in the current Scarlet & Violet card era: of 4 435 attacks, only **0.8%** let a coin decide
+ * whether the attack does anything at all, and 91.7% of all flips gate a *rider* rather than the outcome.
+ * Independently, `recon-variants.md` measured the source video's d6 — where a 1 destroys both pieces — at
+ * roughly **5.5 pawns of pure noise per game, about 25× the entire first-move advantage in chess**. The
+ * conclusion both reached:
+ *
+ * > Output randomness is fine when the stake is a rider. It is catastrophic when the stake is a piece.
+ *
+ * So the die's "1 misses and both die" rule is gone. A coin may hand you extra tempo; it may never take
+ * your piece. The probability alphabet is powers of one half, never sixths, because that is the only
+ * randomiser the Pokémon board game uses — 1/16 is presented to the player as "four heads", not as 6.25%.
  *
  * ## Status: provisional
  *
- * This implements the four rules from the source video plus the die, which is the concept's core and is
- * not expected to change. It deliberately does **not** yet implement moves, abilities, items, status,
+ * This implements the four capture outcomes, which are the concept's core and are not expected to change,
+ * plus the critical-hit flip. It deliberately does **not** yet implement moves, abilities, items, status,
  * hazards, weather or evolution; those await the full specification being written in `docs/design/`.
- * The decisions marked "PROVISIONAL" below are the ones that specification is expected to revisit.
  *
  * Purity is preserved: no DOM, no I/O, no ambient randomness. A game is fully determined by its seed
  * plus its action list, which is what makes replays, server-authoritative validation and AI search
@@ -69,7 +81,21 @@ export type Loadout = ReadonlyMap<number, PokemonLoadout>;
 // ---------------------------------------------------------------------------
 
 /** Why a capture resolved the way it did. Kept distinct from the outcome so the UI can explain it. */
-export type ResolutionCause = 'type' | 'critical-hit' | 'miss';
+export type ResolutionCause = 'type' | 'critical-hit';
+
+/**
+ * A critical-hit flip: a run of coins where every head is needed.
+ *
+ * Expressed as coins rather than a probability because the player should watch coins land rather than be
+ * asked to trust a percentage, and because powers of one half are the only randomiser the Pokémon board
+ * game uses.
+ */
+export interface CritFlip {
+  /** Each flip in order; `true` is heads. */
+  readonly coins: readonly boolean[];
+  /** True only when every coin came up heads. */
+  readonly isCrit: boolean;
+}
 
 export type Resolution =
   /** A move that captured nothing. */
@@ -108,8 +134,14 @@ export interface ResolvedMove {
   readonly defender: PokemonLoadout | null;
   readonly multiplier: number | null;
   readonly typeOutcome: CaptureOutcome | null;
-  /** The die result, or null when nothing was being captured and so nothing was rolled. */
-  readonly roll: number | null;
+  /**
+   * The critical-hit flip, or null when none was made.
+   *
+   * Only a capture that already succeeded on type and did *not* already grant a bonus move flips for a
+   * crit, since a crit has nothing to add to a super-effective capture and nothing to offer a capture that
+   * destroyed the attacker.
+   */
+  readonly crit: CritFlip | null;
   readonly resolution: Resolution;
   readonly cause: ResolutionCause | null;
   /** True when the attacking piece was destroyed along with its target. */
@@ -141,13 +173,19 @@ export interface VariantRules {
    * removes at least one piece, a chain is bounded by the enemy piece count regardless.
    */
   readonly maxExtraMovesPerTurn: number;
-  /** Whether a 1 misses and destroys both pieces, and a 6 captures and grants an extra move. */
-  readonly diceEnabled: boolean;
+  /**
+   * Coins flipped after a plain capture; all heads grants a bonus move. Zero disables critical hits.
+   *
+   * Four coins is 1/16. That figure is not arbitrary: `recon-variants.md` derived a target critical rate
+   * band of [1/18, 1/12] from a variance budget, and `recon-tcg.md` found four-coin effects printed on real
+   * cards, so 1/16 is the only power of one half inside the band.
+   */
+  readonly critCoins: number;
 }
 
 export const DEFAULT_RULES: VariantRules = {
   maxExtraMovesPerTurn: 2,
-  diceEnabled: true,
+  critCoins: 4,
 };
 
 // ---------------------------------------------------------------------------
@@ -227,10 +265,9 @@ export class PokemonChess {
    * 1. **A 0× capture is not offered at all.** Ground genuinely cannot take Flying, so the target is
    *    untouchable by that piece — this is the rule that makes type knowledge positional rather than
    *    merely tactical.
-   * 2. **A capture that could cost you your own king is not offered.** Because a not-very-effective
-   *    capture destroys the attacker too, and because a 1 does the same on any roll, a capture that
-   *    removes one of your own defenders can expose your king. Legality is therefore evaluated against
-   *    the *worst* resolution rather than the expected one — see {@link captureIsSafe}.
+   * 2. **A resisted capture that would expose your own king is not offered.** A not-very-effective capture
+   *    destroys the attacker as well, so trading away one of your own defenders can leave your king in
+   *    check — see {@link captureIsSafe}.
    */
   legalMoves(): VariantMove[] {
     const pending = this.pending;
@@ -295,30 +332,28 @@ export class PokemonChess {
   /**
    * Whether a capture is safe under every resolution it could have.
    *
-   * PROVISIONAL, and the most consequential open decision in this module.
-   *
    * The source video hit this bug on camera: a player's piece died capturing while their own king was in
-   * check, and the turn ended with the king still in check. The trouble is that mutual destruction can
-   * remove one of your own defenders, and with the die in play *any* capture can become mutual
-   * destruction, so whether a move is legal cannot depend on a roll that has not happened yet.
+   * check, and the turn ended with the king still in check. Mutual destruction can remove one of your own
+   * defenders, so a capture can expose your king even where chess calls the move legal.
    *
-   * This resolves it conservatively: a capture is legal only if the mover's king is safe both when the
-   * capture succeeds and when both pieces die. You therefore can never lose your king to a dice roll,
-   * and the illegal position the video reached is unreachable. The alternative — allow the capture and
-   * let a bad roll lose the game — is more faithful to the video's spirit but makes the die able to end
-   * a game outright, which reads as unfair rather than exciting.
+   * Making the capture outcome deterministic is what lets this be answered cleanly. Mutual destruction now
+   * happens exactly when the matchup is resisted, and the player can see that before committing, so
+   * legality is a fact about the position rather than a bet on a roll that has not happened. A resisted
+   * capture is legal only if the mover's king is safe once the attacker is gone; every other capture is
+   * already settled by chess legality.
+   *
+   * Under the video's die, where any capture could kill the attacker, this filter had to apply to *every*
+   * capture — which also meant a king could never capture anything at all. That ugly consequence
+   * disappears along with the die.
    */
   private captureIsSafe(move: Move, outcome: CaptureOutcome): boolean {
     const mover = this.position.pieceAt(move.from);
     if (!mover) return false;
 
-    // Mutual destruction is only reachable two ways: a resisted matchup always causes it, and with the
-    // die in play a 1 causes it on any capture. When neither applies the attacker cannot die here, so
-    // chess legality has already settled the question.
-    const mutualPossible = this.rules.diceEnabled || outcome === 'resisted';
-    if (!mutualPossible) return true;
+    // Only a resisted matchup destroys the attacker, so nothing else can expose the king.
+    if (outcome !== 'resisted') return true;
 
-    // A king that trades itself away has simply lost, so it may never enter a trade it could lose.
+    // A king that trades itself away has simply lost, so it may never enter a trade it loses.
     if (mover.cls === 'king') return false;
 
     // The capture-succeeds branch is guaranteed safe already: chess legality established it. The
@@ -363,7 +398,7 @@ export class PokemonChess {
         defender: null,
         multiplier: null,
         typeOutcome: null,
-        roll: null,
+        crit: null,
         resolution: 'quiet',
         cause: null,
         attackerDestroyed: false,
@@ -395,25 +430,28 @@ export class PokemonChess {
     }
 
     // The die is rolled before the type chart is consulted, because a 1 or a 6 overrides it.
-    const roll = this.rules.diceEnabled ? rng.d6() : null;
+    // The type chart alone decides the outcome, so the player already knew this before committing.
+    let resolution: Resolution =
+      typeOutcome === 'resisted'
+        ? 'mutual-destruction'
+        : typeOutcome === 'super'
+          ? 'capture-and-continue'
+          : 'capture';
+    let cause: ResolutionCause = 'type';
 
-    let resolution: Resolution;
-    let cause: ResolutionCause;
-    if (roll === 1) {
-      resolution = 'mutual-destruction';
-      cause = 'miss';
-    } else if (roll === 6) {
-      resolution = 'capture-and-continue';
-      cause = 'critical-hit';
-    } else if (typeOutcome === 'resisted') {
-      resolution = 'mutual-destruction';
-      cause = 'type';
-    } else if (typeOutcome === 'super') {
-      resolution = 'capture-and-continue';
-      cause = 'type';
-    } else {
-      resolution = 'capture';
-      cause = 'type';
+    // Only a plain capture flips for a critical hit: a super-effective capture is already continuing, and
+    // a crit has nothing to offer a capture that destroyed the attacker. The stake is tempo, never a
+    // piece, which is the whole reason this flip is allowed to happen after the player has committed.
+    let crit: CritFlip | null = null;
+    if (resolution === 'capture' && this.rules.critCoins > 0) {
+      const coins: boolean[] = [];
+      for (let i = 0; i < this.rules.critCoins; i++) coins.push(rng.chance(50));
+      const isCrit = coins.every((head) => head);
+      crit = { coins, isCrit };
+      if (isCrit) {
+        resolution = 'capture-and-continue';
+        cause = 'critical-hit';
+      }
     }
 
     const used = this.pending?.used ?? 0;
@@ -455,7 +493,7 @@ export class PokemonChess {
       defender,
       multiplier,
       typeOutcome,
-      roll,
+      crit,
       resolution,
       cause,
       attackerDestroyed,

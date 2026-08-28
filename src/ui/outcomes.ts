@@ -10,7 +10,7 @@
  */
 
 import type { CaptureOutcome } from '../engine/typechart.ts';
-import type { Resolution, ResolutionCause } from '../engine/variant.ts';
+import type { CritFlip, Resolution, ResolutionCause } from '../engine/variant.ts';
 
 export interface OutcomePresentation {
   readonly label: string;
@@ -74,10 +74,25 @@ export const RESOLUTION_PRESENTATION: Record<Resolution, OutcomePresentation> = 
   },
 };
 
-/** One line naming *why* a resolution happened, which is what stops variance reading as a cheat. */
-export function causeLabel(cause: ResolutionCause | null, roll: number | null): string | null {
-  if (cause === 'critical-hit') return `Critical hit — rolled ${roll}`;
-  if (cause === 'miss') return `Missed — rolled ${roll}`;
-  if (cause === 'type') return roll === null ? 'By type matchup' : `By type matchup — rolled ${roll}`;
+/**
+ * One line naming *why* a resolution happened, which is what stops variance reading as a cheat.
+ *
+ * Coins are named as coins rather than as a percentage. A player who is told they had a 6.25% chance has
+ * to trust the game; a player who watches four coins land has seen it.
+ */
+export function causeLabel(cause: ResolutionCause | null, crit: CritFlip | null): string | null {
+  if (cause === 'critical-hit') {
+    return `Critical hit — ${crit?.coins.length ?? 0} heads`;
+  }
+  if (cause === 'type') {
+    if (!crit) return 'By type matchup';
+    const heads = crit.coins.filter(Boolean).length;
+    return `By type matchup — ${heads} of ${crit.coins.length} heads, no crit`;
+  }
   return null;
+}
+
+/** Renders a coin run as characters, so the flip is legible in text and to a screen reader. */
+export function coinString(crit: CritFlip): string {
+  return crit.coins.map((head) => (head ? '●' : '○')).join(' ');
 }

@@ -99,8 +99,9 @@ function RulesSummary() {
         })}
       </div>
       <div style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
-        Every capture also rolls a die: a <strong>1</strong> misses and destroys both pieces, a{' '}
-        <strong>6</strong> is a critical hit that captures and moves again.
+        The matchup decides the outcome, so you always know it before you commit. After an ordinary
+        capture, four coins are flipped — <strong>all heads</strong> is a critical hit and your piece moves
+        again anyway. A coin can win you tempo; it can never take your piece.
       </div>
     </section>
   );

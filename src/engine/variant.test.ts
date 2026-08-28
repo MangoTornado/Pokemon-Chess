@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { BattleType } from '../data/schema.ts';
 import { parseSquare, squareName } from './board.ts';
 import { Position } from './position.ts';
+import { Rng } from './rng.ts';
 import type { Move } from './position.ts';
 import { DEFAULT_RULES, PokemonChess } from './variant.ts';
 import type { Loadout, PokemonLoadout, VariantRules } from './variant.ts';
@@ -32,7 +33,8 @@ function gameFrom(
   });
 }
 
-const NO_DICE = { diceEnabled: false };
+/** Critical hits off, so a capture's outcome is purely the type matchup. */
+const NO_CRITS = { critCoins: 0 };
 
 function findMove(game: PokemonChess, from: string, to: string): Move | undefined {
   return game.legalMoves().find(
@@ -79,7 +81,7 @@ describe('the type chart decides whether a capture is even offered', () => {
 
 describe('capture resolution', () => {
   it('resolves a neutral matchup as an ordinary capture', () => {
-    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' }, { rules: NO_DICE });
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' }, { rules: NO_CRITS });
     const { game: after, resolved } = game.play(findMove(game, 'a1', 'a7')!);
 
     expect(resolved.typeOutcome).toBe('neutral');
@@ -91,7 +93,7 @@ describe('capture resolution', () => {
   });
 
   it('grants the attacker another move on a super-effective capture', () => {
-    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' }, { rules: NO_DICE });
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' }, { rules: NO_CRITS });
     const { game: after, resolved } = game.play(findMove(game, 'a1', 'a7')!);
 
     expect(resolved.typeOutcome).toBe('super');
@@ -106,7 +108,7 @@ describe('capture resolution', () => {
     const game = gameFrom(
       '4k3/p7/8/8/8/8/7R/R3K3 w - - 0 1',
       { a1: 'Fire', a7: 'Steel', h2: 'Water' },
-      { rules: NO_DICE },
+      { rules: NO_CRITS },
     );
     const { game: after } = game.play(findMove(game, 'a1', 'a7')!);
 
@@ -117,7 +119,7 @@ describe('capture resolution', () => {
   });
 
   it('destroys both pieces on a not-very-effective capture', () => {
-    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Water' }, { rules: NO_DICE });
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Water' }, { rules: NO_CRITS });
     const { game: after, resolved } = game.play(findMove(game, 'a1', 'a7')!);
 
     expect(resolved.typeOutcome).toBe('resisted');
@@ -132,88 +134,116 @@ describe('capture resolution', () => {
   });
 
   it('refuses to play a capture the type chart forbids', () => {
-    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Ground', a7: 'Flying' }, { rules: NO_DICE });
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Ground', a7: 'Flying' }, { rules: NO_CRITS });
     // Reach past the legality filter to prove resolution rejects it too.
     const raw = game.position.generateMoves().find((m) => m.to === parseSquare('a7'))!;
     expect(() => game.play(raw)).toThrow(/forbids it outright/);
   });
 });
 
-describe('the die', () => {
-  /** Finds a seed whose first roll is `face`, so dice behaviour can be asserted exactly. */
-  function seedRolling(face: number, types: Record<string, BattleType>): string {
-    for (let i = 0; i < 5000; i++) {
-      const seed = `roll-${i}`;
-      const game = gameFrom(ROOK_VS_PAWN, types);
-      const { resolved } = game.play(findMove(game, 'a1', 'a7')!);
-      if (resolved.roll === face) return seed;
-      // Re-seed and retry.
-      const retry = gameFrom(ROOK_VS_PAWN, types, { seed });
-      const r2 = retry.play(findMove(retry, 'a1', 'a7')!).resolved;
-      if (r2.roll === face) return seed;
+describe('the critical-hit flip', () => {
+  /** Finds a seed whose crit flip comes out a given way, so coin behaviour can be asserted exactly. */
+  function seedWhere(predicate: (crit: NonNullable<ReturnType<typeof playOnce>>['crit']) => boolean): string {
+    for (let i = 0; i < 20_000; i++) {
+      const seed = `coin-${i}`;
+      const resolved = playOnce(seed);
+      if (resolved && predicate(resolved.crit)) return seed;
     }
-    throw new Error(`no seed found rolling ${face}`);
+    throw new Error('no seed found matching the predicate');
   }
 
-  it('rolls a die on every capture and nothing on a quiet move', () => {
-    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Normal' });
-    const captured = game.play(findMove(game, 'a1', 'a7')!).resolved;
-    expect(captured.roll).toBeGreaterThanOrEqual(1);
-    expect(captured.roll).toBeLessThanOrEqual(6);
+  /** Plays one neutral capture and returns the resolution. */
+  function playOnce(seed: string) {
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' }, { seed });
+    return game.play(findMove(game, 'a1', 'a7')!).resolved;
+  }
 
+  it('flips coins on a plain capture and nothing on a quiet move', () => {
+    const resolved = playOnce('coins-present');
+    expect(resolved.crit).not.toBeNull();
+    expect(resolved.crit!.coins).toHaveLength(4);
+
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' });
     const quiet = game.play(findMove(game, 'a1', 'a6')!).resolved;
-    expect(quiet.roll).toBeNull();
+    expect(quiet.crit).toBeNull();
     expect(quiet.resolution).toBe('quiet');
   });
 
-  it('turns a 1 into a miss that destroys both pieces even on a winning matchup', () => {
-    const types = { a1: 'Fire', a7: 'Steel' } as Record<string, BattleType>;
-    const seed = seedRolling(1, types);
-    const game = gameFrom(ROOK_VS_PAWN, types, { seed });
-    const { resolved } = game.play(findMove(game, 'a1', 'a7')!);
-
-    expect(resolved.roll).toBe(1);
-    expect(resolved.typeOutcome).toBe('super'); // the matchup was winning...
-    expect(resolved.resolution).toBe('mutual-destruction'); // ...and the miss overrode it
-    expect(resolved.cause).toBe('miss');
-  });
-
-  it('turns a 6 into a critical hit that captures and continues even on a losing matchup', () => {
-    const types = { a1: 'Fire', a7: 'Water' } as Record<string, BattleType>;
-    const seed = seedRolling(6, types);
-    const game = gameFrom(ROOK_VS_PAWN, types, { seed });
+  it('upgrades a plain capture to a bonus move when every coin is heads', () => {
+    const seed = seedWhere((crit) => crit !== null && crit.isCrit);
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' }, { seed });
     const { game: after, resolved } = game.play(findMove(game, 'a1', 'a7')!);
 
-    expect(resolved.roll).toBe(6);
-    expect(resolved.typeOutcome).toBe('resisted'); // the matchup was losing...
-    expect(resolved.resolution).toBe('capture-and-continue'); // ...and the crit overrode it
+    expect(resolved.crit!.coins).toEqual([true, true, true, true]);
+    expect(resolved.typeOutcome).toBe('neutral');
+    expect(resolved.resolution).toBe('capture-and-continue');
     expect(resolved.cause).toBe('critical-hit');
     expect(after.turn).toBe('white');
   });
 
-  it('is fair across many games rather than favouring an outcome', () => {
-    const counts = new Map<number, number>();
-    for (let i = 0; i < 3000; i++) {
-      const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Normal' }, { seed: `fair-${i}` });
-      const { resolved } = game.play(findMove(game, 'a1', 'a7')!);
-      counts.set(resolved.roll!, (counts.get(resolved.roll!) ?? 0) + 1);
+  it('leaves a plain capture plain when any coin is tails', () => {
+    const seed = seedWhere((crit) => crit !== null && !crit.isCrit);
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' }, { seed });
+    const { game: after, resolved } = game.play(findMove(game, 'a1', 'a7')!);
+
+    expect(resolved.crit!.isCrit).toBe(false);
+    expect(resolved.resolution).toBe('capture');
+    expect(resolved.cause).toBe('type');
+    expect(after.turn).toBe('black');
+  });
+
+  it('crits at roughly one in sixteen, the rate the variance budget asked for', () => {
+    let crits = 0;
+    const trials = 8000;
+    for (let i = 0; i < trials; i++) {
+      const resolved = playOnce(`rate-${i}`);
+      if (resolved.crit?.isCrit) crits++;
     }
-    expect([...counts.keys()].sort()).toEqual([1, 2, 3, 4, 5, 6]);
-    for (const face of [1, 2, 3, 4, 5, 6]) {
-      expect(counts.get(face)!).toBeGreaterThan(3000 / 6 * 0.8);
-      expect(counts.get(face)!).toBeLessThan(3000 / 6 * 1.2);
+    // 1/16 = 0.0625. Wide enough not to be flaky, tight enough to catch a wrong coin count.
+    expect(crits / trials).toBeGreaterThan(0.045);
+    expect(crits / trials).toBeLessThan(0.085);
+  });
+
+  it('never flips on a super-effective capture, which already grants the move', () => {
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' });
+    const { resolved } = game.play(findMove(game, 'a1', 'a7')!);
+    expect(resolved.typeOutcome).toBe('super');
+    expect(resolved.resolution).toBe('capture-and-continue');
+    expect(resolved.crit).toBeNull();
+  });
+
+  it('never flips on a resisted capture, so a coin can never rescue a piece', () => {
+    // This is the rule the measurements demanded: a coin may win tempo, never save a piece.
+    for (let i = 0; i < 200; i++) {
+      const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Water' }, { seed: `resisted-${i}` });
+      const { resolved } = game.play(findMove(game, 'a1', 'a7')!);
+      expect(resolved.resolution).toBe('mutual-destruction');
+      expect(resolved.crit).toBeNull();
     }
   });
 
-  it('can be switched off entirely, leaving pure type resolution', () => {
+  it('makes the outcome fully deterministic, so a preview never lies', () => {
+    // The same matchup must resolve the same way regardless of seed, apart from the tempo bonus.
+    for (const [types, expected] of [
+      [{ a1: 'Fire', a7: 'Steel' }, 'capture-and-continue'],
+      [{ a1: 'Fire', a7: 'Water' }, 'mutual-destruction'],
+    ] as const) {
+      for (let i = 0; i < 60; i++) {
+        const game = gameFrom(ROOK_VS_PAWN, types as Record<string, BattleType>, { seed: `det-${i}` });
+        expect(game.play(findMove(game, 'a1', 'a7')!).resolved.resolution).toBe(expected);
+      }
+    }
+  });
+
+  it('can be switched off entirely', () => {
     for (let i = 0; i < 40; i++) {
-      const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' }, {
-        seed: `nodice-${i}`,
-        rules: NO_DICE,
+      const game = gameFrom(ROOK_VS_PAWN, { a1: 'Normal', a7: 'Fire' }, {
+        seed: `nocrit-${i}`,
+        rules: NO_CRITS,
       });
       const { resolved } = game.play(findMove(game, 'a1', 'a7')!);
-      expect(resolved.roll).toBeNull();
-      expect(resolved.resolution).toBe('capture-and-continue');
+      expect(resolved.crit).toBeNull();
+      expect(resolved.resolution).toBe('capture');
     }
   });
 });
@@ -223,7 +253,7 @@ describe('termination, which the extra-move rule threatens', () => {
     // A Fire rook with three Steel pawns lined up to eat: a2, then b2, then c2.
     const fen = '7k/8/8/8/8/8/ppp5/R6K w - - 0 1';
     const types = { a1: 'Fire', a2: 'Steel', b2: 'Steel', c2: 'Steel' } as Record<string, BattleType>;
-    let game = gameFrom(fen, types, { rules: { diceEnabled: false, maxExtraMovesPerTurn: 2 } });
+    let game = gameFrom(fen, types, { rules: { critCoins: 0, maxExtraMovesPerTurn: 2 } });
 
     const first = game.play(findMove(game, 'a1', 'a2')!);
     expect(first.resolved.grantsExtraMove).toBe(true);
@@ -246,7 +276,7 @@ describe('termination, which the extra-move rule threatens', () => {
   it('bounds a chain by the enemy piece count even with a generous cap', () => {
     // Only one target exists, so the chain cannot outlive it however high the cap.
     const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' }, {
-      rules: { diceEnabled: false, maxExtraMovesPerTurn: 99 },
+      rules: { critCoins: 0, maxExtraMovesPerTurn: 99 },
     });
     const { game: after } = game.play(findMove(game, 'a1', 'a7')!);
     // The extra move exists but no further capture does, so the chain dies out naturally.
@@ -257,7 +287,7 @@ describe('termination, which the extra-move rule threatens', () => {
     // The capturing pawn promotes on the last rank and then has nowhere to go, because it is pinned
     // in place by having no legal continuation at all.
     const game = gameFrom('4k3/8/8/8/8/8/8/R3K2r w - - 0 1', { a1: 'Fire', h1: 'Steel' }, {
-      rules: NO_DICE,
+      rules: NO_CRITS,
     });
     const move = findMove(game, 'a1', 'h1');
     // If the capture is available, playing it must never leave the game waiting on a move that does
@@ -270,42 +300,37 @@ describe('termination, which the extra-move rule threatens', () => {
 });
 
 describe('the video\'s own bug: dying in a capture while your king is in check', () => {
-  it('never offers a capture that a bad roll would turn into losing your king', () => {
-    // The white rook on e2 is all that shields the white king on e1 from the black rook on e8.
-    // Capturing the pawn on e5 keeps the rook on the file, so chess calls it legal — but mutual
-    // destruction would remove the shield and leave the king in check.
-    const fen = 'k3r3/8/8/4p3/8/8/4R3/4K3 w - - 0 1';
-    const withDice = gameFrom(fen, { e2: 'Fire', e5: 'Steel' });
-    expect(hasMove(withDice, 'e2', 'e5')).toBe(false);
-  });
+  // The white rook on e2 is all that shields the white king on e1 from the black rook on e8. Capturing
+  // the pawn on e5 keeps the rook on the file, so chess calls it legal — but if the attacker dies too,
+  // the shield vanishes and the king is in check. That is the position the video reached and could not
+  // resolve.
+  const SHIELDED_KING = 'k3r3/8/8/4p3/8/8/4R3/4K3 w - - 0 1';
 
-  it('allows that same capture when mutual destruction is impossible', () => {
-    // With the die off and a winning matchup, the attacker cannot die, so the shield cannot vanish.
-    const fen = 'k3r3/8/8/4p3/8/8/4R3/4K3 w - - 0 1';
-    const noDice = gameFrom(fen, { e2: 'Fire', e5: 'Steel' }, { rules: NO_DICE });
-    expect(hasMove(noDice, 'e2', 'e5')).toBe(true);
-  });
-
-  it('forbids it with the die off when the matchup itself is losing', () => {
-    // A resisted matchup always destroys the attacker, so the shield always vanishes.
-    const fen = 'k3r3/8/8/4p3/8/8/4R3/4K3 w - - 0 1';
-    const losing = gameFrom(fen, { e2: 'Fire', e5: 'Water' }, { rules: NO_DICE });
+  it('forbids a resisted capture that would remove the shield in front of its own king', () => {
+    const losing = gameFrom(SHIELDED_KING, { e2: 'Fire', e5: 'Water' });
     expect(hasMove(losing, 'e2', 'e5')).toBe(false);
   });
 
-  it('never lets a king enter a trade it could lose', () => {
-    // King on e1 could capture the pawn on e2 by ordinary chess rules.
+  it('allows the same capture on a matchup the attacker survives', () => {
+    // Because the outcome is now deterministic, the player can see which of these two cases they are in
+    // before committing. Under the video's die either capture might have killed the attacker, so the
+    // engine had to forbid both.
+    const winning = gameFrom(SHIELDED_KING, { e2: 'Fire', e5: 'Steel' });
+    expect(hasMove(winning, 'e2', 'e5')).toBe(true);
+    const neutral = gameFrom(SHIELDED_KING, { e2: 'Normal', e5: 'Fire' });
+    expect(hasMove(neutral, 'e2', 'e5')).toBe(true);
+  });
+
+  it('lets a king capture, but never into a trade that kills it', () => {
     const fen = '4k3/8/8/8/8/8/4p3/4K3 w - - 0 1';
-    const withDice = gameFrom(fen, { e1: 'Fire', e2: 'Steel' });
-    expect(hasMove(withDice, 'e1', 'e2')).toBe(false);
 
-    // With no die and a winning matchup the king is in no danger, so it may take.
-    const safe = gameFrom(fen, { e1: 'Fire', e2: 'Steel' }, { rules: NO_DICE });
-    expect(hasMove(safe, 'e1', 'e2')).toBe(true);
+    // A winning matchup is safe, so the king may take. Under the die this was forbidden outright, which
+    // was an ugly consequence rather than a rule anybody wanted.
+    expect(hasMove(gameFrom(fen, { e1: 'Fire', e2: 'Steel' }), 'e1', 'e2')).toBe(true);
+    expect(hasMove(gameFrom(fen, { e1: 'Normal', e2: 'Fire' }), 'e1', 'e2')).toBe(true);
 
-    // With no die but a losing matchup, the king would die with it.
-    const unsafe = gameFrom(fen, { e1: 'Fire', e2: 'Water' }, { rules: NO_DICE });
-    expect(hasMove(unsafe, 'e1', 'e2')).toBe(false);
+    // A resisted matchup would destroy the king along with its target.
+    expect(hasMove(gameFrom(fen, { e1: 'Fire', e2: 'Water' }), 'e1', 'e2')).toBe(false);
   });
 
   it('never offers a king as a capture target, even mid-chain', () => {
@@ -315,7 +340,7 @@ describe('the video\'s own bug: dying in a capture while your king is in check',
     // The white rook on a7 takes the Steel pawn on e7 super-effectively. That checks the black king on
     // e8 and grants an extra move, so white is on move with black's king already under attack.
     const game = gameFrom('4k3/R3p3/8/8/8/8/8/4K3 w - - 0 1', { a7: 'Fire', e7: 'Steel' }, {
-      rules: NO_DICE,
+      rules: NO_CRITS,
     });
     const { game: mid, resolved } = game.play(findMove(game, 'a7', 'e7')!);
     expect(resolved.grantsExtraMove).toBe(true);
@@ -343,18 +368,23 @@ describe('the video\'s own bug: dying in a capture while your king is in check',
   });
 });
 
-/** A full-board game whose 32 pieces get types cycled deterministically from the seed. */
+/**
+ * A full-board game whose 32 pieces are typed from the seed.
+ *
+ * Uses the project RNG rather than arithmetic on the seed. An earlier version derived its types from
+ * `seed.length`, which silently gave every seed of the same length an identical army and made a test
+ * asserting that different seeds diverge pass for the wrong reason.
+ */
 function randomOpeningGame(seed: string): PokemonChess {
   const TYPES: BattleType[] = [
     'Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground',
     'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy',
   ];
+  const rng = new Rng(`army:${seed}`);
   const position = Position.fromStartingPosition();
   const loadout = new Map<number, PokemonLoadout>();
-  let n = seed.length;
   for (const { piece } of position.allPieces()) {
-    n = (n * 31 + 17) % 997;
-    loadout.set(piece.id, { species: `test-${piece.id}`, type: TYPES[n % TYPES.length]! });
+    loadout.set(piece.id, { species: `test-${piece.id}`, type: rng.pick(TYPES) });
   }
   return PokemonChess.create({ position, loadout: loadout as Loadout, seed });
 }
@@ -369,7 +399,7 @@ describe('determinism, which replay and server validation depend on', () => {
         if (moves.length === 0) break;
         const chosen = moves[(ply * 13) % moves.length]!;
         const { game: next, resolved } = game.play(chosen.move);
-        trace.push(`${squareName(chosen.move.from)}${squareName(chosen.move.to)}:${resolved.resolution}:${resolved.roll}`);
+        trace.push(`${squareName(chosen.move.from)}${squareName(chosen.move.to)}:${resolved.resolution}:${resolved.crit?.coins.filter(Boolean).length ?? '-'}`);
         game = next;
       }
       return { trace, fen: game.position.toFen() };
@@ -397,7 +427,7 @@ describe('determinism, which replay and server validation depend on', () => {
   });
 
   it('does not mutate the game it was played from', () => {
-    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' }, { rules: NO_DICE });
+    const game = gameFrom(ROOK_VS_PAWN, { a1: 'Fire', a7: 'Steel' }, { rules: NO_CRITS });
     const before = game.position.toFen();
     game.play(findMove(game, 'a1', 'a7')!);
     expect(game.position.toFen()).toBe(before);
@@ -453,7 +483,7 @@ describe('board queries for rendering', () => {
   });
 
   it('keeps a promoted pawn\'s identity, which is what evolution needs', () => {
-    const game = gameFrom('4k3/P7/8/8/8/8/8/4K3 w - - 0 1', { a7: 'Fire' }, { rules: NO_DICE });
+    const game = gameFrom('4k3/P7/8/8/8/8/8/4K3 w - - 0 1', { a7: 'Fire' }, { rules: NO_CRITS });
     const pawnId = game.position.pieceAt(parseSquare('a7'))!.id;
     const promotion = game.legalMoves().find((m) => m.move.promotion === 'queen')!;
     const { game: after } = game.play(promotion.move);
