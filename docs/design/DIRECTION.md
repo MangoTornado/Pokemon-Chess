@@ -14,6 +14,11 @@ quietly resolve against it.
 2. > "I want everything to be fully fleshed out and very functional with cool and interesting mechanics
    > tied to how pokemon function with typing and moves etc"
 
+3. > "make sure that all of the interactions are proper and make sense to how it works in pokemon
+   > (games/tcg), as well as make sure the visuals look pleasing, maybe have animations or something for
+   > captures or different moves, etc, I want it to look like a good and fully fleshed out game, with
+   > nice visuals"
+
 ## What this settles
 
 ### Maximalism is the brief, not a risk to be managed
@@ -43,6 +48,70 @@ Concretely:
 
 Faithfulness is a first-class quality bar. A mapping that is systematic but thematically wrong is a
 defect, and should be reported as one.
+
+### The TCG is a legitimate source, not just the video games
+
+"how it works in pokemon (games/tcg)" names **both** canons. The mainline games are the primary
+reference for typing, moves, abilities and items. But the TCG has already solved several problems this
+project runs into, and it solved them for a *board game with a small action budget per turn* — which is
+much closer to our situation than a real-time battle sim is. Where the TCG has a cleaner answer, take it,
+and say which canon a mechanic came from.
+
+Specific places the TCG is the better precedent:
+
+- **Coin flips.** The TCG resolves an enormous amount through coin flips: Paralysis, Confusion, Sleep
+  recovery, and dozens of attack effects. This directly legitimises the video's d6. Randomness on an
+  attack is not a hack bolted onto Pokémon — it is *how the Pokémon board game already works*. Prefer
+  framing our RNG in those terms, and prefer TCG-style "flip to see if the effect lands" over invented
+  probability curves.
+- **Weakness and Resistance.** The TCG expresses the type chart as an explicit, printed-on-the-card
+  modifier: Weakness increases damage, Resistance reduces it. That is the closest existing precedent for
+  our capture rule, and its vocabulary ("Weakness", "Resistance") is worth reusing in the interface
+  because players already read it as a number that changes an outcome.
+- **Status conditions.** The TCG's Asleep / Paralyzed / Confused are turn-scoped, board-visible, and
+  cleared by a defined event — a far better fit for a chess turn than the games' HP-tick model.
+  Poisoned and Burned as end-of-turn damage carry over cleanly too.
+- **Retreat cost.** A concrete precedent for making *movement itself* cost something, which is a lever a
+  chess variant can use where the mainline games have no equivalent.
+- **Evolution.** In the TCG evolution is a deliberate action played onto a Pokémon in play, which maps
+  onto pawn promotion far more directly than the games' level-up model.
+- **Tool and Stadium cards.** Precedent for held items on a piece and for global board-wide effects,
+  respectively — including that both are *visible to both players*, which matters for legibility.
+
+Do not invent a third canon. Every mechanic should be traceable to the games or the TCG, and the
+implementation should record which.
+
+### Visuals and animation are a requirement, not polish
+
+"nice visuals", "look like a good and fully fleshed out game", and animations for captures and moves are
+**acceptance criteria**, ranked alongside correctness. A mechanically perfect game that looks like a
+prototype has failed this brief.
+
+What this commits us to:
+
+1. **Every capture outcome has a distinct, readable animation.** The four outcomes — super effective,
+   neutral, not very effective, no effect — must be instantly distinguishable *without reading text*.
+   These are the moments the game is built around; they should feel good and land hard. Mutual
+   destruction should visibly destroy both pieces. An illegal capture should read as a rejection, not
+   as nothing happening.
+2. **The free extra move after a super-effective capture must be dramatised.** It is the single most
+   important consequence in the game, and a player must never miss that they have it.
+3. **Moves, abilities and items get visual identity.** Type-coloured effects at minimum, with recognisable
+   treatments for the marquee cases — hazards visibly sitting on squares, status visibly afflicting a
+   piece, weather and terrain visibly changing the board, a trapped piece visibly held.
+4. **Animation must never gate play.** Provide a speed control and a skip, honour
+   `prefers-reduced-motion`, and keep the game fully playable with animation off. Nothing may block input
+   waiting on a flourish.
+5. **Performance is part of looking good.** Hold 60fps during effects. Judder reads as cheapness more
+   than a missing effect does.
+6. **Art direction is a deliberate decision, not an accident of defaults.** Pick a coherent look — board,
+   pieces, typography, colour, type identity, HUD — and write it down so contributions stay consistent.
+   The 18 type colours are already fixed in `src/ui/typeColors.ts`; treat them as the palette's spine.
+
+Note the constraint discovered while measuring assets: animated sprites exist for only part of the dex
+(Miraidon and Pecharunt have none and fall back to stills). Animation quality must therefore come from
+*effects we draw*, not from assuming animated source art. See
+[`recon-data-substrate.md`](./recon-data-substrate.md) §6.
 
 ### "Very functional" means shipped, not sketched
 
