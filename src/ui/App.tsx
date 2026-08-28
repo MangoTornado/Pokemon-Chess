@@ -16,6 +16,9 @@ import { Dex } from '../data/dex.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
 import { autodraft } from '../game/autodraft.ts';
+import { DIFFICULTIES } from '../ai/search.ts';
+import type { Difficulty } from '../ai/search.ts';
+import type { Side } from '../engine/variant.ts';
 import { DraftScreen } from './DraftScreen.tsx';
 import { GameBoard } from './GameBoard.tsx';
 import { TIER_PRESENTATION } from './outcomes.ts';
@@ -24,8 +27,13 @@ import { ROLE_GLYPH, ROLE_LABEL, GLYPH_FONT_STACK } from './pieceRoles.ts';
 
 type Screen =
   | { readonly kind: 'title' }
-  | { readonly kind: 'draft' }
-  | { readonly kind: 'match'; readonly seed: string; readonly setup: MatchSetup };
+  | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
+  | {
+      readonly kind: 'match';
+      readonly seed: string;
+      readonly setup: MatchSetup;
+      readonly ai?: { side: Side; difficulty: Difficulty };
+    };
 
 interface MatchSetup {
   readonly position: Position;
@@ -65,16 +73,12 @@ export function App() {
 
       {screen.kind === 'title' && (
         <TitleScreen
-          onQuickPlay={() => {
+          onQuickPlay={(ai) => {
             const seed = `sandbox-${Date.now()}`;
             const drafted = autodraft(dex, seed);
-            setScreen({
-              kind: 'match',
-              seed,
-              setup: { position: drafted.position, loadout: drafted.loadout },
-            });
+            setScreen({ kind: 'match', seed, setup: { position: drafted.position, loadout: drafted.loadout }, ...(ai ? { ai } : {}) });
           }}
-          onDraft={() => setScreen({ kind: 'draft' })}
+          onDraft={(ai) => setScreen({ kind: 'draft', ...(ai ? { ai } : {}) })}
         />
       )}
 
@@ -83,7 +87,7 @@ export function App() {
           dex={dex}
           onCancel={() => setScreen({ kind: 'title' })}
           onReady={(setup) =>
-            setScreen({ kind: 'match', seed: `drafted-${Date.now()}`, setup })
+            setScreen({ kind: 'match', seed: `drafted-${Date.now()}`, setup, ...(screen.ai ? { ai: screen.ai } : {}) })
           }
         />
       )}
@@ -96,6 +100,7 @@ export function App() {
             seed={screen.seed}
             setup={screen.setup}
             onLeave={() => setScreen({ kind: 'title' })}
+            {...(screen.ai ? { ai: screen.ai } : {})}
           />
           <Legend />
         </>
@@ -121,13 +126,20 @@ function Header() {
   );
 }
 
+const DIFFICULTY_ORDER = ['rookie', 'trainer', 'ace', 'champion'] as const;
+
 function TitleScreen({
   onQuickPlay,
   onDraft,
 }: {
-  onQuickPlay: () => void;
-  onDraft: () => void;
+  onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
+  onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
 }) {
+  const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
+  const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
+  // The AI plays black, so the human (white) moves first.
+  const ai = mode === 'ai' ? { side: 'black' as Side, difficulty: DIFFICULTIES[difficultyKey]! } : undefined;
+
   return (
     <section
       style={{
@@ -144,17 +156,84 @@ function TitleScreen({
         drafted for you, so you can see the four capture outcomes without picking a team first. When
         you're ready to choose your own Pokémon, use Draft.
       </p>
+
+      <div style={{ display: 'flex', gap: '0.9rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <Segmented
+          label="Opponent"
+          options={[
+            ['ai', 'vs Computer'],
+            ['hotseat', 'Two players'],
+          ]}
+          value={mode}
+          onChange={(v) => setMode(v as 'ai' | 'hotseat')}
+        />
+        {mode === 'ai' && (
+          <Segmented
+            label="Difficulty"
+            options={DIFFICULTY_ORDER.map((k) => [k, DIFFICULTIES[k]!.name] as [string, string])}
+            value={difficultyKey}
+            onChange={(v) => setDifficultyKey(v as (typeof DIFFICULTY_ORDER)[number])}
+          />
+        )}
+      </div>
+      {mode === 'ai' && (
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+          You play White. A Rookie hasn't learned the type chart yet and will walk into bad trades; a
+          Champion knows it cold.
+        </p>
+      )}
+
       <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-        <BigButton onClick={onQuickPlay} primary>
+        <BigButton onClick={() => onQuickPlay(ai)} primary>
           <span style={{ fontSize: '1.05rem' }}>Quick Play</span>
-          <small>Auto-drafted armies · hot-seat</small>
+          <small>Auto-drafted armies</small>
         </BigButton>
-        <BigButton onClick={onDraft}>
+        <BigButton onClick={() => onDraft(ai)}>
           <span style={{ fontSize: '1.05rem' }}>Draft your army</span>
           <small>Choose all 32 pieces from every Pokémon</small>
         </BigButton>
       </div>
     </section>
+  );
+}
+
+function Segmented({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: [string, string][];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div style={{ display: 'grid', gap: '0.25rem' }}>
+      <span style={{ fontSize: '0.68rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-dim)' }}>
+        {label}
+      </span>
+      <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 7, overflow: 'hidden' }}>
+        {options.map(([k, name]) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => onChange(k)}
+            style={{
+              background: value === k ? 'var(--accent)' : 'transparent',
+              color: value === k ? '#1a1500' : 'var(--text)',
+              border: 'none',
+              padding: '0.3rem 0.7rem',
+              fontWeight: value === k ? 700 : 500,
+              fontSize: '0.82rem',
+              cursor: 'pointer',
+            }}
+          >
+            {name}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

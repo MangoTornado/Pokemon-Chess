@@ -22,9 +22,11 @@ import { ALL_SQUARES, rankOf, squareColor, squareName } from '../engine/board.ts
 import type { Square } from '../engine/board.ts';
 import { effectiveness } from '../engine/typechart.ts';
 import { PokemonChess } from '../engine/variant.ts';
-import type { ResolvedMove, Verdict, VariantMove } from '../engine/variant.ts';
+import type { ResolvedMove, Side, Verdict, VariantMove } from '../engine/variant.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
+import { chooseMove } from '../ai/search.ts';
+import type { Difficulty } from '../ai/search.ts';
 import { BoardPiece } from './BoardPiece.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { TIER_PRESENTATION, VERDICT_PRESENTATION, tierOf, verdictCause } from './outcomes.ts';
@@ -63,9 +65,11 @@ export interface GameBoardProps {
   seed: string;
   setup: { position: Position; loadout: Loadout };
   onLeave: () => void;
+  /** When set, the AI controls this side and plays automatically on its turn. */
+  ai?: { side: Side; difficulty: Difficulty };
 }
 
-export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
+export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
   const [game, setGame] = useState(() =>
     PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }),
   );
@@ -146,6 +150,8 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
   const onSquare = useCallback(
     (square: Square) => {
       if (over) return;
+      // Not the human's turn while the AI is thinking.
+      if (ai !== undefined && game.turn === ai.side) return;
 
       const option = options.get(square);
       if (option) {
@@ -165,8 +171,22 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
       }
       setSelected(null);
     },
-    [denied, movablePieceSquares, options, over, play],
+    [ai, game, denied, movablePieceSquares, options, over, play],
   );
+
+  // When the AI is on the move, compute and play its move after a short beat — so the human's move
+  // renders and its animation is seen first, and so the board never appears frozen while it thinks.
+  // A seed derived from the move count keeps the AI's play reproducible for a given game.
+  useEffect(() => {
+    if (!ai || over || game.turn !== ai.side) return;
+    const timer = setTimeout(() => {
+      const choice = chooseMove(game, ai.difficulty, game.history.length + 1);
+      if (!choice) return;
+      const target = game.legalMoves().find((m) => m.move.encoded === choice.move.encoded);
+      if (target) play(target);
+    }, effects.length > 0 ? EFFECT_MS + 60 : 220);
+    return () => clearTimeout(timer);
+  }, [ai, over, game, effects.length, play]);
 
   const effectBySquare = useMemo(() => {
     const map = new Map<Square, SquareEffect>();
@@ -174,6 +194,7 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
     return map;
   }, [effects]);
 
+  const humanBlocked = ai !== undefined && game.turn === ai.side && !over;
   const pendingExtra = game.extraMovePieceId !== null;
   // R8: warn when the side to move's king can be taken right now.
   const kingInDanger = useMemo(() => game.kingInDanger(game.turn), [game]);
@@ -181,7 +202,15 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
 
   return (
     <div style={{ display: 'grid', gap: '1rem' }}>
-      <StatusBar game={game} result={result} pendingExtra={pendingExtra} kingInDanger={kingInDanger} onLeave={onLeave} />
+      <StatusBar
+        game={game}
+        result={result}
+        pendingExtra={pendingExtra}
+        kingInDanger={kingInDanger}
+        thinking={humanBlocked}
+        aiName={ai?.difficulty.name}
+        onLeave={onLeave}
+      />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 268px', gap: '1rem', alignItems: 'start' }}>
         <div
@@ -320,12 +349,16 @@ function StatusBar({
   result,
   pendingExtra,
   kingInDanger,
+  thinking,
+  aiName,
   onLeave,
 }: {
   game: PokemonChess;
   result: ReturnType<PokemonChess['result']>;
   pendingExtra: boolean;
   kingInDanger: boolean;
+  thinking: boolean;
+  aiName: string | undefined;
   onLeave: () => void;
 }) {
   const turnColor = game.turn === 'white' ? '#f6f4ef' : '#15171c';
@@ -349,6 +382,11 @@ function StatusBar({
             style={{ width: 16, height: 16, borderRadius: '50%', background: turnColor, border: '1.5px solid #6b7280' }}
           />
           <strong>{game.turn === 'white' ? 'White' : 'Black'} to move</strong>
+          {thinking && (
+            <span style={{ color: 'var(--text-dim)', fontSize: '0.82rem', fontStyle: 'italic' }}>
+              {aiName ?? 'AI'} is thinking…
+            </span>
+          )}
           {pendingExtra && (
             <span
               style={{
