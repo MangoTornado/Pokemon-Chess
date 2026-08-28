@@ -21,12 +21,16 @@ import type { Difficulty } from '../ai/search.ts';
 import type { Side } from '../engine/variant.ts';
 import { DraftScreen } from './DraftScreen.tsx';
 import { GameBoard } from './GameBoard.tsx';
+import { AccountScreen } from './AccountScreen.tsx';
+import { AvatarView } from './AvatarView.tsx';
+import { useSession } from './useSession.ts';
 import { TIER_PRESENTATION } from './outcomes.ts';
 import { PIECE_CLASSES } from '../engine/board.ts';
 import { ROLE_GLYPH, ROLE_LABEL, GLYPH_FONT_STACK } from './pieceRoles.ts';
 
 type Screen =
   | { readonly kind: 'title' }
+  | { readonly kind: 'account' }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
       readonly kind: 'match';
@@ -44,6 +48,7 @@ export function App() {
   const [dex, setDex] = useState<Dex | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>({ kind: 'title' });
+  const session = useSession();
 
   useEffect(() => {
     Dex.load().then(setDex, (cause: unknown) => setError(String(cause)));
@@ -52,7 +57,7 @@ export function App() {
   if (error) {
     return (
       <main style={{ maxWidth: 640, margin: '0 auto' }}>
-        <Header />
+        <Header session={session} onOpenAccount={() => setScreen({ kind: 'account' })} />
         <p style={{ color: TIER_PRESENTATION.immune.color }}>Failed to load the dex: {error}</p>
       </main>
     );
@@ -61,7 +66,7 @@ export function App() {
   if (!dex) {
     return (
       <main style={{ maxWidth: 640, margin: '0 auto' }}>
-        <Header />
+        <Header session={session} onOpenAccount={() => setScreen({ kind: 'account' })} />
         <p style={{ color: 'var(--text-dim)' }}>Loading the dex…</p>
       </main>
     );
@@ -69,7 +74,11 @@ export function App() {
 
   return (
     <main style={{ maxWidth: 1024, margin: '0 auto', display: 'grid', gap: '1.25rem' }}>
-      <Header />
+      <Header session={session} onOpenAccount={() => setScreen({ kind: 'account' })} />
+
+      {screen.kind === 'account' && (
+        <AccountScreen session={session} onClose={() => setScreen({ kind: 'title' })} />
+      )}
 
       {screen.kind === 'title' && (
         <TitleScreen
@@ -114,14 +123,37 @@ export function App() {
   );
 }
 
-function Header() {
+function Header({ session, onOpenAccount }: { session: ReturnType<typeof useSession>; onOpenAccount: () => void }) {
   return (
-    <header style={{ display: 'grid', gap: '0.3rem' }}>
-      <h1 style={{ fontSize: '1.75rem' }}>Pokémon Chess</h1>
-      <p style={{ margin: 0, color: 'var(--text-dim)', maxWidth: '72ch', fontSize: '0.92rem' }}>
-        Chess where every piece is a Pokémon with a single type, and the type matchup decides what a
-        capture means.
-      </p>
+    <header style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+      <div style={{ display: 'grid', gap: '0.3rem' }}>
+        <h1 style={{ fontSize: '1.75rem' }}>Pokémon Chess</h1>
+        <p style={{ margin: 0, color: 'var(--text-dim)', maxWidth: '64ch', fontSize: '0.92rem' }}>
+          Chess where every piece is a Pokémon with a single type, and the type matchup decides what a
+          capture means.
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onOpenAccount}
+        aria-label={session.profile ? 'Your trainer' : 'Sign in'}
+        style={{
+          display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0,
+          background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 999,
+          padding: '0.3rem 0.7rem 0.3rem 0.35rem', cursor: 'pointer', color: 'var(--text)',
+        }}
+      >
+        {session.profile ? (
+          <>
+            <AvatarView avatar={session.profile.avatar} size={30} framed />
+            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{session.profile.displayName}</span>
+          </>
+        ) : (
+          <span style={{ fontSize: '0.85rem', fontWeight: 600, padding: '0 0.4rem' }}>
+            {session.profile === undefined ? '…' : 'Sign in'}
+          </span>
+        )}
+      </button>
     </header>
   );
 }
