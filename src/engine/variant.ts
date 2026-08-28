@@ -199,22 +199,46 @@ function applyRider(status: PieceStatus, mark: string): PieceStatus {
 }
 
 export class PokemonChess {
+  readonly position: Position;
+  readonly loadout: Loadout;
+  readonly rules: VariantRules;
+  /** Battle stats per piece id, computed once — pieces do not change species mid-game (yet). */
+  private readonly stats: ReadonlyMap<number, PieceStats>;
+  /** The four-slot moveset per piece id, so a capture can use coverage, not only the declared type. */
+  private readonly movesets: ReadonlyMap<number, Moveset>;
+  /** Live HP per piece id. Absent means full HP (never damaged), so a fresh game stores nothing. */
+  private readonly live: ReadonlyMap<number, LiveState>;
+  /** Status conditions per piece id. Absent means healthy, so a fresh game stores nothing. */
+  private readonly statuses: ReadonlyMap<number, PieceStatus>;
+  private readonly rngState: RngState;
+  private readonly pending: PendingExtraMove | null;
+  readonly history: readonly ResolvedMove[];
+
+  // Explicit field assignment (not TypeScript parameter properties) so the engine runs unchanged under
+  // Node's strip-only TypeScript — which is what lets the server import it and validate moves server-side.
   private constructor(
-    readonly position: Position,
-    readonly loadout: Loadout,
-    readonly rules: VariantRules,
-    /** Battle stats per piece id, computed once — pieces do not change species mid-game (yet). */
-    private readonly stats: ReadonlyMap<number, PieceStats>,
-    /** The four-slot moveset per piece id, so a capture can use coverage, not only the declared type. */
-    private readonly movesets: ReadonlyMap<number, Moveset>,
-    /** Live HP per piece id. Absent means full HP (never damaged), so a fresh game stores nothing. */
-    private readonly live: ReadonlyMap<number, LiveState>,
-    /** Status conditions per piece id. Absent means healthy, so a fresh game stores nothing. */
-    private readonly statuses: ReadonlyMap<number, PieceStatus>,
-    private readonly rngState: RngState,
-    private readonly pending: PendingExtraMove | null,
-    readonly history: readonly ResolvedMove[],
-  ) {}
+    position: Position,
+    loadout: Loadout,
+    rules: VariantRules,
+    stats: ReadonlyMap<number, PieceStats>,
+    movesets: ReadonlyMap<number, Moveset>,
+    live: ReadonlyMap<number, LiveState>,
+    statuses: ReadonlyMap<number, PieceStatus>,
+    rngState: RngState,
+    pending: PendingExtraMove | null,
+    history: readonly ResolvedMove[],
+  ) {
+    this.position = position;
+    this.loadout = loadout;
+    this.rules = rules;
+    this.stats = stats;
+    this.movesets = movesets;
+    this.live = live;
+    this.statuses = statuses;
+    this.rngState = rngState;
+    this.pending = pending;
+    this.history = history;
+  }
 
   static create(options: {
     dex: Dex;

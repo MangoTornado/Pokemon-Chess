@@ -26,9 +26,11 @@ export interface OnlineScreenProps {
   signedIn: boolean;
   onExit: () => void;
   onSignIn: () => void;
+  /** Called when a game ends, so a ranked rating change is pulled back into the profile. */
+  onFinished?: () => void;
 }
 
-export function OnlineScreen({ dex, signedIn, onExit, onSignIn }: OnlineScreenProps) {
+export function OnlineScreen({ dex, signedIn, onExit, onSignIn, onFinished }: OnlineScreenProps) {
   const [room, setRoom] = useState<RoomView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -50,7 +52,15 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn }: OnlineScreenPr
 
   // In a live game once the room is playing (or finished).
   if (room && room.status !== 'waiting' && room.you) {
-    return <OnlineGame dex={dex} initial={room} onExit={() => { setRoom(null); onExit(); }} onBackToLobby={() => setRoom(null)} />;
+    return (
+      <OnlineGame
+        dex={dex}
+        initial={room}
+        onExit={() => { setRoom(null); onExit(); }}
+        onBackToLobby={() => setRoom(null)}
+        {...(onFinished ? { onFinished } : {})}
+      />
+    );
   }
 
   // Waiting for an opponent (matchmaking or a private room whose code we are sharing).
@@ -78,7 +88,7 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn }: OnlineScreenPr
 
       <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
         <button type="button" disabled={busy} onClick={() => act(api.mpQueue)} style={primary}>
-          🔎 Find a match
+          🔎 Find a ranked match
         </button>
         <button type="button" disabled={busy} onClick={() => act(api.mpCreate)} style={ghost}>
           ✚ Create private game
@@ -105,8 +115,8 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn }: OnlineScreenPr
       </form>
 
       <p style={{ color: 'var(--text-dim)', fontSize: '0.78rem', margin: 0 }}>
-        Online matches are casual for now — they do not change your ladder rating. The Gym Challenge is the
-        rated single-player ladder.
+        Matchmaking is <strong style={{ color: 'var(--text)' }}>ranked</strong> — every move is validated on
+        the server, and a win moves your rating. Private games (by code) are friendly and unrated.
       </p>
     </Panel>
   );
@@ -152,18 +162,22 @@ function WaitingRoom({ room, onCancel, onReady }: { room: RoomView; onCancel: ()
 // ---------------------------------------------------------------------------
 
 function OnlineGame({
-  dex, initial, onExit, onBackToLobby,
+  dex, initial, onExit, onBackToLobby, onFinished,
 }: {
   dex: Dex;
   initial: RoomView;
   onExit: () => void;
   onBackToLobby: () => void;
+  onFinished?: () => void;
 }) {
   const [room, setRoom] = useState<RoomView>(initial);
   const setup = useRef(autodraft(dex, initial.seed)).current;
   const reportedOutcome = useRef(false);
+  const finishedNotified = useRef(false);
   const side = room.you!;
   const opponent = side === 'white' ? room.black : room.white;
+  // A private game carries a join code; matchmaking games do not — and only matchmaking is ranked.
+  const ranked = room.code === null;
 
   // Poll for the opponent's moves and status while the game is live.
   useEffect(() => {
@@ -176,6 +190,14 @@ function OnlineGame({
     }, POLL_MS);
     return () => { live = false; clearInterval(timer); };
   }, [room.id, room.status]);
+
+  // When the game ends (mine or the opponent's report/resign), pull the possibly-changed rating back.
+  useEffect(() => {
+    if (room.status === 'over' && !finishedNotified.current) {
+      finishedNotified.current = true;
+      onFinished?.();
+    }
+  }, [room.status, onFinished]);
 
   const onLocalMove = useCallback(
     async (encoded: number, plyBefore: number) => {
@@ -213,8 +235,17 @@ function OnlineGame({
   return (
     <section style={{ display: 'grid', gap: '0.9rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-        <h2 style={{ margin: 0 }}>
-          Online — you are {side === 'white' ? 'White' : 'Black'}{' '}
+        <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <span
+            style={{
+              fontSize: '0.68rem', fontWeight: 800, padding: '0.15rem 0.45rem', borderRadius: 6,
+              background: ranked ? 'var(--accent)' : 'var(--bg-raised)', color: ranked ? '#1a1500' : 'var(--text-dim)',
+              border: ranked ? 'none' : '1px solid var(--border)',
+            }}
+          >
+            {ranked ? 'RANKED' : 'FRIENDLY'}
+          </span>
+          You are {side === 'white' ? 'White' : 'Black'}{' '}
           <span style={{ color: 'var(--text-dim)', fontWeight: 500, fontSize: '0.9rem' }}>vs {opponent ?? 'opponent'}</span>
         </h2>
         <div style={{ display: 'flex', gap: '0.5rem' }}>

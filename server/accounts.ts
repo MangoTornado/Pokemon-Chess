@@ -230,6 +230,33 @@ export class Accounts {
     return rows.map((r) => ({ id: r.id, species: r.species_id, nickname: r.nickname, acquiredAt: r.acquired_at }));
   }
 
+  /**
+   * Settles a rated head-to-head result between two accounts, updating both ratings and game counts.
+   *
+   * Each side's rating moves by the Elo update against the other's current rating; a win is 1, a loss 0,
+   * a draw ½. Used for ranked online games, which are now server-validated (see `gameValidator.ts`), so a
+   * rating can no longer be inflated by a lying client. Badges are untouched — those belong to the Gyms.
+   */
+  recordHeadToHead(whiteId: number, blackId: number, winner: 'white' | 'black' | 'draw'): void {
+    const load = (id: number) =>
+      this.db.raw.prepare('SELECT rating, games FROM profiles WHERE account_id = ?').get(id) as
+        | { rating: number; games: number }
+        | undefined;
+    const w = load(whiteId);
+    const b = load(blackId);
+    if (!w || !b) return;
+
+    const whiteScore: 0 | 0.5 | 1 = winner === 'white' ? 1 : winner === 'draw' ? 0.5 : 0;
+    const blackScore: 0 | 0.5 | 1 = winner === 'black' ? 1 : winner === 'draw' ? 0.5 : 0;
+    const newWhite = updateRating(w.rating, b.rating, whiteScore, kFactorFor(w.games));
+    const newBlack = updateRating(b.rating, w.rating, blackScore, kFactorFor(b.games));
+
+    const stamp = this.now().toISOString();
+    const set = this.db.raw.prepare('UPDATE profiles SET rating = ?, games = ?, updated_at = ? WHERE account_id = ?');
+    set.run(newWhite, w.games + 1, stamp, whiteId);
+    set.run(newBlack, b.games + 1, stamp, blackId);
+  }
+
   /** Grants a species to an account — a post-match reward, a starter pick, or a trade in. */
   grant(accountId: number, species: string): void {
     this.db.raw

@@ -20,8 +20,19 @@ const ROOM_TTL_MS = 30 * 60 * 1000;
 /** How long a player may sit unmatched in the queue before their room is reclaimed. */
 const QUEUE_TTL_MS = 5 * 60 * 1000;
 
+import type { MoveValidator } from './gameValidator.ts';
+
 export type Side = 'white' | 'black';
 export type RoomStatus = 'waiting' | 'playing' | 'over';
+
+/** Fired once when a game ends, so the caller can settle ratings for a ranked (matchmaking) game. */
+export interface EndInfo {
+  readonly whiteId: number;
+  readonly blackId: number;
+  readonly winner: Side | 'draw';
+  /** True for matchmaking games (rated); false for private/friendly games. */
+  readonly ranked: boolean;
+}
 
 export interface RoomPlayer {
   readonly accountId: number;
@@ -41,6 +52,8 @@ interface Room {
   status: RoomStatus;
   /** Set when the game ends: the winning side, or 'draw'. */
   outcome: Side | 'draw' | null;
+  /** Guards the one-time end transition (rating settlement fires exactly once). */
+  ended: boolean;
   createdAt: number;
   lastActivity: number;
 }
@@ -72,10 +85,21 @@ export class Matches {
   private waitingRoomId: string | null = null;
   private readonly now: () => number;
   private readonly makeId: () => string;
+  /** When set, moves are validated against the engine (server-authoritative); else the server relays only. */
+  private readonly validator: MoveValidator | undefined;
+  /** Fired once when a game ends, for rating settlement. */
+  private readonly onEnd: ((info: EndInfo) => void) | undefined;
 
-  constructor(clock: () => number = () => Date.now(), makeId: () => string = defaultId) {
+  constructor(
+    clock: () => number = () => Date.now(),
+    makeId: () => string = defaultId,
+    validator?: MoveValidator,
+    onEnd?: (info: EndInfo) => void,
+  ) {
     this.now = clock;
     this.makeId = makeId;
+    this.validator = validator;
+    this.onEnd = onEnd;
   }
 
   /** Enters the matchmaking queue: joins a waiting opponent, or opens a room and waits. */
@@ -149,13 +173,23 @@ export class Matches {
   move(id: string, accountId: number, ply: number, encoded: number): MatchResult<RoomView> {
     const room = this.rooms.get(id);
     if (!room) return fail('No such game.', 404);
-    if (!this.sideOf(room, accountId)) return fail('You are not a player in this game.', 403);
+    const side = this.sideOf(room, accountId);
+    if (!side) return fail('You are not a player in this game.', 403);
     if (room.status !== 'playing') return fail('This game is not in progress.', 409);
     if (!Number.isInteger(ply) || ply !== room.actions.length) {
       return fail('Out-of-date move; refresh and retry.', 409);
     }
     if (!Number.isInteger(encoded) || encoded < 0 || encoded > 0xffffff) {
       return fail('Malformed move.', 400);
+    }
+    // Server-authoritative check: is this a legal move for this side right now? (Relay-only if no validator.)
+    if (this.validator) {
+      const verdict = this.validator(room.seed, room.actions, encoded, side);
+      if (!verdict.ok) return fail(verdict.error, 409);
+      room.actions.push(encoded);
+      room.lastActivity = this.now();
+      if (verdict.ended) this.finalizeEnd(room, verdict.winner ?? 'draw');
+      return ok(this.view(room, accountId));
     }
     room.actions.push(encoded);
     room.lastActivity = this.now();
@@ -168,9 +202,7 @@ export class Matches {
     if (!room) return fail('No such game.', 404);
     const side = this.sideOf(room, accountId);
     if (!side) return fail('You are not a player in this game.', 403);
-    room.status = 'over';
-    room.outcome = side === 'white' ? 'black' : 'white';
-    room.lastActivity = this.now();
+    this.finalizeEnd(room, side === 'white' ? 'black' : 'white');
     return ok(this.view(room, accountId));
   }
 
@@ -182,12 +214,22 @@ export class Matches {
     const room = this.rooms.get(id);
     if (!room) return fail('No such game.', 404);
     if (!this.sideOf(room, accountId)) return fail('You are not a player in this game.', 403);
-    if (room.status !== 'over') {
-      room.status = 'over';
-      room.outcome = outcome;
-      room.lastActivity = this.now();
-    }
+    // With a validator the server already ends games itself; a client report is then only a harmless
+    // confirmation. Without one, this is how a game ends. Either way it settles exactly once.
+    this.finalizeEnd(room, outcome);
     return ok(this.view(room, accountId));
+  }
+
+  /** Ends a room exactly once, recording the outcome and firing the rating callback for a ranked game. */
+  private finalizeEnd(room: Room, winner: Side | 'draw'): void {
+    if (room.ended) return;
+    room.ended = true;
+    room.status = 'over';
+    room.outcome = winner;
+    room.lastActivity = this.now();
+    if (room.white && room.black && this.onEnd) {
+      this.onEnd({ whiteId: room.white.accountId, blackId: room.black.accountId, winner, ranked: room.matchmaking });
+    }
   }
 
   /** Rooms currently in memory, for a health check. */
@@ -208,6 +250,7 @@ export class Matches {
       actions: [],
       status: 'waiting',
       outcome: null,
+      ended: false,
       createdAt: this.now(),
       lastActivity: this.now(),
     };

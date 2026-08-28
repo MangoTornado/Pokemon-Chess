@@ -25,6 +25,8 @@ export interface Session {
   recordLadderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) => Promise<ApiError | null>;
   /** Claims a reward Pokémon into the collection, updating the signed-in profile's dex count. */
   claimReward: (species: string) => Promise<ApiError | null>;
+  /** Re-fetches the profile from the server (e.g. after a ranked online game changed the rating). */
+  refresh: () => Promise<void>;
 }
 
 export function useSession(): Session {
@@ -90,5 +92,10 @@ export function useSession(): Session {
     return r.error;
   }, []);
 
-  return { profile, register, login, logout, updateProfile, recordLadderResult, claimReward };
+  const refresh: Session['refresh'] = useCallback(async () => {
+    const r = await api.me();
+    if (r.ok) setProfile(r.value.profile);
+  }, []);
+
+  return { profile, register, login, logout, updateProfile, recordLadderResult, claimReward, refresh };
 }

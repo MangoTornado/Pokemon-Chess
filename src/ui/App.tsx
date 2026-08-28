@@ -131,6 +131,7 @@ export function App() {
           signedIn={!!session.profile}
           onExit={() => setScreen({ kind: 'title' })}
           onSignIn={() => setScreen({ kind: 'account' })}
+          onFinished={session.refresh}
         />
       )}
 
