@@ -93,9 +93,12 @@ super-effective hit is usually a one-shot, which is precisely the tempo a ×2 We
 
 **Claim two — 1 797 content entries become board effects by a compiler.** `@pkmn/dex` strips every
 behaviour callback with no marker, so Belly Drum looks inert and Rest looks like it does nothing
-(`recon-data-substrate.md` §2). `@pkmn/sim` keeps the functions *and their source text*: **1 675 handler
-functions, 440 KB of source, 150 distinct handler names** *(measured, three independent scanners agreeing
-to one call site in a thousand)*. Those handlers speak a small mutation API, their names parse under an
+(`recon-data-substrate.md` §2). `@pkmn/sim` keeps the functions *and their source text*: **~1 700 handler
+functions, ~450 KB of source, ~156 distinct handler names** across admitted moves, abilities and items
+*(measured locally; a flat scan of top-level handlers gives 1 319 / 349 KB / 128, and including each
+entry's nested `condition` sub-object — where a move's persistent effects live — gives 1 704 / 450 KB /
+156, which is the figure that matters because those nested handlers carry real behaviour)*. This is a
+whole-dex figure; `recon-data-substrate.md` §3 separately measures the ability handlers alone at 142 KB. Those handlers speak a small mutation API, their names parse under an
 81-row grammar, and their return values and field assignments — **494 handlers, 29.5 % of the surface,
 invisible to any call-site census** — parse under a 14-row grammar. Five compiler passes turn all of it
 into a 20-op instruction set. **1 604 of 1 797 entries derive with zero authoring; the rest are named
@@ -568,8 +571,10 @@ importing `explainDamage`.
 ### 5.3 The forecast, and its cache
 
 Picking up a piece needs a verdict for every reachable target: up to 4 slots × 8 targets × up to 4 blows.
-Affordable — a synthetic 17-step pipeline measures **136 ns per full clash forecast** against 3.9 ns for a
-bare chart lookup *(measured, `recon-tech.md`)* — but the invalidation rule must be stated or it becomes a
+Affordable — a 17-step pipeline is projected at **~136 ns per full clash forecast** against ~4 ns for a
+bare chart lookup *(projected from `recon-tech.md`'s measured per-eval-term costs of 4–496 ns; the clash
+forecast itself does not exist yet, so this is a target, not a measurement)* — but the invalidation rule
+must be stated or it becomes a
 30 ms hover stall.
 
 ```ts
@@ -2876,7 +2881,7 @@ looking good" made into CI, so a regression is a red build rather than a discove
 | **Live canvas particles** | ≤ 240 | — | culls oldest; the FX layer uses `recon-visual.md`'s stricter cap over `recon-tech.md`'s 1 200 ceiling |
 | **Board DOM nodes** | ≤ 250 | 400 | ~129 |
 | **Move-gen, one legal sub-move set** | ≤ 5 µs | 20 µs | **0.194 µs** — 8.5 M legal-nodes/s |
-| **Full clash forecast (17-step pipeline)** | — | — | **136 ns**, against 3.9 ns for a bare chart lookup (§5.3) |
+| **Full clash forecast (17-step pipeline)** | — | — | **~136 ns** projected, against ~4 ns for a bare chart lookup (§5.3) |
 | **Search throughput** | — | — | **7.1 M nodes/s** plain JS, EBF 3.8–4.2; depth 8 @148 ms, depth 9 @601 ms |
 | **Journal make/unmake per node** | — | — | **53 ns** (18.9 M nodes/s), versus 20.8 µs for a deep clone (§19.4) |
 | **Batch-sim throughput** | ≥ 20 games/s per worker at 2 000 nodes/move | — | 25.9; 10 000 games ≈ 6.4 min single-threaded, ≈1 min on 8 workers |

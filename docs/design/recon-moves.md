@@ -73,7 +73,7 @@ I evaluated every key present on a gen-9 `Move` object (`moves-recon-12.mjs`). G
 | `weather` / `pseudoWeather` / `terrain` | 5 / 5 / 4 | board-wide field |
 | `slotCondition` | 4 | delayed/on-arrival effect |
 | `drain` / `recoil` / `heal` | 11 / 9 / 6 | capture-resolution modifiers |
-| `multihit` / `ohko` / `critRatio` / `willCrit` | 22 / 4 / 23 / 4 | capture-resolution modifiers |
+| `multihit` / `ohko` / `critRatio` / `willCrit` | 22 / 4 / 23 / 5 | capture-resolution modifiers |
 | `selfSwitch` / `forceSwitch` | 9 / 4 | displacement |
 | **`condition.duration`** | 55 of 86 | **turn counts, straight from data** |
 | **`callsMove`** | 3 (7 all-gens) | **recursion marker — exactly the dangerous set** |
@@ -551,7 +551,8 @@ the scheduler horizon is provably ≤ 5 turns and the queue is O(pieces), not un
   stacking is a second route to the same bug. Cap total evasion effect at +2.
 - **OHKO moves** (4): they bypass the type-matchup rule *entirely*, which is the game's whole thesis. Their
   1-in-3 reliability (`accuracy` 30) is the bound, but they should also be **draft-restricted** (max 1 per team).
-- **`willCrit` moves** (Flower Trick, Frost Breath, Surging Strikes, Wicked Blow): guaranteed crit ⇒
+- **`willCrit` moves** (Flower Trick, Frost Breath, Storm Throw, Surging Strikes, Wicked Blow — 5, not 4;
+  Storm Throw was missed in an earlier count): guaranteed crit ⇒
   guaranteed extra move under the video's rule 4. **These 4 moves are the crit-chain engine.** Bound:
   a guaranteed-crit move grants the extra move **at most once per turn**, never chains into itself.
 - **Population Bomb** (`multihit: 10`, `multiaccuracy`): 10 capture rolls in one move. Cap displayed/rolled
