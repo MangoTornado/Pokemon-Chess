@@ -22,9 +22,12 @@ import type { Side } from '../engine/variant.ts';
 import { DraftScreen } from './DraftScreen.tsx';
 import { GameBoard } from './GameBoard.tsx';
 import { TutorScreen } from './TutorScreen.tsx';
+import { LadderScreen, LadderMatch } from './LadderScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
 import { AvatarView } from './AvatarView.tsx';
 import { useSession } from './useSession.ts';
+import { useLadder } from '../ladder/store.ts';
+import { GYM_BY_ID } from '../ladder/badges.ts';
 import { TIER_PRESENTATION } from './outcomes.ts';
 import { PIECE_CLASSES } from '../engine/board.ts';
 import { ROLE_GLYPH, ROLE_LABEL, GLYPH_FONT_STACK } from './pieceRoles.ts';
@@ -33,6 +36,8 @@ type Screen =
   | { readonly kind: 'title' }
   | { readonly kind: 'account' }
   | { readonly kind: 'tutorial' }
+  | { readonly kind: 'ladder' }
+  | { readonly kind: 'gym'; readonly gymId: string }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
       readonly kind: 'match';
@@ -51,6 +56,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>({ kind: 'title' });
   const session = useSession();
+  const ladder = useLadder(session);
 
   useEffect(() => {
     Dex.load().then(setDex, (cause: unknown) => setError(String(cause)));
@@ -86,6 +92,23 @@ export function App() {
         <TutorScreen dex={dex} onExit={() => setScreen({ kind: 'title' })} />
       )}
 
+      {screen.kind === 'ladder' && (
+        <LadderScreen
+          ladder={ladder}
+          onChallenge={(gym) => setScreen({ kind: 'gym', gymId: gym.id })}
+          onExit={() => setScreen({ kind: 'title' })}
+        />
+      )}
+
+      {screen.kind === 'gym' && GYM_BY_ID.has(screen.gymId) && (
+        <LadderMatch
+          dex={dex}
+          gym={GYM_BY_ID.get(screen.gymId)!}
+          ladder={ladder}
+          onExit={() => setScreen({ kind: 'ladder' })}
+        />
+      )}
+
       {screen.kind === 'title' && (
         <TitleScreen
           onQuickPlay={(ai) => {
@@ -95,6 +118,7 @@ export function App() {
           }}
           onDraft={(ai) => setScreen({ kind: 'draft', ...(ai ? { ai } : {}) })}
           onTutorial={() => setScreen({ kind: 'tutorial' })}
+          onLadder={() => setScreen({ kind: 'ladder' })}
         />
       )}
 
@@ -171,10 +195,12 @@ function TitleScreen({
   onQuickPlay,
   onDraft,
   onTutorial,
+  onLadder,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onTutorial: () => void;
+  onLadder: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
   const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
@@ -219,6 +245,30 @@ function TitleScreen({
         <span aria-hidden style={{ fontSize: '1.2rem' }}>🎓</span>
         Learn to Play
         <span style={{ fontWeight: 500, fontSize: '0.82rem', opacity: 0.8 }}>— the interactive tutorial</span>
+      </button>
+
+      <button
+        type="button"
+        onClick={onLadder}
+        style={{
+          background: 'var(--bg-raised)',
+          color: 'var(--text)',
+          border: '1px solid var(--border)',
+          borderRadius: 9,
+          padding: '0.6rem 0.9rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          cursor: 'pointer',
+          fontWeight: 700,
+          justifySelf: 'start',
+        }}
+      >
+        <span aria-hidden style={{ fontSize: '1.1rem' }}>🥇</span>
+        Gym Challenge
+        <span style={{ fontWeight: 500, fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+          — beat eight leaders, earn the badges
+        </span>
       </button>
 
       <div style={{ display: 'flex', gap: '0.9rem', flexWrap: 'wrap', alignItems: 'center' }}>

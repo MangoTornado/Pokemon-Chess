@@ -74,4 +74,8 @@ export const api = {
   collection: () => call<{ collection: CollectionEntry[] }>('GET', '/api/collection'),
 
   avatarOptions: () => call<{ trainers: TrainerOption[] }>('GET', '/api/avatar-options'),
+
+  /** Reports a rated match result; the server updates rating and the badge case and returns the profile. */
+  ladderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) =>
+    call<{ profile: PublicProfile }>('POST', '/api/ladder/result', input),
 };

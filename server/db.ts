@@ -25,6 +25,10 @@ export interface ProfileRow {
   avatar: string; // JSON
   badge: string | null;
   rating: number;
+  /** Rated games played, for the provisional K-factor. */
+  games: number;
+  /** JSON array of earned gym badge ids — the badge case (SPEC §17.8). */
+  badges: string; // JSON
   updated_at: string;
 }
 
@@ -58,6 +62,8 @@ export class Db {
         avatar      TEXT NOT NULL,
         badge       TEXT,
         rating      INTEGER NOT NULL DEFAULT 1500,
+        games       INTEGER NOT NULL DEFAULT 0,
+        badges      TEXT NOT NULL DEFAULT '[]',
         updated_at  TEXT NOT NULL
       );
 
@@ -81,6 +87,19 @@ export class Db {
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
     `);
+
+    // Columns added after the first schema shipped: `CREATE TABLE IF NOT EXISTS` will not add them to an
+    // existing database, so add them here if absent. Cheap and idempotent on every boot.
+    this.addColumnIfMissing('profiles', 'games', 'INTEGER NOT NULL DEFAULT 0');
+    this.addColumnIfMissing('profiles', 'badges', "TEXT NOT NULL DEFAULT '[]'");
+  }
+
+  /** Adds a column to a table if it is not already present. */
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const cols = this.raw.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) {
+      this.raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   close(): void {

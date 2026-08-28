@@ -75,11 +75,13 @@ export interface GameBoardProps {
   onResolved?: (resolved: ResolvedMove, next: PokemonChess) => void;
   /** Tutorial hook: fired when the player clicks a refused (immune) square. */
   onDenied?: (square: Square) => void;
+  /** Fired once when the game ends, with the terminal result — the ladder uses it to record a match. */
+  onGameOver?: (result: ReturnType<PokemonChess['result']>) => void;
   /** Hide the leave button (the tutorial owns its own navigation). */
   hideLeave?: boolean;
 }
 
-export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, onDenied, hideLeave }: GameBoardProps) {
+export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, onDenied, onGameOver, hideLeave }: GameBoardProps) {
   const [game, setGame] = useState(() =>
     PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }),
   );
@@ -93,6 +95,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
     setSelected(null);
     setEffects([]);
     setLast(null);
+    reportedOver.current = false;
   }, [dex, setup, seed]);
 
   useEffect(() => {
@@ -107,6 +110,15 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
   }, [game, allow]);
   const result = useMemo(() => game.result(), [game]);
   const over = result.kind !== 'playing';
+
+  // Report the terminal result exactly once, when the game first ends.
+  const reportedOver = useRef(false);
+  useEffect(() => {
+    if (over && !reportedOver.current) {
+      reportedOver.current = true;
+      onGameOver?.(result);
+    }
+  }, [over, result, onGameOver]);
 
   const options = useMemo(() => {
     const map = new Map<Square, VariantMove>();

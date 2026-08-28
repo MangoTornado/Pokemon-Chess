@@ -16,6 +16,8 @@ import {
   validateUsername, validatePassword, validateDisplayName, validateBio, validateStatus,
 } from '../src/profile/profile.ts';
 import type { PublicProfile } from '../src/profile/profile.ts';
+import { updateRating, kFactorFor } from '../src/ladder/rating.ts';
+import { GYM_BY_ID, GYM_LEADERS, highestBadge } from '../src/ladder/badges.ts';
 
 /** Sessions live a fortnight; a returning player is not re-challenged constantly, but a token expires. */
 const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -160,7 +162,20 @@ export class Accounts {
       joinedAt: acc.created_at,
       dexCount: dex.n,
       badge: prof.badge,
+      rating: prof.rating,
+      games: prof.games,
+      badges: this.parseBadges(prof.badges),
     };
+  }
+
+  /** Earned badge ids, tolerant of a malformed value (an old row, a hand-edited DB). */
+  private parseBadges(raw: string): string[] {
+    try {
+      const value = JSON.parse(raw);
+      return Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
   }
 
   /** The public profile for a username, for viewing other players. */
@@ -220,6 +235,46 @@ export class Accounts {
     this.db.raw
       .prepare('INSERT INTO collection (account_id, species_id, acquired_at) VALUES (?, ?, ?)')
       .run(accountId, species, this.now().toISOString());
+  }
+
+  /**
+   * Records a rated match result and updates the account's rating, games count, and badge case.
+   *
+   * The rating maths lives server-side so the number is authoritative — the client reports only the
+   * matchup and outcome, never the delta. A gym badge is awarded only on a win against that gym, and the
+   * visible `badge` chip is always kept as the highest badge earned (SPEC §17.8: a losing streak never
+   * strips an earned badge).
+   */
+  recordLadderResult(
+    accountId: number,
+    input: { opponentRating: unknown; score: unknown; gymId?: unknown },
+  ): Result<PublicProfile> {
+    const prof = this.db.raw.prepare('SELECT * FROM profiles WHERE account_id = ?').get(accountId) as ProfileRow | undefined;
+    if (!prof) return fail('No such profile.');
+
+    const opponentRating = Number(input.opponentRating);
+    const score = input.score;
+    if (!Number.isFinite(opponentRating) || opponentRating < 100 || opponentRating > 4000) {
+      return fail('Invalid opponent rating.');
+    }
+    if (score !== 0 && score !== 0.5 && score !== 1) return fail('Invalid score.');
+
+    const newRating = updateRating(prof.rating, opponentRating, score, kFactorFor(prof.games));
+    const badges = new Set(this.parseBadges(prof.badges));
+
+    // Beating a gym leader earns its badge (idempotent — a rematch does not duplicate it).
+    if (score === 1 && typeof input.gymId === 'string' && GYM_BY_ID.has(input.gymId)) {
+      badges.add(input.gymId);
+    }
+
+    const orderedBadges = GYM_LEADERS.filter((g) => badges.has(g.id)).map((g) => g.id);
+    const highest = highestBadge(badges);
+
+    this.db.raw
+      .prepare('UPDATE profiles SET rating = ?, games = ?, badges = ?, badge = ?, updated_at = ? WHERE account_id = ?')
+      .run(newRating, prof.games + 1, JSON.stringify(orderedBadges), highest?.badge ?? null, this.now().toISOString(), accountId);
+
+    return ok(this.publicProfile(accountId)!);
   }
 }
 

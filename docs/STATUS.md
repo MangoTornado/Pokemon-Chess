@@ -54,7 +54,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Character customization (avatar) | ✅ | `profile/avatar.ts` — games-faithful, shared client/server model. |
 | Collection / Pokédex (individuals) | ◑ | stored; starter grant on register. No acquisition loop (rewards, evolution, trading) yet. |
 | Client UI for accounts/profile | ✅ | `ui/AccountScreen.tsx`, `ui/AvatarCustomizer.tsx`, `ui/useSession.ts`, `net/api.ts` — sign-up, login, profile fields, and the region-grouped trainer customizer, wired to the backend and routed from `App.tsx`. |
-| Ranked ladder + gym badges | ○ | rating column exists on the profile; no matchmaking, no ladder, no Gym Leader matches. |
+| Ranked ladder + gym badges | ◑ | **Single-player ladder shipped.** `src/ladder/` + `ui/LadderScreen.tsx` — eight Kanto Gym Leaders fielding mono-type armies (`game/gymArmy.ts`), gyms unlock in canon order, Elo rating with league tiers, and a badge case a losing streak never strips (§17.8). Local-first, syncing to the account when signed in (`POST /api/ladder/result`, server-authoritative). Missing: human matchmaking (needs the multiplayer tract). |
 | Multiplayer (friends, matchmaking, live games) | ○ | the pure engine makes server-authoritative play possible; none of the netcode is built. |
 | Trading | ○ | not started. |
 
@@ -75,7 +75,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 2. **Execute compiled effects in the Clash** — ◑ **status slice done** (riders, Checkup, movement lock,
    burn penalty, board markers). Remaining: abilities, items, hazards, weather, and the wider ISA op set.
 3. ~~The tutorial~~ — **done.** Twelve lessons, rot-proofed against the engine (§18.1).
-4. **The ladder & Gym Leader matches** — single-player progression spine; needs only the backend that
-   now exists plus the AI that now exists. **Next.**
-5. **Multiplayer** — the largest remaining tract; the netcode, matchmaking, and live-game server.
+4. ~~The ladder & Gym Leader matches~~ — **done** (single-player). Eight gyms, Elo + badges, persisted.
+5. **Multiplayer** — the largest remaining tract; the netcode, matchmaking, and live-game server. Brings
+   human ranked play (Glicko-2) on top of the rating spine that now exists. **Next.**
 6. **Trading, sandbox/batch simulator, richer visuals** — round out the complete game.

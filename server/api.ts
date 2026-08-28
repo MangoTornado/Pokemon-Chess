@@ -77,6 +77,17 @@ export async function handleApi(accounts: Accounts, req: ApiRequest): Promise<Ap
     return json(200, { profile: result.value });
   }
 
+  if (method === 'POST' && path === '/api/ladder/result') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const b = asObject(req.body);
+    const result = accounts.recordLadderResult(accountId, {
+      opponentRating: b.opponentRating, score: b.score, gymId: b.gymId,
+    });
+    if (!result.ok) return json(400, result.error);
+    return json(200, { profile: result.value });
+  }
+
   if (method === 'GET' && path === '/api/collection') {
     const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
     if (accountId === null) return json(401, { error: 'Not signed in.' });

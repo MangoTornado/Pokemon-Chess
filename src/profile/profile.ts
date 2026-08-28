@@ -26,6 +26,12 @@ export interface PublicProfile {
   readonly dexCount: number;
   /** Ladder badge tier, or null if unranked. */
   readonly badge: string | null;
+  /** Ladder rating (Elo). */
+  readonly rating: number;
+  /** Rated games played. */
+  readonly games: number;
+  /** Earned gym badge ids — the badge case (SPEC §17.8). */
+  readonly badges: readonly string[];
 }
 
 /** A validation outcome: the cleaned value, or an error message for the field. */
