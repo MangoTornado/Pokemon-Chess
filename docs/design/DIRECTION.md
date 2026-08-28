@@ -34,6 +34,29 @@ quietly resolve against it.
 
 7. > "make sure there is a tutorial where you can learn the rules to play"
 
+## Resolved forks (owner-decided)
+
+Two identity-defining decisions were put to the owner directly, because the concept, the code, and
+sensible defaults genuinely conflicted and the answer changes what gets built. Both are now settled and
+bind like a verbatim ask:
+
+1. **Capture model: real HP, not binary.** A piece has hit points. A capture is a bounded "Clash" — a
+   short exchange of blows in Speed order, ending when a piece faints or the attacker has swung twice.
+   Chip damage, healing, held items and status all matter. Chosen over the video's binary model because
+   it is the only way the ~200 chip/heal/status moves and items "make sense", which is the headline ask —
+   at the accepted cost of HP on every piece and more for a player to learn. The SPEC's §4/§5 is the
+   ruleset. The video's four outcomes survive as the *classification* of a Clash (ADVANTAGE / CAPTURE /
+   MUTUAL / ROUT / REPEL, plus BLOCKED for a 0× that is never offered), so the concept's soul is intact.
+
+2. **Win condition: king capture, not checkmate.** You win by capturing the enemy king. Checkmate is
+   ill-defined here — whether a piece "attacks" the king depends on type legality and on randomness not
+   yet drawn — and the shipped checkmate code has a real latent bug because `position.isInCheck()` is
+   type-blind. King capture is the standard resolution for RNG/collateral chess variants (Atomic, Fog of
+   War, Dice, Duck). The engine must migrate off checkmate; see SPEC §12.
+
+These supersede the provisional `src/engine/variant.ts` (binary capture + checkmate), which shipped as an
+early playable slice before the SPEC existed.
+
 ## What "fully fledged" means, definitively
 
 Directive 5 is the interpretive key to all the others. The target is **a complete game**, not a clever

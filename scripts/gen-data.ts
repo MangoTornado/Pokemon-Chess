@@ -490,6 +490,7 @@ const species = speciesRaw.map((s) => {
       s.baseStats.spa, s.baseStats.spd, s.baseStats.spe,
     ],
     bst: s.bst,
+    maxHP: raw['maxHP'],
     weightkg: weight,
     abilities: abilityIds,
     hiddenAbilities: hidden,
@@ -532,6 +533,11 @@ check(
 check(
   species.every((s) => (s['weightkg'] as number) > 0),
   'every species has a non-zero weight (Gigantamax fallback applied)',
+);
+const maxHpOverrides = species.filter((s) => s['maxHP'] !== undefined);
+check(
+  maxHpOverrides.length === 1 && maxHpOverrides[0]!['id'] === 'shedinja' && maxHpOverrides[0]!['maxHP'] === 1,
+  'Shedinja is the only maxHP override, at 1 (guards the untouchable-piece problem)',
 );
 
 const megaX = species.find((s) => s['id'] === 'charizardmegax')!;

@@ -48,6 +48,14 @@ export interface SpeciesEntry {
   /** `[hp, atk, def, spa, spd, spe]` */
   baseStats: [number, number, number, number, number, number];
   bst: number;
+  /**
+   * Hard override of computed max HP, present only where the games set one.
+   *
+   * Shedinja is the sole species carrying this, at `1`. It matters because the level-50 HP formula would
+   * otherwise give Shedinja 77 HP, and a 77-HP Wonder Guard piece is the untouchable-piece problem the
+   * literal reading exists to retire (see SPEC §3.4). Absent for everyone else.
+   */
+  maxHP?: number;
   /** Kilograms. Resolved through the base forme for Gigantamax formes, which report 0. */
   weightkg: number;
   /** Ability ids in slot order: normal slots first, then hidden, then special. */

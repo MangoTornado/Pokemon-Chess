@@ -90,6 +90,7 @@
     "every species has at least one battle type",
     "every species has at least one ability",
     "every species has a non-zero weight (Gigantamax fallback applied)",
+    "Shedinja is the only maxHP override, at 1 (guards the untouchable-piece problem)",
     "Charizard-Mega-X inherits a full learnset (129 moves)",
     "Charizard-Mega-X requires Charizardite X",
     "Rotom-Wash unions base Rotom's learnset (68 moves)",
