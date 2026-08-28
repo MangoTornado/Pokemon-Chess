@@ -26,7 +26,9 @@ import type { PieceClass, Side, Square } from '../engine/board.ts';
 import { Rng } from '../engine/rng.ts';
 import { captureOutcome, effectiveness } from '../engine/typechart.ts';
 import type { CaptureOutcome } from '../engine/typechart.ts';
+import { BoardPiece } from './BoardPiece.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
+import { GLYPH_FONT_STACK, ROLE_GLYPH, ROLE_LABEL } from './pieceRoles.ts';
 import { TYPE_COLORS, textColorOn } from './typeColors.ts';
 
 interface DemoPiece {
@@ -236,6 +238,9 @@ export function App() {
                   border: 'none',
                   padding: 0,
                   cursor: piece ? 'pointer' : 'default',
+                  // Lets the piece size itself in `cqmin` against the square, so it scales from a 40px
+                  // mobile square to a 96px desktop one without a media query.
+                  containerType: 'size',
                   background:
                     squareColor(square) === 'light' ? 'var(--square-light)' : 'var(--square-dark)',
                   display: 'grid',
@@ -249,47 +254,57 @@ export function App() {
                 }}
               >
                 {piece && (
-                  <>
-                    {/* A ring rather than a filled disc: at any opacity high enough to identify the
-                        type, a solid fill swallows the sprite and muddies the whole board. */}
-                    <span
-                      aria-hidden
-                      style={{
-                        position: 'absolute',
-                        inset: '9%',
-                        borderRadius: '50%',
-                        background: `${TYPE_COLORS[piece.type]}2e`,
-                        boxShadow: `inset 0 0 0 2.5px ${TYPE_COLORS[piece.type]}`,
-                      }}
-                    />
-                    <span
-                      aria-hidden
-                      style={{
-                        position: 'absolute',
-                        inset: 0,
-                        // Marks which army owns the piece, independently of its type colour.
-                        boxShadow:
-                          piece.side === 'white'
-                            ? 'inset 0 -3px 0 0 rgba(255,255,255,0.85)'
-                            : 'inset 0 3px 0 0 rgba(20,20,25,0.85)',
-                      }}
-                    />
-                    <PokemonIcon
-                      species={piece.species}
-                      scale={1.6}
-                      flipped={piece.side === 'black'}
-                      style={{
-                        position: 'relative',
-                        zIndex: 1,
-                        filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))',
-                      }}
-                    />
-                  </>
+                  <BoardPiece
+                    species={piece.species}
+                    type={piece.type}
+                    cls={piece.cls}
+                    side={piece.side}
+                  />
                 )}
               </button>
             );
           }),
         )}
+      </div>
+
+      {/* Chess roles are what govern legal movement, so a player who does not already know the glyphs
+          needs them named somewhere permanent. */}
+      <div
+        style={{
+          display: 'flex',
+          gap: '1rem',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          color: 'var(--text-dim)',
+          fontSize: '0.85rem',
+        }}
+      >
+        {PIECE_CLASSES.map((cls) => (
+          <span key={cls} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+            <span
+              aria-hidden
+              style={{
+                display: 'grid',
+                placeItems: 'center',
+                width: '1.35rem',
+                height: '1.35rem',
+                borderRadius: '24%',
+                background: '#f6f4ef',
+                color: '#15171c',
+                border: '1px solid #15171c',
+                fontSize: '0.95rem',
+                lineHeight: 1,
+                fontFamily: GLYPH_FONT_STACK,
+                fontVariantEmoji: 'text',
+                paddingBottom: '0.1rem',
+              }}
+            >
+              {ROLE_GLYPH[cls]}
+            </span>
+            {ROLE_LABEL[cls]}
+          </span>
+        ))}
+        <span style={{ opacity: 0.75 }}>· light badge = white army, dark badge = black army</span>
       </div>
 
       <section
@@ -314,7 +329,8 @@ export function App() {
               <strong>{attackerPiece.species.name}</strong>
               <TypeBadge type={attackerPiece.type} />
               <span style={{ color: 'var(--text-dim)' }}>
-                {attackerPiece.side} {attackerPiece.cls} · base stat total{' '}
+                {ROLE_GLYPH[attackerPiece.cls]} {attackerPiece.side}{' '}
+                {ROLE_LABEL[attackerPiece.cls].toLowerCase()} · base stat total{' '}
                 {attackerPiece.species.bst}
               </span>
             </div>
