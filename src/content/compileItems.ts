@@ -64,6 +64,27 @@ export const ITEM_OVERRIDES: Record<string, { effects: Effect[]; summary: string
     effects: [{ trigger: 'CLASH_ROLL', region: 'SELF', ops: [{ op: 'MODIFY', slot: 'final', x: 0.67 }], guards: [{ cond: 'nfe' }] }],
     summary: 'A not-fully-evolved holder takes less damage.',
   },
+  // Caught unfaithful by the faithfulness review (they had descriptive summaries but empty ops).
+  blacksludge: {
+    effects: [
+      { trigger: 'ON_CHECKUP', region: 'SELF', ops: [{ op: 'MEND', frac: [1, 16], of: 'max' }], guards: [{ cond: 'type:Poison' }] },
+      { trigger: 'ON_CHECKUP', region: 'SELF', ops: [{ op: 'STRIKE', frac: [1, 8], of: 'max' }], guards: [{ cond: 'not-type:Poison' }] },
+    ],
+    summary: 'Heals a Poison-type holder each turn, but hurts any other holder.',
+  },
+  assaultvest: {
+    effects: [
+      { trigger: 'CLASH_ROLL', region: 'SELF', ops: [{ op: 'MODIFY', slot: 'spd', x: 1.5 }] },
+      { trigger: 'ON_ACT', region: 'SELF', ops: [{ op: 'VETO', scope: 'rider' }], guards: [{ cond: 'status-move' }] },
+    ],
+    summary: 'Special bulk 1.5x, but the holder cannot use status moves.',
+  },
+  weaknesspolicy: {
+    effects: [
+      { trigger: 'ON_DAMAGED', region: 'SELF', ops: [{ op: 'BOOST', d: { atk: 2, spa: 2 } }, { op: 'EQUIP', item: null, consume: true }], guards: [{ cond: 'super-effective' }] },
+    ],
+    summary: 'When hit super-effectively, sharply raises Attack and Special Attack, then breaks.',
+  },
 };
 
 /** Items that carry a held-item stat boost read straight from the data. */

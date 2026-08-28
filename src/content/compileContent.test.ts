@@ -114,3 +114,57 @@ describe('items — total coverage', () => {
     }
   });
 });
+
+// Regression tests for the thematic errors an adversarial faithfulness review found, so they cannot
+// silently return. Each pins the corrected mapping.
+describe('faithfulness fixes stay fixed', () => {
+  function abilityOps(id: string) {
+    return abilityById.get(id)!.effects.flatMap((e) => e.ops.map((o) => o.op));
+  }
+  function itemOps(id: string) {
+    return itemById.get(id)!.effects.flatMap((e) => e.ops.map((o) => o.op));
+  }
+
+  it('Magic Guard vetoes indirect damage rather than reducing damage', () => {
+    const mg = abilityById.get('magicguard')!;
+    expect(mg.effects[0]!.ops[0]).toMatchObject({ op: 'VETO', scope: 'indirect' });
+    expect(mg.summary.toLowerCase()).not.toContain('reduces damage');
+  });
+
+  it('Disguise is a survive-once clamp, not status immunity', () => {
+    expect(abilityOps('disguise')).toContain('CLAMP');
+  });
+
+  it('Mold Breaker pierces abilities rather than buffing damage', () => {
+    expect(abilityOps('moldbreaker')).toContain('PIERCE');
+  });
+
+  it('Regenerator heals a third on retreat', () => {
+    const r = abilityById.get('regenerator')!;
+    expect(r.effects[0]!.trigger).toBe('ON_EXIT');
+    expect(r.effects[0]!.ops[0]).toMatchObject({ op: 'MEND', frac: [1, 3] });
+  });
+
+  it('Speed Boost raises Speed each turn rather than healing', () => {
+    const sb = abilityById.get('speedboost')!;
+    const boost = sb.effects[0]!.ops.find((o) => o.op === 'BOOST');
+    expect(boost).toMatchObject({ op: 'BOOST', d: { spe: 1 } });
+    expect(abilityOps('speedboost')).not.toContain('MEND');
+  });
+
+  it('Trace and Download act on arrival with the right op', () => {
+    expect(abilityById.get('trace')!.effects[0]!.trigger).toBe('ON_ENTER');
+    expect(abilityOps('trace')).toContain('EQUIP');
+    expect(abilityOps('download')).toContain('BOOST');
+  });
+
+  it('Black Sludge, Assault Vest and Weakness Policy do what their summaries say', () => {
+    // Each previously compiled to empty ops with a descriptive summary — the exact false-summary bug.
+    expect(itemOps('blacksludge').length).toBeGreaterThan(0);
+    expect(itemOps('assaultvest')).toContain('MODIFY');
+    const wp = itemById.get('weaknesspolicy')!;
+    expect(wp.effects[0]!.trigger).toBe('ON_DAMAGED');
+    expect(wp.effects[0]!.guards?.some((g) => g.cond === 'super-effective')).toBe(true);
+    expect(wp.effects[0]!.ops.some((o) => o.op === 'EQUIP' && o.consume)).toBe(true);
+  });
+});

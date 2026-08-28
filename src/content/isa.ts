@@ -111,7 +111,7 @@ export type Op =
   | { readonly op: 'BOOST'; readonly d: Partial<Record<Stat, number>> }
   | { readonly op: 'MEND'; readonly frac: Fraction; readonly of: 'max' | 'cur' } // restore HP
   | { readonly op: 'BECOME'; readonly type?: BattleType | 'target'; readonly forme?: string; readonly cls?: PieceClass }
-  | { readonly op: 'EQUIP'; readonly ability?: string; readonly item?: string | null; readonly consume?: boolean }
+  | { readonly op: 'EQUIP'; readonly ability?: string; readonly item?: string | null; readonly consume?: boolean; readonly learn?: 'last-move' }
   | { readonly op: 'CHARGE'; readonly slot: 0 | 1 | 2 | 3 | 'all'; readonly d: number }
 
   // B. The Clash & damage pipeline — each a distinct point in the damage order of operations.

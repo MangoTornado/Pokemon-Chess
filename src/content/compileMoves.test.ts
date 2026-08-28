@@ -162,10 +162,25 @@ describe('the SPEC §13.7 worked examples, traced end to end', () => {
     expect(move('bellydrum').provenance).toBe('curated');
   });
 
-  it('Explosion — hit every neighbour, then remove yourself', () => {
+  it('Explosion — a real Clash on every neighbour (self-destruct is the Softening exception), then remove yourself', () => {
     const ex = move('explosion');
     expect(ex.effects[0]!.region).toBe('RING1_ALL');
+    // It must CLASH, not merely STRIKE: self-destruct is the one thing that may kill at range, so
+    // Explosion keeps its lethality.
+    expect(opsOf(ex)).toContain('CLASH');
     expect(opsOf(ex)).toContain('REMOVE');
+  });
+
+  it('Sketch — learns a move rather than wiping the held item', () => {
+    const equip = move('sketch').effects[0]!.ops.find((o): o is Extract<Op, { op: 'EQUIP' }> => o.op === 'EQUIP');
+    expect(equip?.learn).toBe('last-move');
+    expect(equip?.item).toBeUndefined();
+  });
+
+  it('Transform — copies the target\'s forme, so "moves" in its summary is real', () => {
+    const become = move('transform').effects[0]!.ops.find((o): o is Extract<Op, { op: 'BECOME' }> => o.op === 'BECOME');
+    expect(become?.type).toBe('target');
+    expect(become?.forme).toBe('target');
   });
 
   it('Substitute — spend HP to place a decoy mark, not a second piece', () => {

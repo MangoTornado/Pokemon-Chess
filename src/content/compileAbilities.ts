@@ -109,6 +109,38 @@ export const ABILITY_OVERRIDES: Record<string, { effects: Effect[]; summary: str
     effects: [{ trigger: 'CLASH_ROLL', region: 'SELF', ops: [{ op: 'MODIFY', slot: 'def', x: 2 }] }],
     summary: 'Doubles physical bulk.',
   },
+  // The following were caught unfaithful by the faithfulness review and are curated to match the games.
+  magicguard: {
+    // Immunity to all indirect damage — hazards, status ticks, recoil — not a damage reduction.
+    effects: [{ trigger: 'ON_CHECKUP', region: 'SELF', ops: [{ op: 'VETO', scope: 'indirect' }] }],
+    summary: 'Takes no damage from anything but a direct attack — hazards, status and recoil cannot hurt it.',
+  },
+  disguise: {
+    // A one-shot ward: the first hit is absorbed. Files with Sturdy/Multiscale, not with status immunity.
+    effects: [{ trigger: 'CLASH_RESULT', region: 'SELF', ops: [{ op: 'CLAMP', to: 1, when: 'pristine' }] }],
+    summary: 'Blocks the first attack that would harm it while at full health.',
+  },
+  moldbreaker: {
+    // Ignores the defender's abilities — it pierces wards rather than hitting harder.
+    effects: [{ trigger: 'CLASH_LEGAL', region: 'SELF', ops: [{ op: 'PIERCE', scope: ['element', 'type', 'absolute'] }] }],
+    summary: 'Its attacks ignore the target\'s ability, so wards like Levitate do not stop it.',
+  },
+  regenerator: {
+    effects: [{ trigger: 'ON_EXIT', region: 'SELF', ops: [{ op: 'MEND', frac: [1, 3], of: 'max' }] }],
+    summary: 'Restores a third of its HP whenever it retreats.',
+  },
+  speedboost: {
+    effects: [{ trigger: 'ON_CHECKUP', region: 'SELF', ops: [{ op: 'BOOST', d: { spe: 1 } }] }],
+    summary: 'Gains a Speed stage at the end of each turn.',
+  },
+  trace: {
+    effects: [{ trigger: 'ON_ENTER', region: 'SELF', ops: [{ op: 'EQUIP', ability: 'copy-foe' }] }],
+    summary: 'On arrival, copies an adjacent enemy\'s ability.',
+  },
+  download: {
+    effects: [{ trigger: 'ON_ENTER', region: 'SELF', ops: [{ op: 'BOOST', d: { atk: 1, spa: 1 } }], guards: [{ cond: 'weaker-foe-defense' }] }],
+    summary: 'On arrival, raises Attack or Special Attack against the enemy\'s weaker defence.',
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -210,9 +242,12 @@ function archetypeFor(handlers: readonly string[]): Archetype | null {
     };
   }
   if (has('onResidual')) {
+    // An end-of-turn ability might heal, damage, boost or cure — the fingerprint cannot tell which, so
+    // the effect stays a neutral end-of-turn hook and the summary does not claim a specific action
+    // (an earlier version assumed healing, which mis-described stat-boosters like Speed Boost).
     return {
-      effect: () => ({ trigger: 'ON_CHECKUP', region: 'SELF', ops: [{ op: 'MEND', frac: [1, 16], of: 'max' }], guards: [{ cond: 'conditional' }] }),
-      summary: 'Acts each end of turn.',
+      effect: () => ({ trigger: 'ON_CHECKUP', region: 'SELF', ops: [] }),
+      summary: 'Has an effect at the end of each turn.',
       provenance: 'handlers',
     };
   }

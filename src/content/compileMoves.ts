@@ -161,8 +161,10 @@ function primaryEffect(move: MoveEntry, region: Region): Effect | null {
   }
 
   // A damaging move. A step-in melee resolves a Clash; a ranged or area hit wounds without a Clash (the
-  // Softening rule — only a Clash removes a piece).
-  if (isStepIn(region)) {
+  // Softening rule — only a Clash removes a piece). A self-destruct move is THE exception to the
+  // Softening rule: it may kill at range, but only by the user dying, so it resolves a real Clash on its
+  // area rather than a softened strike (Explosion must keep its lethality).
+  if (isStepIn(region) || move.selfdestruct) {
     return { trigger: 'ON_ACT', region, ops: [{ op: 'CLASH', slot: 0 }] };
   }
   const bp = move.basePower || DEFAULT_BASE_POWER;
@@ -244,13 +246,17 @@ export const MOVE_OVERRIDES: Record<string, { effects: Effect[]; summary: string
     summary: 'Use a random move you own (never another Metronome), shown before it resolves.',
   },
   transform: {
+    // `forme: 'target'` copies the target's forme — its moveset — alongside its type and ability, so the
+    // summary's "moves" is now backed by an op rather than overclaimed.
     effects: [
-      { trigger: 'ON_ACT', region: 'TARGET', ops: [{ op: 'BECOME', type: 'target' }, { op: 'EQUIP', ability: 'copy-target' }] },
+      { trigger: 'ON_ACT', region: 'TARGET', ops: [{ op: 'BECOME', type: 'target', forme: 'target' }, { op: 'EQUIP', ability: 'copy-target' }] },
     ],
     summary: 'Copy the target\'s type, ability and moves — but keep your own HP and chess role.',
   },
   sketch: {
-    effects: [{ trigger: 'ON_ACT', region: 'SELF', ops: [{ op: 'EQUIP', item: null }] }],
+    // `learn: 'last-move'` is the op that writes a move into a slot; the earlier `item: null` wiped the
+    // held item instead, which is unrelated to what Sketch does.
+    effects: [{ trigger: 'ON_ACT', region: 'SELF', ops: [{ op: 'EQUIP', learn: 'last-move' }] }],
     summary: 'Permanently learn the last move used against you into one of your slots.',
   },
   batonpass: {
