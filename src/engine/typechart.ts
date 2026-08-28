@@ -15,7 +15,7 @@
  * synchronous and side-effect-free is what allows AI search to call it millions of times.
  */
 
-import chart from '../data/generated/typechart.json' with { type: 'json' };
+import chart from '../data/generated/typechart.json';
 import { BATTLE_TYPES } from '../data/schema.ts';
 import type { BattleType, DexType } from '../data/schema.ts';
 

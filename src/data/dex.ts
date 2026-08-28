@@ -17,7 +17,6 @@ import type {
   MoveEntry,
   PieceRoleHint,
   SpeciesEntry,
-  TypeChart,
 } from './schema.ts';
 
 // ---------------------------------------------------------------------------
@@ -30,37 +29,36 @@ function once<T>(load: () => Promise<T>): () => Promise<T> {
 }
 
 export const loadSpecies = once(async (): Promise<SpeciesEntry[]> => {
-  const mod = await import('./generated/species.json', { with: { type: 'json' } });
+  const mod = await import('./generated/species.json');
   return mod.default as unknown as SpeciesEntry[];
 });
 
 export const loadMoves = once(async (): Promise<MoveEntry[]> => {
-  const mod = await import('./generated/moves.json', { with: { type: 'json' } });
+  const mod = await import('./generated/moves.json');
   return mod.default as unknown as MoveEntry[];
 });
 
 export const loadAbilities = once(async (): Promise<AbilityEntry[]> => {
-  const mod = await import('./generated/abilities.json', { with: { type: 'json' } });
+  const mod = await import('./generated/abilities.json');
   return mod.default as unknown as AbilityEntry[];
 });
 
 export const loadItems = once(async (): Promise<ItemEntry[]> => {
-  const mod = await import('./generated/items.json', { with: { type: 'json' } });
+  const mod = await import('./generated/items.json');
   return mod.default as unknown as ItemEntry[];
 });
 
 export const loadLearnsets = once(async (): Promise<LearnsetBundle> => {
-  const mod = await import('./generated/learnsets.json', { with: { type: 'json' } });
+  const mod = await import('./generated/learnsets.json');
   return mod.default as unknown as LearnsetBundle;
 });
 
-export const loadTypeChart = once(async (): Promise<TypeChart> => {
-  const mod = await import('./generated/typechart.json', { with: { type: 'json' } });
-  return mod.default as unknown as TypeChart;
-});
+// The type chart is not lazily loaded: it is about a kilobyte, and `src/engine/typechart.ts` imports it
+// statically so that effectiveness lookups stay synchronous for AI search. Import `TYPE_CHART` from
+// there rather than adding a second, redundant copy to a lazy chunk.
 
 export const loadManifest = once(async (): Promise<DexManifest> => {
-  const mod = await import('./generated/manifest.json', { with: { type: 'json' } });
+  const mod = await import('./generated/manifest.json');
   return mod.default as unknown as DexManifest;
 });
 
