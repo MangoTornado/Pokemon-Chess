@@ -14,6 +14,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { join, normalize, extname } from 'node:path';
 
 import { Accounts } from './accounts.ts';
+import { Matches } from './matches.ts';
 import { handleApi, SESSION_COOKIE } from './api.ts';
 import type { ApiResponse } from './api.ts';
 
@@ -33,6 +34,8 @@ const MIME: Record<string, string> = {
 
 export interface ServerOptions {
   readonly accounts: Accounts;
+  /** The live-match manager for online play. Omit to run without multiplayer. */
+  readonly matches?: Matches;
   /** Directory of the built client (Vite `dist`). Omit to run API-only. */
   readonly staticDir?: string;
   /** Emit `Secure` cookies; set true behind an HTTPS proxy in production. */
@@ -56,7 +59,7 @@ async function handle(options: ServerOptions, req: IncomingMessage, res: ServerR
         path,
         body,
         cookies: parseCookies(req.headers.cookie),
-      });
+      }, options.matches);
       sendApi(res, response, options.secureCookies ?? false);
       return;
     }

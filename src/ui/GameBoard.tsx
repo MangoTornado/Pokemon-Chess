@@ -26,6 +26,7 @@ import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
 import { chooseMove } from '../ai/search.ts';
 import type { Difficulty } from '../ai/search.ts';
+import { replay } from '../game/replay.ts';
 import { BoardPiece } from './BoardPiece.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { TIER_PRESENTATION, VERDICT_PRESENTATION, tierOf, verdictCause } from './outcomes.ts';
@@ -79,10 +80,24 @@ export interface GameBoardProps {
   onGameOver?: (result: ReturnType<PokemonChess['result']>) => void;
   /** Hide the leave button (the tutorial owns its own navigation). */
   hideLeave?: boolean;
+  /**
+   * Online play. When set, the server's action list is the source of truth: the board is derived by
+   * replaying `actions`, the local player controls `side` only, and a legal move is reported through
+   * `onLocalMove` rather than applied locally — the move returns as a new action. The opponent's label is
+   * shown while it is their turn.
+   */
+  controlled?: {
+    side: Side;
+    actions: readonly number[];
+    opponentName: string;
+    onLocalMove: (encoded: number, plyBefore: number) => void;
+  };
 }
 
-export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, onDenied, onGameOver, hideLeave }: GameBoardProps) {
-  const [game, setGame] = useState(() =>
+export function GameBoard({
+  dex, seed, setup, onLeave, ai, allow, onResolved, onDenied, onGameOver, hideLeave, controlled,
+}: GameBoardProps) {
+  const [localGame, setLocalGame] = useState(() =>
     PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }),
   );
   const [selected, setSelected] = useState<Square | null>(null);
@@ -90,12 +105,21 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
   const [last, setLast] = useState<ResolvedMove | null>(null);
   const nonce = useRef(0);
 
+  // In controlled (online) mode the game is a pure replay of the shared action list; in local mode it is
+  // the mutated state above.
+  const controlledView = useMemo(
+    () => (controlled ? replay(dex, setup, seed, controlled.actions) : null),
+    [controlled, dex, setup, seed],
+  );
+  const game = controlled ? controlledView!.game : localGame;
+
   useEffect(() => {
-    setGame(PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }));
+    setLocalGame(PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }));
     setSelected(null);
     setEffects([]);
     setLast(null);
     reportedOver.current = false;
+    appliedPly.current = 0;
   }, [dex, setup, seed]);
 
   useEffect(() => {
@@ -103,6 +127,29 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
     const timer = setTimeout(() => setEffects([]), EFFECT_MS);
     return () => clearTimeout(timer);
   }, [effects]);
+
+  // In controlled mode, animate whichever move most recently landed (mine or the opponent's) as the
+  // action list grows, so an arriving move gets the same capture animation a local move would.
+  const appliedPly = useRef(0);
+  useEffect(() => {
+    if (!controlled) return;
+    const n = controlled.actions.length;
+    if (n > appliedPly.current) {
+      const r = controlledView?.last;
+      if (r) {
+        nonce.current += 1;
+        const marks: SquareEffect[] = [];
+        if (r.defender) {
+          marks.push({ square: r.move.to, kind: effectOf(r.verdict), nonce: nonce.current });
+          if (r.verdict === 'mutual') marks.push({ square: r.move.from, kind: 'mutual', nonce: nonce.current });
+        }
+        setEffects(marks);
+        setLast(r);
+      }
+      setSelected(null);
+    }
+    appliedPly.current = n;
+  }, [controlled, controlledView]);
 
   const legal = useMemo(() => {
     const all = game.legalMoves();
@@ -154,6 +201,13 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
 
   const play = useCallback(
     (option: VariantMove) => {
+      // Online: report the move to the server rather than applying it — it returns as a new action, and the
+      // replay effect above renders and animates it, keeping both clients in lockstep with the server.
+      if (controlled) {
+        controlled.onLocalMove(option.move.encoded, controlled.actions.length);
+        setSelected(null);
+        return;
+      }
       const { game: next, resolved } = game.play(option.move);
       nonce.current += 1;
 
@@ -168,11 +222,11 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
 
       setEffects(marks);
       setLast(resolved);
-      setGame(next);
+      setLocalGame(next);
       setSelected(resolved.grantsBonus ? resolved.move.to : null);
       onResolved?.(resolved, next);
     },
-    [game, onResolved],
+    [game, onResolved, controlled],
   );
 
   const onSquare = useCallback(
@@ -180,6 +234,8 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
       if (over) return;
       // Not the human's turn while the AI is thinking.
       if (ai !== undefined && game.turn === ai.side) return;
+      // Online: only act on your own turn, and never touch the board as a spectator.
+      if (controlled && game.turn !== controlled.side) return;
 
       const option = options.get(square);
       if (option) {
@@ -200,14 +256,14 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
       }
       setSelected(null);
     },
-    [ai, game, denied, movablePieceSquares, options, over, play, onDenied],
+    [ai, game, denied, movablePieceSquares, options, over, play, onDenied, controlled],
   );
 
   // When the AI is on the move, compute and play its move after a short beat — so the human's move
   // renders and its animation is seen first, and so the board never appears frozen while it thinks.
   // A seed derived from the move count keeps the AI's play reproducible for a given game.
   useEffect(() => {
-    if (!ai || over || game.turn !== ai.side) return;
+    if (!ai || controlled || over || game.turn !== ai.side) return;
     const timer = setTimeout(() => {
       const choice = chooseMove(game, ai.difficulty, game.history.length + 1);
       if (!choice) return;
@@ -215,7 +271,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
       if (target) play(target);
     }, effects.length > 0 ? EFFECT_MS + 60 : 220);
     return () => clearTimeout(timer);
-  }, [ai, over, game, effects.length, play]);
+  }, [ai, controlled, over, game, effects.length, play]);
 
   const effectBySquare = useMemo(() => {
     const map = new Map<Square, SquareEffect>();
@@ -223,7 +279,8 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
     return map;
   }, [effects]);
 
-  const humanBlocked = ai !== undefined && game.turn === ai.side && !over;
+  const waitingForOpponent = controlled !== undefined && game.turn !== controlled.side && !over;
+  const humanBlocked = (ai !== undefined && game.turn === ai.side && !over) || waitingForOpponent;
   const pendingExtra = game.extraMovePieceId !== null;
   // R8: warn when the side to move's king can be taken right now.
   const kingInDanger = useMemo(() => game.kingInDanger(game.turn), [game]);
@@ -237,7 +294,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, on
         pendingExtra={pendingExtra}
         kingInDanger={kingInDanger}
         thinking={humanBlocked}
-        aiName={ai?.difficulty.name}
+        aiName={ai?.difficulty.name ?? (waitingForOpponent ? controlled?.opponentName : undefined)}
         onLeave={onLeave}
         hideLeave={hideLeave}
       />

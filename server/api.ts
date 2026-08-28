@@ -10,6 +10,7 @@
  */
 
 import { Accounts } from './accounts.ts';
+import { Matches } from './matches.ts';
 import { TRAINERS } from '../src/profile/avatar.ts';
 
 export interface ApiRequest {
@@ -31,8 +32,49 @@ export const SESSION_COOKIE = 'pc_session';
 const json = (status: number, body: unknown, session?: string | null): ApiResponse =>
   session === undefined ? { status, json: body } : { status, json: body, session };
 
-export async function handleApi(accounts: Accounts, req: ApiRequest): Promise<ApiResponse> {
+export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: Matches): Promise<ApiResponse> {
   const { method, path } = req;
+
+  // ---- Online multiplayer (present only when the server wired a Matches manager) --------------------
+  if (matches && path.startsWith('/api/mp/')) {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Sign in to play online.' });
+    const profile = accounts.publicProfile(accountId);
+    const player = { accountId, name: profile?.displayName ?? 'Player' };
+    const b = asObject(req.body);
+
+    if (method === 'POST' && path === '/api/mp/queue') return mpResult(matches.enqueue(player));
+    if (method === 'POST' && path === '/api/mp/queue/cancel') {
+      matches.cancelQueue(accountId);
+      return json(200, { ok: true });
+    }
+    if (method === 'POST' && path === '/api/mp/create') return mpResult(matches.createPrivate(player));
+    if (method === 'POST' && path === '/api/mp/join') {
+      const code = typeof b.code === 'string' ? b.code.trim() : '';
+      if (!code) return json(400, { error: 'Enter a game code.' });
+      return mpResult(matches.joinByCode(code, player));
+    }
+
+    const gameMatch = /^\/api\/mp\/game\/([A-Za-z0-9]+)(\/move|\/resign|\/outcome)?$/.exec(path);
+    if (gameMatch) {
+      const gameId = gameMatch[1]!;
+      const action = gameMatch[2];
+      if (method === 'GET' && !action) return mpResult(matches.state(gameId, accountId));
+      if (method === 'POST' && action === '/move') {
+        return mpResult(matches.move(gameId, accountId, Number(b.ply), Number(b.encoded)));
+      }
+      if (method === 'POST' && action === '/resign') return mpResult(matches.resign(gameId, accountId));
+      if (method === 'POST' && action === '/outcome') {
+        const outcome = b.outcome;
+        if (outcome !== 'white' && outcome !== 'black' && outcome !== 'draw') {
+          return json(400, { error: 'Invalid outcome.' });
+        }
+        return mpResult(matches.reportOutcome(gameId, accountId, outcome));
+      }
+    }
+    return json(404, { error: 'Not found.' });
+  }
+
 
   // Public: the trainer roster, so the client's picker shows the exact set the server accepts.
   if (method === 'GET' && path === '/api/avatar-options') {
@@ -107,4 +149,9 @@ export async function handleApi(accounts: Accounts, req: ApiRequest): Promise<Ap
 
 function asObject(body: unknown): Record<string, unknown> {
   return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+}
+
+/** Maps a Matches result to an API response — the room view on success, its status/error otherwise. */
+function mpResult(result: import('./matches.ts').MatchResult<import('./matches.ts').RoomView>): ApiResponse {
+  return result.ok ? json(200, { game: result.value }) : json(result.status, { error: result.error });
 }

@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 
 import { Db } from './db.ts';
 import { Accounts } from './accounts.ts';
+import { Matches } from './matches.ts';
 import { createServer } from './server.ts';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -26,7 +27,8 @@ mkdirSync(dirname(DB_PATH), { recursive: true });
 
 const db = new Db(DB_PATH);
 const accounts = new Accounts(db);
-const server = createServer({ accounts, staticDir: STATIC_DIR, secureCookies: PRODUCTION });
+const matches = new Matches();
+const server = createServer({ accounts, matches, staticDir: STATIC_DIR, secureCookies: PRODUCTION });
 
 server.listen(PORT, () => {
   console.log(`Pokémon Chess server on http://localhost:${PORT}  (db: ${DB_PATH}, static: ${STATIC_DIR})`);

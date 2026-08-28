@@ -54,6 +54,20 @@ export interface CollectionEntry {
   readonly acquiredAt: string;
 }
 
+/** A live online match's state, mirroring the server's `RoomView`. */
+export interface RoomView {
+  readonly id: string;
+  readonly code: string | null;
+  readonly seed: string;
+  readonly status: 'waiting' | 'playing' | 'over';
+  readonly white: string | null;
+  readonly black: string | null;
+  readonly actions: readonly number[];
+  readonly outcome: 'white' | 'black' | 'draw' | null;
+  /** The requesting player's side, or null if only watching. */
+  readonly you: 'white' | 'black' | null;
+}
+
 export const api = {
   register: (input: { username: string; password: string; displayName?: string; avatar?: Avatar }) =>
     call<{ profile: PublicProfile }>('POST', '/api/register', input),
@@ -78,4 +92,16 @@ export const api = {
   /** Reports a rated match result; the server updates rating and the badge case and returns the profile. */
   ladderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) =>
     call<{ profile: PublicProfile }>('POST', '/api/ladder/result', input),
+
+  // --- Online multiplayer ---
+  mpQueue: () => call<{ game: RoomView }>('POST', '/api/mp/queue'),
+  mpCancelQueue: () => call<{ ok: true }>('POST', '/api/mp/queue/cancel'),
+  mpCreate: () => call<{ game: RoomView }>('POST', '/api/mp/create'),
+  mpJoin: (code: string) => call<{ game: RoomView }>('POST', '/api/mp/join', { code }),
+  mpState: (id: string) => call<{ game: RoomView }>('GET', `/api/mp/game/${encodeURIComponent(id)}`),
+  mpMove: (id: string, ply: number, encoded: number) =>
+    call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/move`, { ply, encoded }),
+  mpResign: (id: string) => call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/resign`),
+  mpOutcome: (id: string, outcome: 'white' | 'black' | 'draw') =>
+    call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/outcome`, { outcome }),
 };

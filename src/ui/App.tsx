@@ -23,6 +23,7 @@ import { DraftScreen } from './DraftScreen.tsx';
 import { GameBoard } from './GameBoard.tsx';
 import { TutorScreen } from './TutorScreen.tsx';
 import { LadderScreen, LadderMatch } from './LadderScreen.tsx';
+import { OnlineScreen } from './OnlineScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
 import { AvatarView } from './AvatarView.tsx';
 import { useSession } from './useSession.ts';
@@ -37,6 +38,7 @@ type Screen =
   | { readonly kind: 'account' }
   | { readonly kind: 'tutorial' }
   | { readonly kind: 'ladder' }
+  | { readonly kind: 'online' }
   | { readonly kind: 'gym'; readonly gymId: string }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
@@ -109,6 +111,15 @@ export function App() {
         />
       )}
 
+      {screen.kind === 'online' && (
+        <OnlineScreen
+          dex={dex}
+          signedIn={!!session.profile}
+          onExit={() => setScreen({ kind: 'title' })}
+          onSignIn={() => setScreen({ kind: 'account' })}
+        />
+      )}
+
       {screen.kind === 'title' && (
         <TitleScreen
           onQuickPlay={(ai) => {
@@ -119,6 +130,7 @@ export function App() {
           onDraft={(ai) => setScreen({ kind: 'draft', ...(ai ? { ai } : {}) })}
           onTutorial={() => setScreen({ kind: 'tutorial' })}
           onLadder={() => setScreen({ kind: 'ladder' })}
+          onOnline={() => setScreen({ kind: 'online' })}
         />
       )}
 
@@ -196,11 +208,13 @@ function TitleScreen({
   onDraft,
   onTutorial,
   onLadder,
+  onOnline,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onTutorial: () => void;
   onLadder: () => void;
+  onOnline: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
   const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
@@ -268,6 +282,30 @@ function TitleScreen({
         Gym Challenge
         <span style={{ fontWeight: 500, fontSize: '0.82rem', color: 'var(--text-dim)' }}>
           — beat eight leaders, earn the badges
+        </span>
+      </button>
+
+      <button
+        type="button"
+        onClick={onOnline}
+        style={{
+          background: 'var(--bg-raised)',
+          color: 'var(--text)',
+          border: '1px solid var(--border)',
+          borderRadius: 9,
+          padding: '0.6rem 0.9rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          cursor: 'pointer',
+          fontWeight: 700,
+          justifySelf: 'start',
+        }}
+      >
+        <span aria-hidden style={{ fontSize: '1.1rem' }}>🌐</span>
+        Play Online
+        <span style={{ fontWeight: 500, fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+          — matchmaking or a private game with a friend
         </span>
       </button>
 
