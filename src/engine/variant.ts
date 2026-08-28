@@ -362,6 +362,19 @@ export class PokemonChess {
     return this.position.allPieces().every(({ piece }) => !(piece.side === side && piece.cls === 'king'));
   }
 
+  /**
+   * Applies a move at a fixed roll without advancing the game's RNG — for AI search.
+   *
+   * `play` draws the Clash luck from the shared RNG stream and consumes it, which is correct for an
+   * actual move but wrong for a search node, where each branch must be evaluated independently and the
+   * stream must not move. This resolves the move at a caller-supplied roll (default representative:
+   * hits, no crit, momentum 92, the band's midpoint), so the search sees a stable expected line. The
+   * resulting game carries the same RNG state it started with.
+   */
+  simulate(move: Move, roll: ClashRoll = { hits: true, crit: false, momentum: 92 }): PokemonChess {
+    return this.applyResolved(move, roll, this.rngState).game;
+  }
+
   // -------------------------------------------------------------------------
   // Clash setup and resolution
   // -------------------------------------------------------------------------
@@ -662,5 +675,6 @@ export class PokemonChess {
   }
 }
 
-// Re-exported so the UI keeps importing species-typed helpers from one place.
+// Re-exported so consumers can import the common types from the game layer they already use.
 export type { SpeciesEntry };
+export type { Side } from './board.ts';
