@@ -21,6 +21,7 @@ import type { Difficulty } from '../ai/search.ts';
 import type { Side } from '../engine/variant.ts';
 import { DraftScreen } from './DraftScreen.tsx';
 import { GameBoard } from './GameBoard.tsx';
+import { TutorScreen } from './TutorScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
 import { AvatarView } from './AvatarView.tsx';
 import { useSession } from './useSession.ts';
@@ -31,6 +32,7 @@ import { ROLE_GLYPH, ROLE_LABEL, GLYPH_FONT_STACK } from './pieceRoles.ts';
 type Screen =
   | { readonly kind: 'title' }
   | { readonly kind: 'account' }
+  | { readonly kind: 'tutorial' }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
       readonly kind: 'match';
@@ -80,6 +82,10 @@ export function App() {
         <AccountScreen session={session} onClose={() => setScreen({ kind: 'title' })} />
       )}
 
+      {screen.kind === 'tutorial' && (
+        <TutorScreen dex={dex} onExit={() => setScreen({ kind: 'title' })} />
+      )}
+
       {screen.kind === 'title' && (
         <TitleScreen
           onQuickPlay={(ai) => {
@@ -88,6 +94,7 @@ export function App() {
             setScreen({ kind: 'match', seed, setup: { position: drafted.position, loadout: drafted.loadout }, ...(ai ? { ai } : {}) });
           }}
           onDraft={(ai) => setScreen({ kind: 'draft', ...(ai ? { ai } : {}) })}
+          onTutorial={() => setScreen({ kind: 'tutorial' })}
         />
       )}
 
@@ -163,9 +170,11 @@ const DIFFICULTY_ORDER = ['rookie', 'trainer', 'ace', 'champion'] as const;
 function TitleScreen({
   onQuickPlay,
   onDraft,
+  onTutorial,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
+  onTutorial: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
   const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
@@ -184,10 +193,33 @@ function TitleScreen({
       }}
     >
       <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.92rem' }}>
-        <strong style={{ color: 'var(--text)' }}>New here?</strong> Try Quick Play — both armies are
-        drafted for you, so you can see the four capture outcomes without picking a team first. When
-        you're ready to choose your own Pokémon, use Draft.
+        <strong style={{ color: 'var(--text)' }}>New here?</strong> Start with Learn to Play — it teaches
+        the rules by having you cause each outcome yourself. Or jump into Quick Play with two drafted
+        armies, and choose your own team later with Draft.
       </p>
+
+      <button
+        type="button"
+        onClick={onTutorial}
+        style={{
+          background: 'linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #fff))',
+          color: '#1a1500',
+          border: 'none',
+          borderRadius: 9,
+          padding: '0.75rem 1rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          cursor: 'pointer',
+          fontWeight: 800,
+          fontSize: '1rem',
+          justifySelf: 'start',
+        }}
+      >
+        <span aria-hidden style={{ fontSize: '1.2rem' }}>🎓</span>
+        Learn to Play
+        <span style={{ fontWeight: 500, fontSize: '0.82rem', opacity: 0.8 }}>— the interactive tutorial</span>
+      </button>
 
       <div style={{ display: 'flex', gap: '0.9rem', flexWrap: 'wrap', alignItems: 'center' }}>
         <Segmented

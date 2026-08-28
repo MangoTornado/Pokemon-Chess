@@ -66,9 +66,20 @@ export interface GameBoardProps {
   onLeave: () => void;
   /** When set, the AI controls this side and plays automatically on its turn. */
   ai?: { side: Side; difficulty: Difficulty };
+  /**
+   * Tutorial hook: restrict the offered actions to those passing this predicate. Denials are unaffected,
+   * so an immune target still shows its refusal — which is how the "untouchable" lesson works.
+   */
+  allow?: (move: VariantMove) => boolean;
+  /** Tutorial hook: fired after every resolved move, with the resulting game, for goal detection. */
+  onResolved?: (resolved: ResolvedMove, next: PokemonChess) => void;
+  /** Tutorial hook: fired when the player clicks a refused (immune) square. */
+  onDenied?: (square: Square) => void;
+  /** Hide the leave button (the tutorial owns its own navigation). */
+  hideLeave?: boolean;
 }
 
-export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
+export function GameBoard({ dex, seed, setup, onLeave, ai, allow, onResolved, onDenied, hideLeave }: GameBoardProps) {
   const [game, setGame] = useState(() =>
     PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }),
   );
@@ -90,7 +101,10 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
     return () => clearTimeout(timer);
   }, [effects]);
 
-  const legal = useMemo(() => game.legalMoves(), [game]);
+  const legal = useMemo(() => {
+    const all = game.legalMoves();
+    return allow ? all.filter(allow) : all;
+  }, [game, allow]);
   const result = useMemo(() => game.result(), [game]);
   const over = result.kind !== 'playing';
 
@@ -144,8 +158,9 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
       setLast(resolved);
       setGame(next);
       setSelected(resolved.grantsBonus ? resolved.move.to : null);
+      onResolved?.(resolved, next);
     },
-    [game],
+    [game, onResolved],
   );
 
   const onSquare = useCallback(
@@ -163,6 +178,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
       if (denied.has(square)) {
         nonce.current += 1;
         setEffects([{ square, kind: 'denied', nonce: nonce.current }]);
+        onDenied?.(square);
         return;
       }
 
@@ -172,7 +188,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
       }
       setSelected(null);
     },
-    [ai, game, denied, movablePieceSquares, options, over, play],
+    [ai, game, denied, movablePieceSquares, options, over, play, onDenied],
   );
 
   // When the AI is on the move, compute and play its move after a short beat — so the human's move
@@ -211,6 +227,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
         thinking={humanBlocked}
         aiName={ai?.difficulty.name}
         onLeave={onLeave}
+        hideLeave={hideLeave}
       />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 268px', gap: '1rem', alignItems: 'start' }}>
@@ -355,6 +372,7 @@ function StatusBar({
   thinking,
   aiName,
   onLeave,
+  hideLeave,
 }: {
   game: PokemonChess;
   result: ReturnType<PokemonChess['result']>;
@@ -363,6 +381,7 @@ function StatusBar({
   thinking: boolean;
   aiName: string | undefined;
   onLeave: () => void;
+  hideLeave?: boolean | undefined;
 }) {
   const turnColor = game.turn === 'white' ? '#f6f4ef' : '#15171c';
   return (
@@ -428,21 +447,23 @@ function StatusBar({
       )}
       <span style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
         <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem' }}>move {game.position.fullmoveNumber}</span>
-        <button
-          type="button"
-          onClick={onLeave}
-          style={{
-            background: 'var(--accent)',
-            color: '#1a1500',
-            border: 'none',
-            borderRadius: 6,
-            padding: '0.35rem 0.8rem',
-            fontWeight: 700,
-            cursor: 'pointer',
-          }}
-        >
-          Leave match
-        </button>
+        {!hideLeave && (
+          <button
+            type="button"
+            onClick={onLeave}
+            style={{
+              background: 'var(--accent)',
+              color: '#1a1500',
+              border: 'none',
+              borderRadius: 6,
+              padding: '0.35rem 0.8rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            Leave match
+          </button>
+        )}
       </span>
     </div>
   );

@@ -66,7 +66,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Capture-outcome animations | ✅ | five distinct motions, reduced-motion path. |
 | HP bars, forecast preview, refusal affordance | ✅ | on the board. |
 | Effect animations for moves/abilities/items | ○ | depend on effects executing in the Clash first. |
-| **Tutorial** (DIRECTION directive 7) | ○ | designed in SPEC §18; not built. Required, and high priority — three stacked rulesets. |
+| **Tutorial** (DIRECTION directive 7) | ✅ | `src/tutor/` + `ui/TutorScreen.tsx` — a lesson is a real game on a hand-built position, not a script (§18.1). Twelve lessons across the two branch tracks (movement, type chart) and the shared spine: the four capture outcomes each caused by the player, the untouchable-piece refusal, the miss and crit reveals, a status lesson, and king capture. `lessons.test.ts` proves every goal reachable and every beat producible against the live engine — a rotted lesson fails CI. |
 | Sandbox / batch simulator | ○ | designed in BRIEF-METAGAME §19; not built. It is how balance gets *measured*. |
 
 ## Suggested order from here
@@ -74,8 +74,8 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 1. ~~Client account/profile UI~~ — **done.** Sign-up, login, profile, and the trainer customizer ship.
 2. **Execute compiled effects in the Clash** — ◑ **status slice done** (riders, Checkup, movement lock,
    burn penalty, board markers). Remaining: abilities, items, hazards, weather, and the wider ISA op set.
-3. **The tutorial** — required (DIRECTION directive 7); data over the systems that now run. **Next.**
+3. ~~The tutorial~~ — **done.** Twelve lessons, rot-proofed against the engine (§18.1).
 4. **The ladder & Gym Leader matches** — single-player progression spine; needs only the backend that
-   now exists plus the AI that now exists.
+   now exists plus the AI that now exists. **Next.**
 5. **Multiplayer** — the largest remaining tract; the netcode, matchmaking, and live-game server.
 6. **Trading, sandbox/batch simulator, richer visuals** — round out the complete game.
