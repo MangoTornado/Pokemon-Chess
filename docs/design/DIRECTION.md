@@ -32,6 +32,8 @@ quietly resolve against it.
    > well as do friendly battles, there should also be a ranking system tied to a ranked mode, with ranks
    > maybe related to typical badges earned in a pokemon game, I think that is a good addition"
 
+7. > "make sure there is a tutorial where you can learn the rules to play"
+
 ## What "fully fledged" means, definitively
 
 Directive 5 is the interpretive key to all the others. The target is **a complete game**, not a clever
@@ -46,7 +48,7 @@ Concretely, the finished thing has all of these, each designed rather than bolte
 | **The sandbox** | Free play and playtesting, plus batch simulation that *tests* the balance claims. |
 | **The presentation** | Distinct animations per outcome, coherent art direction, effects with real identity. |
 | **The opponent** | An AI that plays the variant properly and misjudges *types* at lower difficulties. |
-| **The onboarding** | A chess player and a Pokémon player can each learn this without a manual. |
+| **The onboarding** | An interactive tutorial that teaches all three stacked rulesets by playing them. |
 | **Multiplayer** | Friends, matchmaking against strangers, friendly games, and a ranked ladder. |
 
 "Many cool mechanics" is an explicit instruction to be generous with depth. When in doubt, add the
@@ -146,6 +148,47 @@ Note the constraint discovered while measuring assets: animated sprites exist fo
 (Miraidon and Pecharunt have none and fall back to stills). Animation quality must therefore come from
 *effects we draw*, not from assuming animated source art. See
 [`recon-data-substrate.md`](./recon-data-substrate.md) §6.
+
+### There must be a tutorial that teaches the rules by playing them
+
+Directive 7 makes this a required, shipped feature, not a help page. It is also the single most important
+thing for the game's survival: **this game has three rulesets stacked on each other** — chess, the type
+chart, and the variant on top — and no player arrives knowing all three.
+
+Requirements:
+
+1. **Interactive, never a wall of text.** Each step is a small position the player actually plays. Text
+   explains what just happened; it does not precede it. A rule the player has *executed* is learned; a
+   rule they have *read* is not.
+2. **Teach each of the four capture outcomes by making the player cause it.** They must personally land a
+   super-effective capture and take the free extra move, watch a not-very-effective capture destroy their
+   own piece, take an ordinary neutral capture, and be *refused* a 0× capture. That refusal is the most
+   important single moment in the tutorial, because untouchability is the concept's most surprising
+   consequence and the one that will otherwise read as a bug.
+3. **Teach the die.** The player must see a miss destroy their winning attack and a critical hit rescue a
+   losing one, so that variance registers as a designed mechanic rather than as the game cheating.
+4. **Serve both directions of ignorance.** A chess player needs the type chart; a Pokémon player may need
+   how a knight moves. Branch on what the player says they know, and make neither branch feel remedial.
+5. **Do not attempt to teach 324 type interactions.** Teach the heuristics people already half-know (Water
+   beats Fire, Fire beats Grass, nothing hits Ghost with Normal), then rely on the interface to show
+   effectiveness *before* the player commits. The tutorial's job is to teach that type matters and where
+   to look, not to make the player memorise a table.
+6. **Explain refusals in place, permanently.** Outside the tutorial too, when a capture is unavailable
+   because of a 0× matchup, the interface must say so on the spot. "Why can't I take that?" is the question
+   that makes people quit, and it has a precise answer the game always knows.
+7. **Contextual first-time hints in real games**, shown once each, for every mechanic the tutorial covered:
+   the first mutual destruction, the first extra move, the first hazard, the first status. Skippable and
+   permanently dismissible.
+8. **Skippable, replayable, and never nagging.** Track completion. A returning player must be able to
+   revisit any individual lesson without replaying the whole thing.
+9. **Extend to the meta-game.** Drafting is its own skill and needs its own teaching — how to read a
+   matchup, why a dual-typed species is a real choice, what makes an army coherent rather than a pile of
+   favourites. Cover the collection and ladder too, at the point the player first meets them.
+10. **A practice mode with no stakes**, distinct from the sandbox: guided positions and puzzles
+    ("win this in one move using a type advantage"), which is also the cheapest way to build type fluency.
+
+Treat the tutorial as a design surface with the same standards as the match: if the tutorial is dull, the
+game is dull, because it is the first thing anyone plays.
 
 ### "Very functional" means shipped, not sketched
 
