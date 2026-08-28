@@ -1,0 +1,104 @@
+{
+  "generatedBy": "scripts/gen-data.ts",
+  "sources": {
+    "@pkmn/dex": "^0.10.11",
+    "@pkmn/data": "^0.10.11",
+    "@pkmn/sim": "^0.10.11"
+  },
+  "inclusionPolicy": {
+    "species": [
+      "null",
+      "Past",
+      "LGPE"
+    ],
+    "moves": [
+      "null",
+      "Past",
+      "LGPE",
+      "Unobtainable",
+      "Gigantamax"
+    ],
+    "abilities": [
+      "null",
+      "Past"
+    ],
+    "items": [
+      "null",
+      "Past",
+      "Unobtainable"
+    ]
+  },
+  "counts": {
+    "speciesFormes": 1367,
+    "speciesDexNumbers": 1025,
+    "speciesBaseFormes": 1025,
+    "moves": 950,
+    "abilities": 311,
+    "items": 536,
+    "types": 19,
+    "battleTypes": 18,
+    "learnsetMinMoves": 1,
+    "learnsetMedianMoves": 78,
+    "learnsetMaxMoves": 375
+  },
+  "signalClasses": {
+    "moves": {
+      "plain-damage": 144,
+      "fields": 474,
+      "handlers": 238,
+      "fields+handlers": 93,
+      "inert": 1
+    },
+    "abilities": {
+      "inert": 8,
+      "handlers": 191,
+      "fields": 6,
+      "fields+handlers": 106
+    },
+    "items": {
+      "fields+handlers": 134,
+      "inert": 202,
+      "handlers": 145,
+      "fields": 55
+    }
+  },
+  "sprites": {
+    "iconSheetUrl": "https://play.pokemonshowdown.com/sprites/pokemonicons-sheet.png",
+    "iconWidth": 40,
+    "iconHeight": 30,
+    "portraitUrlTemplate": "https://play.pokemonshowdown.com/sprites/gen5/{id}.png"
+  },
+  "checks": [
+    "Ground → Flying is 0× (capture forbidden)",
+    "Normal → Ghost is 0×",
+    "Fire → Steel is 2×",
+    "Electric → Ground is 0×",
+    "Water → Fire is 2×",
+    "Fighting → Ghost is 0×",
+    "every battle type has a complete row",
+    "move count 950 is in the expected range",
+    "Rest is present",
+    "Rest carries a handler fingerprint (proves @pkmn/sim was actually consulted)",
+    "Tackle classifies as plain-damage",
+    "Spikes retains its sideCondition field",
+    "ability count 311 is in the expected range",
+    "Rough Skin fingerprints as onDamagingHit",
+    "item count 536 is in the expected range",
+    "Charizardite X retains its megaStone mapping",
+    "exactly 1025 distinct dex numbers present (got 1025)",
+    "exactly 1025 base formes present (got 1025)",
+    "every species has at least one battle type",
+    "every species has at least one ability",
+    "every species has a non-zero weight (Gigantamax fallback applied)",
+    "Charizard-Mega-X inherits a full learnset (129 moves)",
+    "Charizard-Mega-X requires Charizardite X",
+    "Rotom-Wash unions base Rotom's learnset (68 moves)",
+    "Landorus-Therian inherits a learnset (79 moves)",
+    "every species resolves to a non-empty learnset",
+    "no species references a missing ability (0 dangling)",
+    "no species references a missing item (0 dangling)",
+    "every baseSpecies reference resolves inside the bundle",
+    "every species resolves to a real spritesheet icon (0 fell back)",
+    "icon offsets are distinct per forme rather than collapsing onto one slot"
+  ]
+}
