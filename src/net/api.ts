@@ -11,8 +11,7 @@
  */
 
 import type { PublicProfile } from '../profile/profile.ts';
-import type { Avatar } from '../profile/avatar.ts';
-import type { AvatarSlot } from '../profile/avatar.ts';
+import type { Avatar, TrainerOption } from '../profile/avatar.ts';
 
 export interface ApiError {
   readonly error: string;
@@ -74,5 +73,5 @@ export const api = {
 
   collection: () => call<{ collection: CollectionEntry[] }>('GET', '/api/collection'),
 
-  avatarOptions: () => call<{ slots: AvatarSlot[] }>('GET', '/api/avatar-options'),
+  avatarOptions: () => call<{ trainers: TrainerOption[] }>('GET', '/api/avatar-options'),
 };

@@ -1,13 +1,13 @@
 /**
- * The character customizer — pick an option per slot and watch the trainer redraw.
+ * The trainer picker — choose your character from the games' protagonists and champions.
  *
- * The live {@link AvatarView} is the anchor: every change is reflected there instantly, which is the
- * whole appeal of customization. Options come from the shared `AVATAR_SLOTS` (the same closed set the
- * server validates against), so the swatches a player sees are exactly the values the server will accept.
+ * A gallery grouped by region, with a large live preview of the chosen trainer. The roster is the shared
+ * `TRAINERS` allowlist — the same set the server validates against — so any trainer shown is one a profile
+ * may actually store.
  */
 
-import { AVATAR_SLOTS } from '../profile/avatar.ts';
-import type { Avatar, AvatarSlotKey } from '../profile/avatar.ts';
+import { TRAINERS, trainerLabel, trainerSpriteUrl } from '../profile/avatar.ts';
+import type { Avatar, TrainerOption } from '../profile/avatar.ts';
 import { AvatarView } from './AvatarView.tsx';
 
 export interface AvatarCustomizerProps {
@@ -16,62 +16,57 @@ export interface AvatarCustomizerProps {
 }
 
 export function AvatarCustomizer({ avatar, onChange }: AvatarCustomizerProps) {
-  const set = (key: AvatarSlotKey, id: string) => onChange({ ...avatar, [key]: id });
+  const groups = [...new Set(TRAINERS.map((t) => t.group))];
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: '1.25rem', alignItems: 'start' }}>
       <div style={{ position: 'sticky', top: '1rem', display: 'grid', gap: '0.5rem', justifyItems: 'center' }}>
         <AvatarView avatar={avatar} size={168} framed />
+        <strong style={{ fontSize: '0.95rem' }}>{trainerLabel(avatar.trainer)}</strong>
         <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>Your trainer</span>
       </div>
 
-      <div style={{ display: 'grid', gap: '0.85rem' }}>
-        {AVATAR_SLOTS.map((slot) => (
-          <div key={slot.key} style={{ display: 'grid', gap: '0.35rem' }}>
+      <div style={{ display: 'grid', gap: '0.9rem' }}>
+        {groups.map((group) => (
+          <div key={group} style={{ display: 'grid', gap: '0.4rem' }}>
             <span style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-dim)' }}>
-              {slot.label}
+              {group}
             </span>
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-              {slot.options.map((opt) => {
-                const selected = avatar[slot.key] === opt.id;
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => set(slot.key, opt.id)}
-                    title={opt.label}
-                    aria-pressed={selected}
-                    style={
-                      opt.color
-                        ? {
-                            width: 30,
-                            height: 30,
-                            borderRadius: '50%',
-                            background: opt.color,
-                            border: selected ? '3px solid #58a6ff' : '2px solid var(--border)',
-                            cursor: 'pointer',
-                            padding: 0,
-                          }
-                        : {
-                            padding: '0.3rem 0.7rem',
-                            borderRadius: 999,
-                            background: selected ? 'var(--accent)' : 'transparent',
-                            color: selected ? '#1a1500' : 'var(--text)',
-                            border: selected ? 'none' : '1px solid var(--border)',
-                            fontWeight: selected ? 700 : 500,
-                            fontSize: '0.8rem',
-                            cursor: 'pointer',
-                          }
-                    }
-                  >
-                    {opt.color ? '' : opt.label}
-                  </button>
-                );
-              })}
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {TRAINERS.filter((t) => t.group === group).map((t) => (
+                <TrainerButton
+                  key={t.id}
+                  trainer={t}
+                  selected={avatar.trainer === t.id}
+                  onSelect={() => onChange({ ...avatar, trainer: t.id })}
+                />
+              ))}
             </div>
           </div>
         ))}
       </div>
     </div>
+  );
+}
+
+function TrainerButton({ trainer, selected, onSelect }: { trainer: TrainerOption; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      title={trainer.label}
+      aria-pressed={selected}
+      style={{
+        width: 56,
+        height: 56,
+        borderRadius: 10,
+        border: selected ? '3px solid #58a6ff' : '1px solid var(--border)',
+        background: `#0b0e13 url(${trainerSpriteUrl(trainer.id)}) no-repeat center 60%`,
+        backgroundSize: '46px auto',
+        imageRendering: 'pixelated',
+        cursor: 'pointer',
+        padding: 0,
+      }}
+    />
   );
 }

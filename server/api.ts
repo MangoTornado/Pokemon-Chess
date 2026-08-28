@@ -10,7 +10,7 @@
  */
 
 import { Accounts } from './accounts.ts';
-import { AVATAR_SLOTS } from '../src/profile/avatar.ts';
+import { TRAINERS } from '../src/profile/avatar.ts';
 
 export interface ApiRequest {
   readonly method: string;
@@ -34,9 +34,9 @@ const json = (status: number, body: unknown, session?: string | null): ApiRespon
 export async function handleApi(accounts: Accounts, req: ApiRequest): Promise<ApiResponse> {
   const { method, path } = req;
 
-  // Public: the customization option catalogue, so the client renders the exact set the server accepts.
+  // Public: the trainer roster, so the client's picker shows the exact set the server accepts.
   if (method === 'GET' && path === '/api/avatar-options') {
-    return json(200, { slots: AVATAR_SLOTS });
+    return json(200, { trainers: TRAINERS });
   }
 
   if (method === 'POST' && path === '/api/register') {

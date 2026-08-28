@@ -1,193 +1,93 @@
 /**
- * Trainer character customization — the avatar a player builds for their profile.
+ * The trainer avatar — a real Pokémon trainer sprite the player chooses as their character.
  *
- * Modelled on the mainline games' character customization (Gen 6 onward: X/Y through Scarlet/Violet),
- * where a trainer picks skin tone, hair, eyes, and outfit pieces from a fixed set of options. The set
- * here is a faithful, self-contained superset of those slots; it is deliberately a closed enumeration
- * rather than free input, so it is safe to render for strangers on a public profile with no moderation
- * surface and no way to smuggle in arbitrary content.
+ * Rather than composite a made-up figure, the avatar is one of the games' own trainer sprites, so a
+ * player's character actually looks like a Pokémon character. The roster is the player-protagonists of
+ * each generation (the customizable heroes) plus a handful of iconic Champions, drawn from the Pokémon
+ * Showdown sprite library. It is a closed allowlist by design: the stored value is just a sprite id, so
+ * a profile can only ever show a sprite from this set — safe to render for strangers, with no way to
+ * point the avatar at an arbitrary URL.
  *
- * Shared by the client (the customizer UI) and the server (which validates every saved avatar against
- * this same definition), so an avatar that renders is an avatar the server accepted.
+ * Shared by the client (the picker) and the server (which validates the chosen id against this list).
  */
 
-/** One customizable slot and the options it admits. */
-export interface AvatarSlot {
-  readonly key: AvatarSlotKey;
-  readonly label: string;
-  /** Option ids in display order. The first is the default. */
-  readonly options: readonly AvatarOption[];
-}
-
-export interface AvatarOption {
+export interface TrainerOption {
+  /** Showdown trainer sprite id, e.g. `red`, `dawn`. */
   readonly id: string;
   readonly label: string;
-  /** A hex colour for colour slots, used to render the swatch and the avatar. */
-  readonly color?: string;
+  /** A grouping for the picker UI. */
+  readonly group: 'Kanto' | 'Johto' | 'Hoenn' | 'Sinnoh' | 'Unova' | 'Kalos' | 'Alola' | 'Galar' | 'Champions';
 }
-
-export type AvatarSlotKey =
-  | 'skinTone'
-  | 'hairStyle'
-  | 'hairColor'
-  | 'eyeColor'
-  | 'outfit'
-  | 'outfitColor'
-  | 'hat'
-  | 'accessory';
-
-/** The canonical customization options. Extend by adding options, never by renaming ids (they persist). */
-export const AVATAR_SLOTS: readonly AvatarSlot[] = [
-  {
-    key: 'skinTone',
-    label: 'Skin tone',
-    options: [
-      { id: 'pale', label: 'Pale', color: '#f2d3b8' },
-      { id: 'light', label: 'Light', color: '#e6b58f' },
-      { id: 'medium', label: 'Medium', color: '#c68642' },
-      { id: 'tan', label: 'Tan', color: '#a5673f' },
-      { id: 'dark', label: 'Dark', color: '#7a4a2b' },
-      { id: 'deep', label: 'Deep', color: '#4a2f1c' },
-    ],
-  },
-  {
-    key: 'hairStyle',
-    label: 'Hair',
-    options: [
-      { id: 'short', label: 'Short' },
-      { id: 'medium', label: 'Medium' },
-      { id: 'long', label: 'Long' },
-      { id: 'ponytail', label: 'Ponytail' },
-      { id: 'buns', label: 'Buns' },
-      { id: 'spiky', label: 'Spiky' },
-      { id: 'curly', label: 'Curly' },
-      { id: 'shaved', label: 'Shaved' },
-    ],
-  },
-  {
-    key: 'hairColor',
-    label: 'Hair colour',
-    options: [
-      { id: 'black', label: 'Black', color: '#1c1a1a' },
-      { id: 'brown', label: 'Brown', color: '#5a3a22' },
-      { id: 'blonde', label: 'Blonde', color: '#e0c068' },
-      { id: 'red', label: 'Red', color: '#b3402f' },
-      { id: 'blue', label: 'Blue', color: '#3a5ba0' },
-      { id: 'green', label: 'Green', color: '#4a8a5a' },
-      { id: 'pink', label: 'Pink', color: '#d685ad' },
-      { id: 'white', label: 'White', color: '#e8e8e8' },
-    ],
-  },
-  {
-    key: 'eyeColor',
-    label: 'Eyes',
-    options: [
-      { id: 'brown', label: 'Brown', color: '#5a3a22' },
-      { id: 'blue', label: 'Blue', color: '#3a5ba0' },
-      { id: 'green', label: 'Green', color: '#4a8a5a' },
-      { id: 'grey', label: 'Grey', color: '#8b949e' },
-      { id: 'amber', label: 'Amber', color: '#c8871f' },
-      { id: 'violet', label: 'Violet', color: '#7a4fb0' },
-    ],
-  },
-  {
-    key: 'outfit',
-    label: 'Outfit',
-    options: [
-      { id: 'tee', label: 'Tee & jeans' },
-      { id: 'hoodie', label: 'Hoodie' },
-      { id: 'jacket', label: 'Trainer jacket' },
-      { id: 'dress', label: 'Dress' },
-      { id: 'overalls', label: 'Overalls' },
-      { id: 'formal', label: 'Formal' },
-      { id: 'sporty', label: 'Sporty' },
-    ],
-  },
-  {
-    key: 'outfitColor',
-    label: 'Outfit colour',
-    options: [
-      { id: 'red', label: 'Red', color: '#c0392b' },
-      { id: 'blue', label: 'Blue', color: '#2e6bb0' },
-      { id: 'green', label: 'Green', color: '#3a9a5a' },
-      { id: 'yellow', label: 'Yellow', color: '#e0b020' },
-      { id: 'purple', label: 'Purple', color: '#7a4fb0' },
-      { id: 'black', label: 'Black', color: '#2b2b30' },
-      { id: 'white', label: 'White', color: '#e8e8e8' },
-      { id: 'pink', label: 'Pink', color: '#d685ad' },
-    ],
-  },
-  {
-    key: 'hat',
-    label: 'Hat',
-    options: [
-      { id: 'none', label: 'None' },
-      { id: 'cap', label: 'Cap' },
-      { id: 'beanie', label: 'Beanie' },
-      { id: 'sunhat', label: 'Sun hat' },
-      { id: 'bandana', label: 'Bandana' },
-    ],
-  },
-  {
-    key: 'accessory',
-    label: 'Accessory',
-    options: [
-      { id: 'none', label: 'None' },
-      { id: 'glasses', label: 'Glasses' },
-      { id: 'sunglasses', label: 'Sunglasses' },
-      { id: 'bag', label: 'Satchel' },
-      { id: 'scarf', label: 'Scarf' },
-    ],
-  },
-];
-
-const SLOT_BY_KEY = new Map(AVATAR_SLOTS.map((s) => [s.key, s]));
-
-/** A saved avatar: one chosen option id per slot. */
-export type Avatar = Record<AvatarSlotKey, string>;
-
-/** The default avatar — the first option of every slot. */
-export const DEFAULT_AVATAR: Avatar = Object.fromEntries(
-  AVATAR_SLOTS.map((s) => [s.key, s.options[0]!.id]),
-) as Avatar;
 
 /**
- * Validates and normalises an untrusted avatar into a known-good one.
+ * The selectable trainers. Ids are Showdown sprite ids, verified to resolve. Extend by appending; never
+ * rename an id, because ids are stored on profiles.
+ */
+export const TRAINERS: readonly TrainerOption[] = [
+  { id: 'red', label: 'Red', group: 'Kanto' },
+  { id: 'blue', label: 'Blue', group: 'Kanto' },
+  { id: 'ethan', label: 'Ethan', group: 'Johto' },
+  { id: 'lyra', label: 'Lyra', group: 'Johto' },
+  { id: 'brendan', label: 'Brendan', group: 'Hoenn' },
+  { id: 'may', label: 'May', group: 'Hoenn' },
+  { id: 'lucas', label: 'Lucas', group: 'Sinnoh' },
+  { id: 'dawn', label: 'Dawn', group: 'Sinnoh' },
+  { id: 'hilbert', label: 'Hilbert', group: 'Unova' },
+  { id: 'hilda', label: 'Hilda', group: 'Unova' },
+  { id: 'nate', label: 'Nate', group: 'Unova' },
+  { id: 'rosa', label: 'Rosa', group: 'Unova' },
+  { id: 'calem', label: 'Calem', group: 'Kalos' },
+  { id: 'serena', label: 'Serena', group: 'Kalos' },
+  { id: 'elio', label: 'Elio', group: 'Alola' },
+  { id: 'selene', label: 'Selene', group: 'Alola' },
+  { id: 'victor', label: 'Victor', group: 'Galar' },
+  { id: 'gloria', label: 'Gloria', group: 'Galar' },
+  { id: 'cynthia', label: 'Cynthia', group: 'Champions' },
+  { id: 'lance', label: 'Lance', group: 'Champions' },
+  { id: 'steven', label: 'Steven', group: 'Champions' },
+  { id: 'leon', label: 'Leon', group: 'Champions' },
+  { id: 'ash', label: 'Ash', group: 'Champions' },
+];
+
+const TRAINER_IDS = new Set(TRAINERS.map((t) => t.id));
+
+/**
+ * The avatar stored on a profile.
  *
- * Never throws and never trusts the input: any missing or unrecognised slot falls back to that slot's
- * default, and any extra keys are dropped. So whatever a client (or a tampered request) sends, the
- * result is always a fully-populated avatar drawn entirely from the closed option set — which is what
- * makes it safe to store and to show to other players. Returns a fresh object.
+ * An object rather than a bare string so it can grow later (a title, a frame, a shiny toggle) without a
+ * schema migration.
+ */
+export interface Avatar {
+  readonly trainer: string;
+}
+
+export const DEFAULT_AVATAR: Avatar = { trainer: 'red' };
+
+/** Where a trainer sprite lives. One 80×80 PNG from the Showdown sprite CDN. */
+export function trainerSpriteUrl(id: string): string {
+  return `https://play.pokemonshowdown.com/sprites/trainers/${id}.png`;
+}
+
+/** Whether an avatar is valid — its trainer is one of the allowed ids. */
+export function isValidAvatar(input: unknown): boolean {
+  return (
+    !!input &&
+    typeof input === 'object' &&
+    typeof (input as { trainer?: unknown }).trainer === 'string' &&
+    TRAINER_IDS.has((input as { trainer: string }).trainer)
+  );
+}
+
+/**
+ * Normalises untrusted input to a valid avatar, never trusting the client: an unrecognised trainer falls
+ * back to the default, so whatever a request sends, the result always names a sprite from the allowlist.
  */
 export function normalizeAvatar(input: unknown): Avatar {
-  const source = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-  const out = {} as Avatar;
-  for (const slot of AVATAR_SLOTS) {
-    const chosen = source[slot.key];
-    const valid = typeof chosen === 'string' && slot.options.some((o) => o.id === chosen);
-    out[slot.key] = valid ? (chosen as string) : slot.options[0]!.id;
-  }
-  return out;
+  const trainer = (input as { trainer?: unknown })?.trainer;
+  return typeof trainer === 'string' && TRAINER_IDS.has(trainer) ? { trainer } : { ...DEFAULT_AVATAR };
 }
 
-/** Whether an avatar is already valid (every slot present and a known option). */
-export function isValidAvatar(input: unknown): boolean {
-  if (!input || typeof input !== 'object') return false;
-  const source = input as Record<string, unknown>;
-  return AVATAR_SLOTS.every((slot) => {
-    const chosen = source[slot.key];
-    return typeof chosen === 'string' && slot.options.some((o) => o.id === chosen);
-  });
-}
-
-/** The colour of a chosen option in a colour slot, for rendering. */
-export function avatarColor(avatar: Avatar, key: AvatarSlotKey): string | undefined {
-  const slot = SLOT_BY_KEY.get(key);
-  return slot?.options.find((o) => o.id === avatar[key])?.color;
-}
-
-/** The human label of a chosen option, for display. */
-export function avatarLabel(avatar: Avatar, key: AvatarSlotKey): string {
-  const slot = SLOT_BY_KEY.get(key);
-  return slot?.options.find((o) => o.id === avatar[key])?.label ?? avatar[key];
+/** The display label for a trainer id. */
+export function trainerLabel(id: string): string {
+  return TRAINERS.find((t) => t.id === id)?.label ?? id;
 }

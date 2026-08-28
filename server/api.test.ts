@@ -113,23 +113,20 @@ describe('login and sessions', () => {
 });
 
 describe('profile editing', () => {
-  it('updates the display name, bio, status and avatar', async () => {
+  it('updates the display name, bio, status and trainer', async () => {
     const accounts = freshAccounts();
     const reg = await registerUser(accounts, 'Lance', 'dragonite1');
     const token = reg.session!;
 
     const res = await handleApi(accounts, req('PATCH', '/api/profile', {
       token,
-      body: { displayName: 'Champion Lance', bio: 'I train dragons.', status: 'Looking for a match', avatar: { hairColor: 'red', hat: 'cap' } },
+      body: { displayName: 'Champion Lance', bio: 'I train dragons.', status: 'Looking for a match', avatar: { trainer: 'lance' } },
     }));
     expect(res.status).toBe(200);
-    const profile = (res.json as { profile: { displayName: string; bio: string; status: string; avatar: Record<string, string> } }).profile;
+    const profile = (res.json as { profile: { displayName: string; bio: string; status: string; avatar: { trainer: string } } }).profile;
     expect(profile.displayName).toBe('Champion Lance');
     expect(profile.bio).toBe('I train dragons.');
-    expect(profile.avatar.hairColor).toBe('red');
-    expect(profile.avatar.hat).toBe('cap');
-    // Untouched slots keep their defaults.
-    expect(profile.avatar.skinTone).toBe(DEFAULT_AVATAR.skinTone);
+    expect(profile.avatar.trainer).toBe('lance');
   });
 
   it('rejects an over-long bio with a field error and requires a session', async () => {
@@ -143,16 +140,16 @@ describe('profile editing', () => {
     expect(anon.status).toBe(401);
   });
 
-  it('sanitises a bogus avatar rather than rejecting it', async () => {
+  it('sanitises a bogus trainer rather than rejecting it', async () => {
     const accounts = freshAccounts();
     const reg = await registerUser(accounts, 'Wallace', 'milotic123');
     const res = await handleApi(accounts, req('PATCH', '/api/profile', {
       token: reg.session!,
-      body: { avatar: { skinTone: 'HACKED', junk: 1 } },
+      body: { avatar: { trainer: '../../hack', junk: 1 } },
     }));
     expect(res.status).toBe(200);
-    const avatar = (res.json as { profile: { avatar: Record<string, string> } }).profile.avatar;
-    expect(avatar.skinTone).toBe(DEFAULT_AVATAR.skinTone); // bogus fell back
+    const avatar = (res.json as { profile: { avatar: { trainer: string } } }).profile.avatar;
+    expect(avatar.trainer).toBe(DEFAULT_AVATAR.trainer); // bogus fell back to the default
     expect('junk' in avatar).toBe(false);
   });
 });
@@ -184,10 +181,10 @@ describe('public profiles and collection', () => {
     expect(collection.some((c) => c.species === 'pikachu')).toBe(true);
   });
 
-  it('exposes the avatar option catalogue publicly', async () => {
+  it('exposes the trainer roster publicly', async () => {
     const accounts = freshAccounts();
     const res = await handleApi(accounts, req('GET', '/api/avatar-options'));
     expect(res.status).toBe(200);
-    expect((res.json as { slots: unknown[] }).slots.length).toBeGreaterThan(4);
+    expect((res.json as { trainers: unknown[] }).trainers.length).toBeGreaterThan(12);
   });
 });
