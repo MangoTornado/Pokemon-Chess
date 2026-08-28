@@ -1,1335 +1,1167 @@
 # Recon: Rendering, Performance & AI Search
 
-> Role: rendering / performance / AI-search analyst.
-> Scope: Brief §5.7 (Rendering & performance) and §5.8 (AI opponent).
-> Everything numeric in this document was **measured on this machine** during design (Apple Silicon
-> macOS 25.6, Node v24.19.0, Chromium via Playwright). Probe scripts are listed in
-> [Appendix A](#appendix-a--probe-inventory) so every number is reproducible.
-> Constraints from the Brief (TypeScript strict, Vite, npm, pure engine core, Vitest, baked data)
-> are taken as given.
+**Role:** rendering / performance / AI-search analyst.
+**Scope:** BRIEF.md hard problems 7 (rendering & performance) and 8 (AI opponent), plus DIRECTION.md's
+"performance is part of looking good" and "animation must never gate play".
+**Method:** every number below was measured on this machine, either in the real repo, in headless
+Chrome 151 via Playwright (`/tmp/pcbench/bench.html`), or in Node v24.19.0 against a working variant
+searcher (`/tmp/pkmn-probe/tech-recon-*.mjs`). Where I extrapolate — and I only do it for slower
+hardware — I say so and give the multiplier.
+
+Sprite asset sizes are **not** re-measured; they are taken from
+[`recon-data-substrate.md`](./recon-data-substrate.md) §6 as instructed.
 
 ---
 
-## 0. Decisions, up front
+## 0. Executive decisions
 
-| # | Question | Decision | Confidence |
-|---|---|---|---|
-| A1 | Board & piece rendering | **DOM + CSS `transform` (GPU-composited), one `<canvas>` FX layer above it.** No WebGL, no Pixi. | High — measured, and forced by a CORS finding |
-| A2 | Animation library | **None as a hard dependency.** Web Animations API (`Element.animate`) for piece motion, hand-rolled rAF loop for the canvas FX layer. `motion/mini` (3 KB gz measured) is the fallback if WAAPI ergonomics hurt. | High |
-| A3 | Sprite source | **Showdown `sprites/gen5/*.png`, 96×96, all 1025 base formes = 829 KB total (measured).** Vendored at build time by a script, never committed. | High |
-| A4 | Spritesheet? | **No** for the board. Individual PNGs beat a packed atlas by 3× (849 KB vs 2563 KB, measured). **Yes** for the dex/draft grid: reuse Showdown's `pokemonicons-sheet.png`, 383 KB, one request, covers every forme. | High — counter-intuitive, measured |
-| A5 | Runtime CDN vs vendored | **Vendored.** `play.pokemonshowdown.com` sends **no `Access-Control-Allow-Origin`** — measured. That taints canvases, blocks `fetch()`, and makes WebGL `texImage2D` throw `SecurityError`. | High — hard blocker |
-| A6 | Licensing stance | Ship **zero** Pokémon art in git. Vendor script + `ATTRIBUTION.md` + a fully playable **Type Glyph mode** with no Pokémon assets at all. | High |
-| B1 | Off-the-shelf engine | **Unusable.** Not Stockfish, not Fairy-Stockfish. Nothing salvageable except *ideas* and `chess.js` as a **test oracle** (already the Brief's position). | High |
-| B2 | Search | **Alpha-beta negamax over a *collapsed* game tree** (chance nodes replaced by modal outcome + static EV correction) **with exact chance expansion at the root only.** Not full expectiminimax, and explicitly **not** star1/star2. | High — measured; star1 made it *worse* |
-| B3 | "Ply" definition | An extra move from super-effective/crit is a **same-side child at depth−1** with a hard chain cap of 2. Costs ~50% more nodes than banning chains (measured). | High |
-| B4 | Threading | **Web Worker, plain JS/TS. No WASM.** Measured 3.0–3.3 M nodes/s in pure JS is enough for the target strength. | High |
-| B5 | Difficulty dial | **Corrupt the AI's type chart**, don't just cut its depth. Measured: 5 % type-error → 47 % score, 30 % → 37 %, 100 % → 25 %. Monotonic, thematic, and cheap. | High — measured |
-
----
-
-## PART A — RENDERING & ASSETS
-
-### A.0 The measurement that settles the architecture
-
-Before comparing renderers: I tested whether a browser can actually *use* Showdown sprites from the CDN.
-Probe: `/tmp/corstest/index.html`, run in Chromium.
-
-```
-1. plain <img> load:                                  OK 96x96
-2. canvas2d drawImage:                                 OK
-3. getImageData after cross-origin draw:               THROW SecurityError -> CANVAS TAINTED
-4. toDataURL:                                          THROW SecurityError
-5. webgl context:                                      OK
-6. webgl texImage2D(non-CORS img):                     THROW SecurityError
-7. <img crossOrigin=anonymous> from Showdown:          FAIL (blocked, no ACAO header)
-8. fetch() cross-origin:                               THROW TypeError: Failed to fetch
-```
-
-Confirmed on the wire — Showdown sends the *decoy* CORS headers but not the one that matters:
-
-```
-$ curl -sI https://play.pokemonshowdown.com/sprites/gen5/pikachu.png
-access-control-allow-methods: GET,POST,OPTIONS
-access-control-allow-headers: Content-Type, X-Requested-With
-   ...and NO access-control-allow-origin.
-```
-
-(`raw.githubusercontent.com/PokeAPI/sprites` *does* send `access-control-allow-origin: *` — verified —
-but its artwork is ~124 KB/sprite, 89 MB for the dex, and GitHub raw is not a hotlinkable CDN.)
-
-**Consequences, which are not negotiable:**
-
-1. **"PixiJS + Showdown CDN at runtime" is impossible.** Pixi/three set `crossOrigin` on their image
-   loads; without ACAO the load fails, and even a plain `<img>` fed to `texImage2D` throws.
-2. **Canvas2D + Showdown CDN is crippled.** `drawImage` works, but the canvas is permanently tainted:
-   no `getImageData`, no `toDataURL`, so no runtime atlas packing, no pixel-level recolouring
-   (type-tinting, silhouettes, hit-flash), no screenshot/share feature.
-3. **DOM `<img>` / CSS `background-image` is the only thing that works unmodified against the CDN.**
-   That is also exactly what `@pkmn/img` emits — see A.2.
-4. If you *vendor* the sprites (serve them same-origin), all three options unlock again. So this finding
-   does not by itself forbid Pixi; it forbids Pixi-with-CDN, and it makes vendoring mandatory for
-   *any* pixel-manipulating approach.
-
-References: [MDN: CORS-enabled image](https://developer.mozilla.org/en-US/docs/Web/HTML/CORS_enabled_image),
-[MDN: `crossorigin` attribute](https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/crossorigin).
+| # | Decision | The number that decides it |
+|---|---|---|
+| A1 | **Hybrid: keep the DOM board and pieces, add two Canvas2D effect layers.** Not pure DOM, not pure Canvas, and definitely not WebGL/Pixi. | Canvas2D draws 10,000 particles in **0.84 ms/frame**; the equivalent DOM work at 4,000 elements costs **5.38 ms**. But a full DOM board is only **129 nodes** and a from-scratch rebuild of it costs **0.39 ms** — free. Use each where it wins. |
+| A2 | **Extend the existing `src/ui/App.tsx` board, do not replace it.** | It already has 64 `<button>`s with real `aria-label`s and native focus. A canvas rewrite forfeits all of it and buys nothing measurable (see A1). Migration cost is ~2 days of refactor, mostly moving pieces out of the square buttons into one transform-positioned layer. |
+| A3 | **Reject WebGL/PixiJS.** | `pixi.js@8` browser bundle measured at **231 KB gzipped** — 3.5× the entire current entry chunk (65 KB) — to buy headroom we measured we do not need. |
+| A4 | **The entry-chunk budget conversation is about React, not about our code.** | React 19 + react-dom/client, bundled and minified by rolldown: **59.3 KB gz**. The entry chunk is 65.2 KB gz. **Our own code is 5.9 KB gz — 9% of the budget.** Preact core measures 4.4 KB gz, so `preact/compat` is a documented 52 KB reclaim lever if the budget is ever threatened. |
+| B1 | **Alpha-beta negamax + PVS + quiescence, in a Web Worker. Not expectiminimax, not MCTS.** | Measured: depth 9 in **601 ms**, depth 10 in 2.5 s, at **7.1 M nodes/sec** in plain JS with an effective branching factor of **3.8–4.2**. |
+| B2 | **Full chance-node enumeration for the d6 is not affordable, and star1 pruning does not rescue it.** | Depth 6 costs **1,946 ms** with chance nodes vs **16 ms** deterministic — a **159×** blow-up, ~4 plies of depth. Star1 with realistic ±4500 cp bounds recovers only **20%** (1,652 ms). |
+| B3 | **Adopt input randomness (roll revealed at turn start), and it is the single biggest AI decision in the project.** | Measured cost over deterministic: **+10%** (20.6 ms vs 16.1 ms at depth 6; 604 ms vs 610 ms at depth 8). `recon-variants.md` §6.3 already recommends this for *balance* reasons. It independently makes the AI **~150× cheaper**. Two lenses, one answer. |
+| B4 | **Sample the randomness at the root, never inside the tree.** | In-tree sampling multiplies: k=3 samples per ply costs **726×** (8,544 ms at depth 6) because cost ≈ k^depth. Root-level averaging over R sampled futures is linear in R. |
+| B5 | **Reject WASM for v1.** | 7.1 Mnps in JS. A realistic 2× WASM win buys log₄(2) = **0.5 plies** at our EBF. Four cheaper changes each buy more. |
+| B6 | **Difficulty is a corrupted type chart, not a shallower search.** | The AI searches with its own copy of the 18×18 effectiveness table. A beginner AI's copy has the 0.5×/2× entries flattened except the starter triangle — so it walks into mutual destruction and misses free bonus moves. Thematically exact, and *learnable* by the player. |
 
 ---
 
-### A.1 Rendering approach
+## PART A — Rendering architecture and performance
 
-#### A.1.1 Measured frame cost
+### 1. What was measured
 
-Probe: `/tmp/corstest/perf.html` (Chromium, 400 frames each, 640×640 board, 80 px squares).
-Numbers are **main-thread script time per frame** — the part we control.
+Environment: Chrome 151 headless, macOS, Apple Silicon, 12 cores, `devicePixelRatio = 2`, 640×640
+board, **120 Hz display** (vsync interval measured at 8.33 ms, not 16.67 — noted because it makes
+every frame-time figure below a *tighter* test than 60 Hz).
 
-| Scenario | mean | p50 | p95 | max |
-|---|---|---|---|---|
-| A — 64 DOM pieces, `translate3d` rewritten every frame | 0.092 ms | 0.100 | 0.200 | 0.300 |
-| B — 64 DOM pieces + **400 DOM particles** (transform + opacity) | 0.449 ms | 0.500 | 0.700 | 1.000 |
-| C — 64 DOM pieces + **400 Canvas2D particles** | 0.235 ms | 0.200 | 0.400 | 0.500 |
-| D — 64 DOM pieces + **2000 Canvas2D particles** | 0.417 ms | 0.400 | 0.500 | 1.400 |
+Harness: `/tmp/pcbench/bench.html`, run via Playwright. Two passes — one measuring wall-clock frame
+intervals over 150 frames, one measuring **per-frame CPU cost in isolation** (60 timed iterations
+after a 10-iteration warm-up, no vsync involved) so the numbers can be scaled to slower hardware.
 
-Read the two comparisons that matter:
+#### 1.1 Frame intervals over 150 frames (p50 / p95 / max, ms)
 
-- **B vs C:** at the *same* 400 particles, Canvas2D costs **half** the script time of DOM particles —
-  and DOM particles additionally cost 400 nodes of style recalc, layerisation and compositor memory
-  that this counter does not show. DOM loses for particles.
-- **C vs D:** 5× the particles for 1.8× the cost. Canvas2D scales sub-linearly here because the
-  per-draw cost is dominated by the `arc`+`fill` call, and it stays flat as counts rise. Canvas wins
-  for FX at any interesting scale.
-- **A:** 64 DOM sprites moved by transform is **0.09 ms**. This is ~0.5 % of a 16.67 ms frame.
-  A WebGL renderer cannot meaningfully improve on 0.09 ms; there is no performance problem to solve
-  at 32–64 sprites.
-
-#### A.1.2 Measured bundle cost
-
-Real tree-shaken `esbuild --bundle --minify` outputs, gzip -9 (`/tmp/bundletest`):
-
-| Package | entry used | min | **min+gzip** |
-|---|---|---|---|
-| `pixi.js@8` | `Application, Container, Sprite, Texture, Assets, Graphics, BlurFilter` | 562 KB | **165 KB** |
-| `pixi.js@8` (full `pixi.min.mjs`, untree-shaken) | — | 800 KB | 225 KB |
-| `motion@12` | `animate, spring` | 61 KB | **22 KB** |
-| `motion@12` | `motion/mini` → `animate` | 7 KB | **3 KB** |
-| `react@19 + react-dom@19` | `createRoot` + hooks | 188 KB | **58 KB** |
-| `preact@10 + preact/hooks` | `render, h`, hooks | 12 KB | **5.3 KB** |
-| `@pkmn/img@0.3.4` (dist, gzip) | — | 194 KB | 41 KB |
-| `chess.js@1.4.0` (dist, gzip) | — | 104 KB | 23 KB |
-
-PixiJS costs **165 KB gzipped** — more than React and the entire baked Pokémon dataset combined
-(58 + 25 ≈ 83 KB, see A.2) — to solve a problem that measures 0.09 ms.
-
-#### A.1.3 The four candidates, judged
-
-| | DOM + CSS transforms | Canvas2D (everything) | WebGL / PixiJS | **Hybrid: DOM board+pieces, Canvas FX** |
-|---|---|---|---|---|
-| 32–64 sprite perf | 0.09 ms/frame ✅ | fine, but you redraw 64 sprites every frame even when idle | overkill | 0.09 ms + FX only when firing ✅ |
-| Heavy simultaneous VFX | 400 DOM particles = 0.45 ms and 400 extra layers ❌ | ✅ | ✅ best in class | 2000 particles = 0.42 ms ✅ |
-| Text / a11y / screen reader | native: real `<button>` per square, `aria-label`, focus ring, tab order ✅ | must reimplement an entire a11y tree ❌ | same ❌ | ✅ (a11y lives in DOM) |
-| Crisp pixel sprites | `image-rendering: pixelated` ✅ | `imageSmoothingEnabled=false` ✅ | `scaleMode: 'nearest'` ✅ | ✅ |
-| Showdown CDN usable | ✅ only option | tainted ⚠️ | **throws** ❌ | ✅ |
-| Bundle delta | **0 KB** | 0 KB | **+165 KB gz** ❌ | **0 KB** |
-| Hit-testing / drag | native pointer events on squares ✅ | manual math | manual math | ✅ |
-| CSS theming, dark mode, i18n | free ✅ | reimplement ❌ | reimplement ❌ | ✅ |
-| Debuggability | DevTools inspects a piece ✅ | opaque ❌ | opaque ❌ | ✅ |
-| Risk if we need 5000 particles + shaders | must add canvas | — | ✅ | already have canvas ✅ |
-
-**Recommendation: the hybrid.**
-
-- **Layer 0 — board.** One `<div class="board">` with 64 child `<button class="sq">`. Static; painted once.
-  Coordinates, last-move highlight, legal-move dots, check ring are CSS classes on the square.
-- **Layer 1 — pieces.** One absolutely-positioned `<div class="piece">` per piece,
-  `background-image: url(/sprites/gen5/<id>.png)`, `image-rendering: pixelated`,
-  positioned solely by `transform: translate3d(x, y, 0)`. Never `left`/`top` (those force layout).
-  `will-change: transform` on pieces only while a move is animating, then removed (permanent
-  `will-change` on 32 nodes wastes compositor memory).
-- **Layer 2 — FX canvas.** A single `<canvas aria-hidden="true">` sized to the board, `pointer-events: none`,
-  `position: absolute; inset: 0`. All particles, shockwaves, type-symbol bursts, damage numbers, screen
-  shake. One `clearRect` + one draw pass per frame. The rAF loop **only runs while the FX queue is
-  non-empty** — idle board costs zero frames.
-- **Layer 3 — UI chrome.** React (already a dependency): move list, captured tray, type matchup panel,
-  draft screen, modals. Plain DOM, plain CSS.
-
-**What I traded away:** if a future version wants full-screen shader effects (a real Fire-type flame
-field with additive blending and displacement), Canvas2D will start to hurt and Pixi becomes right.
-The hybrid contains that risk cheaply: the FX layer is already a canvas, so swapping its
-implementation for a WebGL context is a change to one module (`src/ui/fx/Renderer.ts`), not to the
-board, pieces, input, or a11y. I am deliberately deferring 165 KB until a measured need exists.
-
-**Also rejected:** replacing React with Preact. It would save 53 KB gz, but React is already in
-`package.json`, React 19 is a pre-decided-adjacent choice, and 53 KB is inside budget. Revisit only
-if the initial-load budget in A.4 is breached.
-
-#### A.1.4 Frame budget maths
-
-60 fps = **16.67 ms** per frame, and the main thread does not own all of it: style, layout, paint,
-composite, plus the browser's own work. Chrome's own guidance is to keep long tasks off the main
-thread and target interaction response well under 200 ms
-([web.dev INP](https://web.dev/articles/inp)); for animation the practical rule is to leave ≥40 %
-of the frame to the compositor.
-
-Working budget, per frame, at 60 fps:
-
-| Consumer | Budget (mid laptop) | Budget (mid mobile, 30 fps floor) | Measured here | Notes |
-|---|---|---|---|---|
-| Piece transforms (≤64) | 0.5 ms | 1.0 ms | **0.09 ms** | transform-only ⇒ no layout, compositor-only |
-| FX canvas draw (≤1500 particles) | 2.0 ms | 4.0 ms | **0.42 ms @ 2000** | one canvas, one pass |
-| React re-render (UI chrome) | 2.0 ms | 3.0 ms | — | must not re-render during animation; see below |
-| Engine work on main thread | **0 ms** | **0 ms** | — | move-gen for the *human's* legal moves is <1 ms and precomputed on turn start; AI is in a Worker |
-| Style/layout/paint/composite headroom | ≥8 ms | ≥15 ms | — | slack |
-| **Total main-thread script** | **≤4.5 ms** | **≤8 ms** | **≈0.5 ms** | ~9× headroom |
-
-Derating assumption stated explicitly: I have no mid-range Android here. I assume **3–5× slower**
-single-thread JS and ~2× slower raster than this machine. Even at 5× derating the measured
-0.5 ms becomes 2.5 ms — 15 % of a 60 fps frame. The rendering architecture is not the risk;
-**the AI Worker and the initial payload are** (§A.4, §B).
-
-The one real trap: **React re-rendering during animation.** Rule: the animating layer is *not* React
-state. Pieces are React-rendered once per *position*, and their `transform` is driven imperatively by
-the animation controller (WAAPI/rAF) between positions. React sees one commit per completed move, not
-one per frame. Enforce with a `useSyncExternalStore` subscription to the game store that only fires on
-position change, and a lint rule banning `useState` inside `<Piece>`.
-
----
-
-### A.2 Asset strategy for 1025 Pokémon
-
-#### A.2.0 A data correction the Brief needs
-
-The Brief's "Standard base formes only: **733**" is `new Generations(Dex).get(9).species` filtered —
-i.e. **Gen 9 legality**, not the National Dex. Measured (`probe_rendersearch_gaps.mjs`):
-
-```
-Generations(Dex).get(9).species          -> 876 entries, ALL with isNonstandard === null
-  base formes, unique dex num            -> 733
-  dex numbers 1..1025 NOT covered        -> 292
-  e.g. MISSING: Alakazam, Machamp, Caterpie(10-15), Nidoran-F/M, Farfetch'd, Mr. Mime, Type: Null
-Dex.species.all(), forme==='' , num>=1   -> 1025 base formes, gaps in 1..1025: 0
-```
-
-Two hard implications:
-
-1. **A game that promises "all 1025" must build its species table from `Dex.species.all()`, not from
-   `Generations(Dex).get(9)`.** Using the gen-9 view silently deletes Alakazam and Machamp — two of the
-   most iconic possible bishops/rooks in the entire concept.
-2. Asset budgets must be sized for **1025**, not 733. All numbers below are for 1025.
-
-#### A.2.1 Measured sprite economics
-
-All 1025 base-forme sprites downloaded and measured (`probe_rendersearch_dl1025.mjs`):
-
-```
-gen5 all base: got 1025/1025  missing=0
-total=829 KB  mean=0.81 KB  p50=0.69 KB  p95=1.24 KB  max=10.44 KB
-32 pieces @mean = 26 KB   64 @mean = 52 KB
-```
-
-Every one of the 1025 exists, including Gen 9 species (Showdown backfills gen-5-style sprites —
-`gen5/koraidon.png` is a real 96×96, 1455 B). Verified visually: I rendered a 16-species board at
-80 px with `image-rendering: pixelated` and inspected it. It looks **good** — crisp, consistent,
-period-correct pixel art, no blurry upscaling.
-
-Other sources, sampled 74 species spread across the dex (`probe_rendersearch_sizes.mjs`):
-
-| Source | dims | mean | p50 | p95 | 32-piece game | whole dex (1025 est.) | CORS |
-|---|---|---|---|---|---|---|---|
-| **`sprites/gen5/*.png`** | 96×96 | **0.81 KB** | 0.69 | 1.24 | **26 KB** | **829 KB** (exact) | none |
-| `sprites/dex/*.png` | 120×120 | 4.2 KB | 3.3 | 9.7 | 134 KB | ~4.2 MB | none |
-| `sprites/ani/*.gif` | ~60×60 anim | 61.9 KB | 52.4 | 146.3 | **1.98 MB** | ~62 MB | none |
-| `sprites/gen5ani/*.gif` | ~50×46 anim | 46.1 KB | 32.5 | 76.8 | 1.47 MB | ~46 MB | none (**20/74 = 27 % 404**) |
-| PokéAPI official-artwork | 475² | 124.1 KB | 123.8 | 170.8 | 3.97 MB | ~124 MB | `*` |
-| PokéAPI home | 512² | 121.7 KB | 121.2 | 172.2 | 3.90 MB | ~122 MB | `*` |
-| PokéAPI showdown gif (jsDelivr) | anim | 63.5 KB | 53.2 | 146.8 | 2.03 MB | ~64 MB | `*` |
-| `pokemonicons-sheet.png` | 40×30 × all formes | — | — | — | 0 (one sheet) | **383 KB** | none |
-| `itemicons-sheet.png` | 24×24 × all items | — | — | — | — | **87 KB** | none |
-
-The Brief's figures are confirmed and sharpened: gen5 stills are "~0.5–few KB" (mean 0.81 KB),
-`ani/` GIFs are "~26 KB" for Pikachu specifically but **mean 62 KB, p95 146 KB** across the dex —
-2.4× the Brief's estimate. PokéAPI official artwork is 124 KB mean, slightly under the Brief's 200 KB.
-
-#### A.2.2 Do NOT build a board spritesheet
-
-I built real atlases in Chromium (`atlas1025.html`) from the 1025 downloaded PNGs:
-
-| Packing | canvas | PNG | WebP lossless | WebP q0.9 | WebP q0.8 |
+| Architecture | 0 fx | 200 fx | 600 fx | 1500 fx | 4000 fx |
 |---|---|---|---|---|---|
-| 96 px, 32 cols | 3072×3168 | **2563 KB** | 2238 KB | 1744 KB | 1376 KB |
-| 64 px downscaled | 2048×2112 | 2786 KB | 2344 KB | 1007 KB | 814 KB |
-| 48 px downscaled | 1536×1584 | 1694 KB | 1396 KB | 690 KB | 562 KB |
-| **1025 individual PNGs** | — | **849 KB** | — | — | — |
-| (733 gen-9 subset, 96 px atlas) | 2688×2592 | 1840 KB | 1575 KB | 1258 KB | 993 KB |
-
-**A packed atlas is 3× *larger* than the individual files.** The reason is structural, not a tuning
-miss: each sprite is its own ≤16-colour indexed PNG with an optimal palette; merging 1025 of them
-forces one shared full-colour image and destroys every palette. Downscaling to 48 px halves it but
-still loses to individual files, and costs the crispness that makes the art look good.
-
-Also measured: concatenating the 1025 files into one blob = 848,761 B, and gzipping that blob only
-gets to 771 KB (**9 %**), because PNG is already DEFLATE'd. There is no compression win available.
-
-So the only argument for an atlas would be request count — and that argument dies too, because
-**a game needs 32 sprites, not 1025.** The draft pool in the original ruleset is
-2 K + 2 Q + 4 B + 4 N + 4 R + 16 P = **32 Pokémon**, which is exactly both armies
-(16 per side). 32 sprites × 0.81 KB = **26 KB**.
-
-#### A.2.3 Measured load time
-
-Probe `/tmp/corstest/tti.html`: fetch a manifest, then load and paint 32 random species onto a
-640×640 DOM board, single-threaded Python `http.server` over HTTP/1.1 (a deliberately hostile server).
-
-```
-manifest fetch:                       11 ms
-32 sprites loaded + painted:          105 ms from script start
-navigation domContentLoaded:          31 ms
-first-paint 52 ms   first-contentful-paint 76 ms
-32 sprite requests, encoded bytes:    32,677 B (32 KB)
-median sprite request duration:       33.2 ms
-```
-
-Board fully populated in **105 ms** on the worst plausible transport. Sprite loading is not a
-bottleneck and does not need an atlas, a preload manifest, or a loading screen.
-
-#### A.2.4 Baked data bundle (measured, `probe_render_bundle.mjs`)
-
-| Payload | raw | gzip | brotli |
-|---|---|---|---|
-| species, verbose JSON (naive) | 173.6 KB | 29.0 KB | 22.2 KB |
-| species, **columnar JSON** | 30.4 KB | **12.0 KB** | 9.5 KB |
-| species, binary (name blob + typed arrays) | 13.4 KB | 9.9 KB | 8.0 KB |
-| moves, compact JSON (gen 9 std, 685) | 138.5 KB | 14.0 KB | 11.6 KB |
-| moves, name+type+cat+bp+acc+pp only | 24.8 KB | **6.4 KB** | 5.6 KB |
-| ability names (310) | 12.1 KB | 3.3 KB | 2.9 KB |
-| item names (249) | 10.1 KB | 2.6 KB | 2.2 KB |
-| typechart, 18×18 flat | 0.8 KB | **0.2 KB** | 0.1 KB |
-| **learnsets, ids only (733 species)** | 642.8 KB | 70.5 KB | 48.9 KB |
-
-Decisions:
-- **Columnar JSON, not binary.** 12.0 vs 9.9 KB gzip is a 2 KB saving for a custom decoder, a
-  build-order dependency, and a debugging tax. Not worth it. Ship columnar JSON; it stays greppable
-  and diffable in review.
-- **Scale the species table to 1025** (from 733): × 1.4 ⇒ ~17 KB gzip. Still trivial.
-- **Learnsets are lazy.** 70 KB gzip is 40 % of the whole initial budget for data the board does not
-  need until a move-selection UI opens. Separate chunk, dynamic `import()`, fetched during the draft.
-- **`@pkmn/img` is a devDependency only.** It is 41 KB gzip at runtime, and all it does is compute a
-  URL and a `background-position`. Bake both at build time; ship 0 KB.
-
-Verified `@pkmn/img` output shape (`probe_rendersearch_img.mjs`) — note it is a *CSS* API, which is
-another point for the DOM approach:
-
-```
-Icons.getPokemon('pikachu') ->
-  style: "display:inline-block;width:40px;height:30px;image-rendering:pixelated;
-          background:transparent url(.../pokemonicons-sheet.png) no-repeat scroll -40px -60px;"
-  url, left:-40, top:-60
-Sprites.getPokemon('pikachu',{gen:'gen5'}) -> {gen:5, w:96, h:96, url:.../gen5/pikachu.png, pixelated:true}
-Icons.getItem('leftovers')  -> itemicons-sheet.png, 24x24, -48px -360px
-Icons.getType('Fire')       -> types/Fire.png, 32x14 (178 B)
-```
-Icon sheet geometry: 40×30 cells, 12 columns (480 px wide), ≈2520 px tall.
-**Do not use `types/*.png`** — render the 18 types as CSS pills with real text, for
-accessibility and colour-blind labelling (see the Legibility recon).
-
-#### A.2.5 Concrete KB budgets
-
-**Tier 0 — initial load (first paint → playable hot-seat game).** Hard cap **250 KB** over the wire.
-
-| Item | gzip |
-|---|---|
-| HTML + critical CSS | 8 KB |
-| `react@19` + `react-dom@19` | 58 KB |
-| App UI + engine + AI worker shim | 60 KB (budget) |
-| Animation: WAAPI (0) or `motion/mini` | 0–3 KB |
-| Data: species(1025) + typechart + moves-lite + ability/item names | 17 + 0.2 + 6.4 + 5.9 ≈ **30 KB** |
-| 32 board sprites (measured) | **33 KB** |
-| **Total** | **≈ 192 KB** — 23 % under cap |
-
-**Tier 1 — per game beyond Tier 0.**
-
-| Scenario | Additional bytes |
-|---|---|
-| New game, 32 new species, sprites uncached | **26 KB** |
-| New game, species already cached | **0 KB** |
-| Draft screen opened (icon sheet, once ever) | 383 KB |
-| Move-selection UI opened (learnsets chunk) | 49 KB brotli / 70 KB gzip |
-| Full move detail table (685 moves, all fields) | 11.6 KB brotli |
-
-**Tier 2 — opt-in HD / animated.** Never automatic; a Settings toggle with the cost printed on it.
-
-| Mode | per species | per 32-piece game | whole dex |
-|---|---|---|---|
-| `gen5` still (default) | 0.81 KB | 26 KB | 829 KB |
-| `dex` 120×120 still ("HD") | 4.2 KB | 134 KB | ~4.2 MB |
-| `ani` GIF ("Animated") | 61.9 KB (p95 146) | **1.98 MB** (p95 4.7 MB) | ~62 MB |
-
-**Worst case, stated honestly:** a player who enables Animated and plays a 32-species game on a cold
-cache downloads **~2.0 MB, p95 4.7 MB**. Mitigations: (a) HD/Animated fetch *per drafted species*
-during the draft, which is a natural 20–60 s window; (b) a hard 6 MB per-session ceiling on the
-animated cache, LRU-evicted; (c) if the drafted-team prefetch has not completed by the time the board
-mounts, render the `gen5` still and hot-swap the GIF in on load — the still is already there, so
-there is never a blank square. The 200 MB failure mode the Brief warns about only happens if you
-vendor `ani/` for the whole dex; we never do.
-
-#### A.2.6 Sizing, crispness and DPR
-
-- Board 640×640 ⇒ 80 px squares. A 96×96 sprite drawn into an 80 px box is a **0.833× downscale** with
-  `image-rendering: pixelated` — no blur, no upscaling artefacts. Verified visually.
-- On a 2× DPR display, 80 CSS px = 160 device px, so the sprite is upscaled 1.67×. With
-  `image-rendering: pixelated` ([MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/image-rendering))
-  this reads as deliberate chunky pixel art, not as a low-res mistake. This is the single most
-  important aesthetic decision in the asset plan: **commit to the pixel-art look** rather than fighting
-  it, because the alternative (smooth HD) costs 5× the bytes and looks worse at 80 px anyway (the
-  `dex/` row in my visual comparison was noticeably mushier).
-- Sprite box: 80×80, `background-size: 80px 80px`, anchored bottom-centre with a 4 px lift so the
-  Pokémon "stands" on the square. Larger species visually overflow their square slightly; allow it
-  (`overflow: visible` on the board) — it reads as scale and is much better than uniform squashing.
-  Verified in the screenshot comparison at both 80 px and native 96 px.
-- Below ~44 px squares (small phones), swap the piece background to the **icon sheet** cell
-  (40×30) — Showdown's icons are drawn for that size and stay legible where a downscaled 96 px
-  sprite turns to mush. One CSS class swap, driven by a container query.
-
-#### A.2.7 Licensing / attribution reality, and a stance
-
-The measured facts:
-
-- Pokémon names, sprites and artwork are © Nintendo / Creatures / GAME FREAK. No public licence grants
-  redistribution.
-- `smogon/pokemon-showdown-client` is AGPLv3 **for the code**, and the README states the repo
-  "doesn't include several resource files (namely, the `/audio/` and `/sprites/` directories) for size
-  reasons" — the art is deliberately *not in the repo* and carries no licence statement.
-  ([repo](https://github.com/smogon/pokemon-showdown-client))
-- `PokeAPI/sprites` has **no LICENSE file at all** — verified: `raw.githubusercontent.com/.../LICENSE`
-  returns 404. PokéAPI's own docs state a fair-use policy ("locally cache resources whenever you
-  request them") and say nothing about image licensing. ([PokéAPI docs](https://pokeapi.co/docs/v2))
-- The *data* we depend on (`@pkmn/dex`, `@pkmn/data`) is MIT-licensed code+data from
-  [pkmn/ps](https://github.com/pkmn/ps) and is safe to depend on and to bake.
-
-**Recommended stance — three rules:**
-
-1. **No Pokémon art in git, ever.** `.gitignore` already carries `public/sprites/` and the repo already
-   anticipates `npm run vendor:sprites`. Keep it that way. The repo stays Apache-2.0-clean and
-   contains only our own code plus MIT-licensed data.
-2. **`scripts/vendor-sprites.ts`** downloads the 829 KB gen5 set (+ the 383 KB icon sheet) from
-   Showdown into `public/sprites/`, with a checksum manifest, on the developer's or deployer's own
-   machine. It is a build-time convenience, not redistribution by us. Document rate-limit politeness
-   (concurrency 16, resume from disk cache — my probe did exactly this).
-3. **The game must be fully playable with zero Pokémon assets.** Ship a **Type Glyph mode**: each piece
-   renders as its chess glyph (♞ ♜ …) on a type-coloured hexagon with the type's 2-letter code, drawn
-   in pure CSS/SVG. 0 KB, no third-party IP, WCAG-contrast-checked, and it is also the correct
-   fallback for `prefers-reduced-data`, for offline first-run, and for anyone forking the repo. Make it
-   a first-class visual option, not an error state — a designer should make it look intentional.
-4. `ATTRIBUTION.md` naming Nintendo/Creatures/GAME FREAK, Smogon/Pokémon Showdown (sprites), the
-   Smogon Sprite Project (the Gen-5-style sprites for post-Gen-5 species), pkmn/ps (MIT data), and a
-   clear non-commercial, non-affiliated, fan-project statement with a takedown contact.
-
-I am not a lawyer and this is not legal advice; this is the standard posture of every long-lived
-Pokémon fan project and it is the minimum-risk option that still lets the game look good.
-
----
-
-### A.3 VFX plan
-
-The FX layer's job: make the type-matchup outcome **legible in under 300 ms** and satisfying without
-becoming a cutscene. Every capture already costs a d6 roll, so the animation is the *reveal* of a
-random outcome — it must feel like a slot machine landing, not a loading bar.
-
-#### A.3.1 The five outcomes, specified
-
-Total capture resolution is budgeted at **≤700 ms** in Normal speed. Anything longer and the game
-stops feeling like chess.
-
-| Phase | ms (Normal) | Layer | What is drawn |
-|---|---|---|---|
-| 0 — intent | 0 | DOM | attacker piece scales to 1.08, target square gains `.sq--targeted` ring |
-| 1 — approach | 0–140 | DOM | attacker `translate3d` to target, `cubic-bezier(.34,1.4,.64,1)` overshoot |
-| 2 — **die reveal** | 140–320 | Canvas | a 48 px d6 tumbles (6 frames of drawn pips) above the target square and lands; face 6 flashes gold, face 1 flashes red, 2–5 land grey and fade |
-| 3 — **verdict** | 320–520 | Canvas | outcome-specific, below |
-| 4 — settle | 520–700 | DOM | pieces removed / attacker seated; move list row appended; if extra move, board gains `.board--extra` glow and a "+1 MOVE" banner |
-
-Verdict visuals (phase 3), all on the one canvas, all ≤1500 particles total:
-
-| Outcome | Colour | Drawn | Sound | Words on screen |
-|---|---|---|---|---|
-| **Super effective** (type 2×, or die = 6 crit) | type colour of attacker, gold rim for crit | radial shockwave ring expanding 0→96 px + 240 burst particles + the attacking type's glyph stamped at 2× scale then shrinking | rising two-note sting | **"SUPER EFFECTIVE"** / **"CRITICAL HIT!"**, 2× line height, 180 ms punch-in |
-| **Not very effective** (type ½×) | desaturated slate | both sprites crack: 2 grey shatter fans of 90 particles each, drifting *apart* | dull thud, downward | **"NOT VERY EFFECTIVE — BOTH FALL"** |
-| **Miss** (die = 1) | red | red X drawn as two 6 px strokes over the target, 120 particles falling straight down under gravity | descending buzz | **"MISS — BOTH FALL"** |
-| **Immune** (0×) — *never animates* | — | move is illegal; on hover the target square shows a dashed grey ring + a `NO EFFECT` tooltip, and clicking it plays a 60 ms shake with no state change | soft "nope" click | **"NO EFFECT"** tooltip only |
-| **Neutral** | neutral white | 60-particle puff, no shockwave, target fades over 120 ms | short click | none |
-
-Design rules that make it legible rather than noisy:
-
-1. **Colour is redundant, never primary.** Every outcome also has distinct *motion* (outward
-   shockwave vs. bidirectional shatter vs. downward gravity vs. no motion), distinct *sound*, and
-   distinct *text*. A colour-blind player, a muted player, and a player who blinked all still get it.
-2. **Text is DOM, not canvas.** The verdict banner is a real `aria-live="assertive"` element so screen
-   readers announce "Super effective. Charizard captures Venusaur. Extra move." The canvas is
-   `aria-hidden="true"` and carries zero information that is not also in the DOM.
-3. **Immunity gets pre-emptive feedback, not post-hoc.** The single worst legibility failure in the
-   original rules is discovering mid-attempt that Ground cannot take Flying. On piece selection, the
-   engine's legal-move list already knows: illegal-by-type squares render with a distinct dashed
-   "no effect" affordance from the moment you pick the piece up. **Nothing about immunity is ever a
-   surprise.** (Measured: only **8** of 324 ordered single-type pairs are 0× — see §B.3.2 — so this
-   affordance is rare enough to feel special and common enough to matter.)
-4. **Extra-move chains stack, they don't replay.** A chain of 2 extra moves does not play the full
-   700 ms three times: the second and third links skip phase 0 and compress to 420 ms, and the "+1
-   MOVE" banner increments rather than re-animating. Chain cap is 2 (§B.2.4), so the worst case is
-   700 + 420 + 420 = **1540 ms**.
-5. **One particle budget.** A global cap of 1500 live particles, allocated from a preallocated
-   `Float32Array` ring buffer (x, y, vx, vy, life, size, hue = 7 floats × 1500 = 42 KB, zero GC
-   pressure). Measured cost at 2000 particles: 0.42 ms/frame. New effects that would exceed the cap
-   evict the oldest, so simultaneous FX degrade gracefully instead of dropping frames.
-
-#### A.3.2 Three speed modes
-
-A single `animationSpeed` setting in the store, read by both the DOM animation controller and the FX
-loop. Not a global CSS multiplier — each phase gets an explicit duration table.
-
-| Mode | Capture total | Piece slide | Die reveal | Particles | Notes |
-|---|---|---|---|---|---|
-| **Cinematic** | 1000 ms | 200 ms | 300 ms | 1500 | default for first 3 games (tutorial feel), then offer to speed up |
-| **Normal** (default) | 700 ms | 140 ms | 180 ms | 1500 | the table above |
-| **Fast** | 260 ms | 80 ms | **0 ms — result shown instantly** | 300 | verdict text + a single 100 ms flash. No die tumble. |
-| **Instant** | 0 ms | 0 ms | 0 ms | 0 | position snaps; verdict appears in the move list and in the `aria-live` region only |
-
-**Fast mode is not "Normal but shorter".** It removes the *suspense* phase entirely (the die is
-already resolved by the engine; the tumble is pure theatre) and keeps only the information. That is
-what a player on their 200th game actually wants. Bind it to a held modifier too:
-holding <kbd>Shift</kbd> while committing a move plays that one move at Instant speed.
-
-#### A.3.3 Reduced motion
-
-`@media (prefers-reduced-motion: reduce)`
-([MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion)) is honoured at
-two levels, and the setting is also exposed manually because OS-level preference is coarse.
-
-The reduced-motion path is **not** "Instant". Instant destroys the game's feedback loop. Instead:
-
-| Removed | Kept |
-|---|---|
-| all particles (canvas layer never starts its rAF loop) | verdict banner, held **900 ms** instead of 400 |
-| die tumble animation | die *result* rendered as a static pip face, held 500 ms |
-| screen shake, board glow, overshoot easing | a 2 px static outline pulse — one step, not a loop |
-| piece slide (position changes discretely) | 160 ms cross-fade so the eye can follow which piece moved |
-| capture-chain replays | "+1 MOVE" as static text |
-
-Implementation: `matchMedia('(prefers-reduced-motion: reduce)')` sets a store flag; the FX renderer
-short-circuits to a `StaticRenderer` that draws nothing and the DOM controller uses the
-`reducedDurations` table. **Test it**: a Vitest case asserting `FxQueue.enqueue()` produces zero
-canvas draw calls when the flag is set, plus one Playwright run with the media feature emulated.
-
----
-
-### A.4 Performance budgets we will hold the implementation to
-
-These are CI-enforceable gates, not aspirations. Each row names the enforcement mechanism.
-
-| Metric | Target | Fail build at | Measured today / basis | Enforced by |
-|---|---|---|---|---|
-| **Initial JS+CSS, gzip** | ≤ 180 KB | 200 KB | 126 KB accounted (React 58 + app budget 60 + anim 3 + html/css 8) | `size-limit` on the Vite output, per-chunk |
-| **Initial data, gzip** | ≤ 32 KB | 40 KB | ~30 KB measured/scaled | `size-limit` on `src/data/generated/*` |
-| **Total first-game bytes** | ≤ 250 KB | 300 KB | ~192 KB | Playwright: sum `resource` transferSize to first playable |
-| **Lazy chunks** | learnsets ≤ 80 KB; icon sheet ≤ 400 KB | — | 70 KB gz / 383 KB | `size-limit` |
-| **FCP, localhost** | ≤ 300 ms | 600 ms | **76 ms** measured | Playwright `paint` entries |
-| **Board fully painted (32 sprites)** | ≤ 500 ms | 1000 ms | **105 ms** measured (HTTP/1.1) | Playwright, in CI |
-| **TTI / interactive** | ≤ 1.5 s on simulated Slow-4G + 4× CPU throttle | 3.0 s | not yet measured | Lighthouse CI ([TTI](https://developer.chrome.com/docs/lighthouse/performance/interactive)) |
-| **Main-thread script per animating frame** | p95 ≤ 4.5 ms | 8 ms | **0.5 ms** measured | Playwright long-animation trace, p95 of `performance.measure` |
-| **Dropped frames during a capture animation** | 0 at 60 Hz | >2 | — | Playwright `requestAnimationFrame` delta histogram |
-| **INP on square click** | ≤ 100 ms | 200 ms | — | Playwright + `PerformanceObserver` |
-| **Live particles** | ≤ 1500 | hard clamp in code | 2000 measured at 0.42 ms | runtime assert in dev builds |
-| **JS heap after 100 moves** | ≤ 60 MB | 120 MB | — | Playwright `performance.measureUserAgentSpecificMemory()`; also asserts no growth ≥5 MB over moves 50→100 (leak gate) |
-| **Engine: legal-move generation, one position** | ≤ 1.0 ms | 3 ms | movegen measured at **8.5 M legal-nodes/s** (perft(5) = 4,865,351 in 598 ms) ⇒ ~0.004 ms/position | Vitest benchmark, `--fail-on-regress 20 %` |
-| **Engine: perft correctness** | perft(1..5) exact | any mismatch | perft(5)=4,865,351 ✓ | Vitest, plus `chess.js` differential test |
-| **AI: think time, Normal difficulty** | p50 700 ms, **p95 ≤ 1200 ms** | 2000 ms | see §B.5 | Vitest bench over 200 stored positions |
-| **AI: worker never blocks UI** | main-thread block from AI = 0 ms | >16 ms | — | Playwright: assert no long task while AI thinks |
-| **Bundle has no `@pkmn/*` at runtime** | 0 bytes | any | — | `rollup-plugin-visualizer` assertion in CI |
-
-Two budgets deserve comment:
-
-- **The memory-leak gate matters more than the absolute cap.** A chess UI that leaks 500 KB per move
-  is fine for 10 moves and dead at move 300. Assert *no growth*, not just a ceiling.
-- **AI p95, not p50.** An AI that averages 400 ms but occasionally takes 6 s feels broken. Iterative
-  deepening with a hard wall-clock abort (§B.4.4) makes p95 a *contract*, not a hope.
-
----
-
-### A.5 File layout for the rendering half
-
-```
-src/
-  ui/
-    board/
-      Board.tsx            # 64 <button class=sq>, React, renders once per position
-      Piece.tsx            # one div, background-image, no state
-      squares.ts           # square <-> pixel math, single source of truth
-      Board.module.css
-    fx/
-      FxQueue.ts           # pure: enqueue(FxEvent) -> deterministic particle emissions
-      Renderer.ts          # interface { draw(dt): void }  <-- swap point for future WebGL
-      Canvas2DRenderer.ts  # the one implementation
-      StaticRenderer.ts    # prefers-reduced-motion: draws nothing
-      particles.ts         # Float32Array ring buffer, cap 1500
-      effects/             # oneOf: superEffective.ts, mutual.ts, miss.ts, neutral.ts, die.ts
-    anim/
-      MoveAnimator.ts      # WAAPI; owns durations table per speed mode
-      durations.ts         # cinematic | normal | fast | instant | reduced
-    sprites/
-      spriteUrl.ts         # generated: id -> '/sprites/gen5/<id>.png' (baked, no @pkmn/img)
-      iconOffsets.ts       # generated: id -> [left, top] into pokemonicons-sheet.png
-      glyphMode.ts         # Type Glyph fallback renderer, 0 assets
-scripts/
-  vendor-sprites.ts        # downloads 829 KB + 383 KB into public/sprites/, checksummed
-  gen-data.ts              # already exists; extend to emit spriteUrl/iconOffsets
-public/
-  sprites/                 # GITIGNORED. never committed.
-```
-
-`FxQueue` being pure and deterministic is deliberate: it lets a Vitest test assert "a super-effective
-capture with seed 7 emits exactly 240 particles with these initial velocities", which is the only way
-FX code stays testable.
-
----
-
-## PART B — AI OPPONENT
-
-### B.1 Why no off-the-shelf engine, and what survives
-
-#### B.1.1 Stockfish
-
-Stockfish is not a "chess reasoner" you can point at a board. It is a program whose every layer
-assumes the rules of chess as a compile-time constant:
-
-1. **Bitboards.** Move generation is `magic bitboards` over `U64` masks precomputed for exactly 64
-   squares and exactly 6 piece types. Our pieces have a *type* (18 values) and a per-pair capture
-   legality relation. There is no bitboard formulation of "this rook may not capture that bishop
-   because Ground cannot hit Flying" — legality depends on the pair, which is not expressible as a
-   per-piece attack mask.
-2. **NNUE evaluation.** The network's input features are (king square × piece × square) tuples.
-   A Pokémon's type, status, HP and item are simply not in the input space. Retraining is not
-   "configuration"; it is generating billions of self-play positions for a game whose rules do not
-   exist yet.
-3. **Determinism.** The search assumes `makeMove` is a function. Ours is a distribution: the same
-   move produces capture, mutual destruction, or capture-plus-extra-move depending on a d6. There is
-   no chance-node concept anywhere in Stockfish's search.
-4. **UCI cannot express our position.** UCI transmits `position fen <FEN> moves ...`
-   ([UCI](https://www.chessprogramming.org/UCI)). FEN has 12 piece symbols. Encoding 18 types × 6
-   classes × status × HP × item requires extending FEN, which the engine will reject. There is no
-   UCI field for "it is still my turn because I got a free move."
-
-**Could we use Stockfish for pure-chess sub-positions?** No, and the reason is worth stating because
-it looks tempting. A sub-position is only "pure chess" if no capture will ever be type-affected — but
-every piece carries a type permanently, so *every* capture in *every* line is stochastic and
-type-gated. There is no subtree of the game that is standard chess. Even the pawn-storm endgame where
-no capture is currently available is not pure: Stockfish's evaluation would price a passed pawn's
-promotion race using standard piece values, while in our game a Bug-type queen is worth ~0.86× and a
-Steel-type queen ~1.15× (measured, §B.3.2), and a Ghost-type king may be literally uncapturable by
-half the enemy army. Its answers would be confidently wrong in exactly the positions where type
-knowledge is supposed to decide the game — i.e. it would destroy the entire premise.
-
-The narrow exception where Stockfish *is* usable: as an **offline analysis tool during development**,
-to sanity-check that our engine's plain-chess move generation and our search's basic tactical
-competence are not broken, on positions we have deliberately constructed to be type-neutral
-(all 32 pieces the same type ⇒ every capture is 1×). That is a test harness, not a feature.
-`chess.js` ([repo](https://github.com/jhlywa/chess.js)) already covers legality; Stockfish would only
-add "is our eval sane", which our own self-play covers more cheaply.
-
-#### B.1.2 Fairy-Stockfish
-
-Fairy-Stockfish is the strongest candidate and it still fails. Its `variants.ini` is a **fixed
-declarative parameter list**, not a scripting language. I read the variant-configuration
-documentation ([wiki](https://github.com/fairy-stockfish/Fairy-Stockfish/wiki/Variant-configuration))
-and enumerated what it exposes: piece definitions (Betza notation), board geometry, `startFen`,
-pawn double/triple-step regions, castling, promotion, drops/pockets, `mustCapture`, `checking`, and
-win conditions (`checkmateValue`, `extinctionValue`, `flagPiece`, `nMoveRule`, `nFoldRule`, …).
-
-Against our four core mechanics:
-
-| Our mechanic | Expressible in `variants.ini`? |
-|---|---|
-| d6 randomness on capture | **No.** Every option is deterministic. There is no chance-node machinery in the search at all. |
-| Mutual destruction (both pieces removed) | **No.** Nothing parameterises capture *resolution*. Atomic chess explodes neighbours, but that is hard-coded C++, not configurable. |
-| Super-effective ⇒ extra move | **No.** Turn alternation is not parameterised. |
-| Capture legality depends on the (attacker, defender) *pair* | **No.** Betza notation restricts what a piece captures *like* (`b:mWBcB`, `q:cQ`), and mobility regions restrict *where* — never *which enemy*. |
-
-Even a C++ fork would need a new chance-node search, a new evaluation, and a new
-position representation — i.e. the whole engine — while inheriting 100 k lines of chess-specific
-assumptions, a build toolchain we do not want (Emscripten →
-[stockfish.wasm](https://github.com/lichess-org/stockfish.wasm) needs SharedArrayBuffer, hence
-COOP/COEP headers, which breaks static hosting), and a GPL licence that conflicts with the repo's
-Apache-2.0.
-
-#### B.1.3 What is salvageable
-
-Ideas, not code. All of these are ~50–200 lines each in TS and all of them survive our rule changes:
-
-- Iterative deepening with aspiration windows ([CPW](https://www.chessprogramming.org/Iterative_Deepening))
-- Transposition table with Zobrist keys ([CPW](https://www.chessprogramming.org/Zobrist_Hashing),
-  [CPW](https://www.chessprogramming.org/Transposition_Table)) — extended, see §B.4.3
-- Quiescence search ([CPW](https://www.chessprogramming.org/Quiescence_Search)) — redefined, see §B.2.5
-- MVV-LVA + killer moves + history heuristic for ordering
-- Late move reductions ([CPW](https://www.chessprogramming.org/Late_Move_Reductions))
-- Piece-square tables, mobility, king safety as eval terms
-- 0x88 board representation. **Already validated here**: my probe's 0x88 generator produces
-  `perft(5) = 4,865,351` — the exact published value — at 8.5 M legal-nodes/s in plain JS.
-
----
-
-### B.2 Search architecture
-
-#### B.2.1 The problem, quantified
-
-I built a full working prototype: a 0x88 alpha-beta negamax with MVV-LVA ordering, a synthetic
-18-type assignment per square, a synthetic 18×18 effectiveness table matched to the real
-distribution (2.5 % 0×, 18.8 % ½×, 63 % 1×, 15.7 % 2×), the d6 rule, mutual destruction, illegal
-captures, and extra-move chains capped at 2. Then I measured six ways of handling the chance node
-(`probe_rendersearch_search.mjs`). Nodes and wall-clock, Node v24 on this machine:
-
-**From the initial position** (0 captures available — the easy case):
-
-| mode | d4 | d5 | d6 | d7 |
-|---|---|---|---|---|
-| **P** plain chess (no variant rules) | 1,435 n / 6 ms | 24,600 / 21 | 297,311 / 97 | 967,838 / 328 |
-| **A** chance nodes, α/β passed through to children (unsound) | 1,615 / 2 | 62,944 / 27 | 223,918 / 86 | 7,595,508 / 2979 |
-| **B** chance nodes, full window at children (sound) | 210,618 / 63 | 5,314,468 / 1951 | **135,399,968 / 40,265** | — |
-| **G** collapse to modal outcome (deterministic) | 1,472 / 2 | 24,960 / 12 | 328,106 / 130 | 4,043,780 / 1712 |
-| **H** single sampled outcome | 1,451 / 2 | 20,459 / 10 | 51,801 / 23 | 1,711,403 / 734 |
-| **I** star1 with ±900 cp eval bounds | 1,609 / 2 | 65,245 / 30 | 810,920 / 289 | 6,454,932 / 2582 |
-
-**From a middlegame position** (4 captures available — the realistic case):
-
-| mode | d4 | d5 | d6 | d7 |
-|---|---|---|---|---|
-| **P** plain chess | 2,610 n / 2 ms | 19,828 / 13 | 45,161 / 31 | 578,878 / 314 |
-| **A** unsound α/β pass-through | 84,221 / 39 | 500,753 / 316 | 4,817,330 / 2059 | 40,893,331 / 16,892 |
-| **B** sound full-window | 4,379,122 / 1377 | **186,867,880 / 65,455** | — | — |
-| **G** modal collapse | 2,554 / 2 | 17,258 / 12 | **42,943 / 34** | 408,683 / 210 |
-| **H** single sample | 3,800 / 4 | 26,857 / 18 | 75,691 / 44 | 618,019 / 304 |
-| **I** star1, ±900 bounds | 41,977 / 18 | 661,608 / 268 | 7,351,339 / 3030 | 112,783,446 / 44,944 |
-
-Read the middlegame depth-6 column: plain chess **45 k nodes / 31 ms**; sound expectiminimax is
-already at **187 M nodes / 65 s at depth 5**; collapsed search is **43 k / 34 ms** — the *same cost as
-plain chess*. And an earlier run (`probe_render_star2.mjs`, `probe_render_modeE.mjs`) isolated the
-extra-move chain cost: at depth 7 from the start, chains capped at 2 = 12.86 M nodes, capped at 1 =
-11.87 M, banned = 8.38 M — chains cost **+53 %**, not a blow-up.
-
-#### B.2.2 star1/star2 is a trap here — and this is the counter-intuitive finding
-
-The textbook answer to chance nodes is Ballard's \*-minimax
-(Ballard, B. W., "The \*-minimax search procedure for trees containing chance nodes",
-*Artificial Intelligence* 21(3):327–350, 1983; see also Hauk, Buro & Schaeffer, "Rediscovering
-\*-Minimax Search", *Computers and Games* 2006, LNCS 3846,
-[Springer](https://link.springer.com/chapter/10.1007/11922155_3), and
-[Wikipedia: Expectiminimax](https://en.wikipedia.org/wiki/Expectiminimax)).
-
-**It makes our search slower.** Measured, from the initial position at depth 7:
-
-```
-B  sound, no pruning at chance children      12,863,796 nodes / 3,983 ms
-C  star1 with running bounds (±3000 cp)      22,285,750 nodes / 6,907 ms   <-- 1.7x WORSE
-```
-
-and at middlegame depth 6, `I` (star1, tighter ±900 bounds) is 7.35 M nodes vs `A`'s 4.82 M —
-still worse than doing nothing clever.
-
-The reason is structural, and it is visible in the star1 formula itself. Wikipedia states it as
-`αᵢ = N·α − (v₁+…+vᵢ₋₁) + U·(n−i)`, with `L`/`U` the **global** bounds on any leaf value. Two of our
-properties break it:
-
-1. **`n` is tiny.** Our chance node has **2 or 3 children**, never 21 like backgammon's dice rolls.
-   Star1's win comes from cutting off child 3 of 21; with 3 children the best case is skipping one.
-2. **`U − L` is huge relative to `β − α`.** With material-based eval, `U − L` must cover at least
-   ±queen, realistically ±mate. Substituting `N=3`, `U=+3000`, `L=−3000` into the formula gives a child
-   window *wider than* `[α, β]`. So star1 doesn't just fail to cut — it **widens the window it passes
-   down**, destroying the ordinary alpha-beta pruning inside each child's subtree. That is exactly the
-   1.7× regression I measured.
-
-Star1/star2 need many chance outcomes and tight value bounds. We have few outcomes and loose bounds.
-**Do not implement star1.** This is the single most expensive wrong turn available in this project,
-and it is the one a competent implementer reading the literature would take.
-
-#### B.2.3 The recommended architecture: Collapsed-Interior / Exact-Root
-
-```
-pickMove(position, timeBudget):
-  for depth in 1..MAX:                              # iterative deepening
-    for each root move m (ordered: TT move, then MVV-LVA, then history):
-      if m is a capture:
-         # EXACT chance expansion, root only: 2-3 children
-         value(m) = Σ_outcome  P(outcome) · negamax(apply(m, outcome), depth-1, ...)
-      else:
-         value(m) = negamax(apply(m), depth-1, ...)
-    if elapsed > timeBudget: break                  # keep last completed depth's best move
-  return argmax value
-
-negamax(pos, depth, α, β):                          # INTERIOR: fully deterministic
-  ... standard alpha-beta ...
-  for each move m:
-    if m is a capture:
-       if effectiveness(attacker, defender) == 0: continue          # illegal, prune entirely
-       outcomes = chanceOutcomes(m)                                  # 2 or 3, with probabilities
-       modal    = argmax_p outcomes                                  # the ≥4/6 branch
-       bias     = Σ_o P(o)·materialDelta(o)  −  materialDelta(modal)  # static EV correction, cheap
-       child    = apply(m, modal)                                    # ONE successor
-       v        = (modal grants extra move && chain < 2)
-                    ? +negamax(child, depth-1, α, β)                 # same side to move
-                    : -negamax(child, depth-1, -β, -α)
-       v += bias
-    else:
-       v = -negamax(apply(m), depth-1, -β, -α)
-    ... normal α/β update, TT store, cutoffs ...
-```
-
-Three claims, each measured.
-
-**Claim 1 — interior exactness buys nothing.** I built the full variant game (real d6 rolls, mutual
-destruction, illegal captures, extra-move chains, promotion, king-capture termination) and ran an
-**equal-node-budget match** between the sound interior agent (`A`) and the collapsed interior agent
-(`J` = modal collapse + static EV bias). *Both* agents use exact chance expansion at the root, so the
-experiment isolates the interior treatment. Both run iterative deepening until the node budget is
-spent (`probe_rendersearch_selfplay.mjs`):
-
-```
-budget = 40,000 nodes/move,  80 games:  J 37 – 25 A, 18 draws  -> J scores 57 %   (avg 93 plies)
-budget = 150,000 nodes/move, 40 games:  J 14 – 17 A,  9 draws  -> J scores 46 %   (avg 96 plies)
-pooled, 120 games:                                                J scores 53.8 % ± 4.6 % (1 s.e.)
-```
-
-Not a significant difference. **Exact interior chance-node averaging is worth ~0 Elo at equal
-budget** — and it costs 100–4000× more nodes per depth (§B.2.1), which means far worse worst-case
-latency and a completely unusable time-management story. Collapse.
-
-**Claim 2 — root exactness is free and worth keeping.** The root has ~30 moves × ≤3 outcomes; the
-cost is one extra depth-1 subtree per capture. Measured overhead: root-exact + collapsed interior
-cost 500,623 nodes vs 452,768 for fully-collapsed (`probe_rendersearch_agree.mjs`) — **+11 %**. And it
-matters qualitatively: the *decision the player sees* is the one that correctly prices "1/6 chance I
-lose my queen for nothing." An AI that walks into a coin-flip it could have avoided reads as stupid
-in a way that a slightly weaker deep line does not.
-
-**Claim 3 — the static EV bias is the important half of the collapse.** Naive modal collapse (`G`)
-systematically over-values captures (it always assumes the likely-good branch and never pays for the
-1/6 miss): at midgame depth 7, `G` scored the position at +1012 while sound `A` said +1906 — biased,
-and biased *inconsistently*. Adding `bias = Σ P(o)·Δmaterial(o) − Δmaterial(modal)` prices the tail
-outcomes with one multiply-add per capture and no extra nodes. Root-move agreement with the sound
-search at fixed depth 4 over 24 random positions: `G` 42 %, `J` 46 %, root-hybrid 54 % (top-3
-agreement `G` 63 %, `J` 67 %). The agreement is low in absolute terms because random positions have
-many near-equal moves — but `J > G` consistently, and the self-play result above is the number that
-actually decides it.
-
-**Rejected alternatives, with reasons:**
-
-- **Full expectiminimax (mode B).** 187 M nodes at depth 5. Not a candidate.
-- **star1/star2 (modes C, I).** Slower than doing nothing here. §B.2.2.
-- **Unsound α/β pass-through at chance children (mode A).** Tempting because it is a 3-line change
-  from B, but it is *wrong* (a child's value can legitimately lie outside the parent window while the
-  average does not), it still costs 100× at depth 6, and it buys no strength (Claim 1).
-- **Single-sample chance nodes (mode H).** Cheapest of all (75 k nodes at midgame d6) but introduces
-  search *variance*: the same position searched twice gives different answers, which breaks the
-  transposition table, breaks reproducibility (the Brief demands a deterministic engine), and makes
-  bugs unreproducible. Use it only as a deliberate "Chaotic" personality (§B.5), never as the default.
-- **MCTS / UCT.** Genuinely attractive on paper: chance nodes are free (you just sample), extra-move
-  chains are free (they are just longer rollouts), and it handles the branching factor naturally
-  ([CPW: MCTS](https://www.chessprogramming.org/Monte-Carlo_Tree_Search)). It loses for three
-  concrete reasons. (i) **Random rollouts are worthless in chess-like games** — the classic result;
-  a random playout from a won position throws the win away, so you need a strong policy/value net,
-  which we do not have and cannot train without a finished ruleset. (ii) **Tactics.** Our game is
-  *sharper* than chess, not softer: a single missed super-effective capture chain can be losing, and
-  UCT's averaging notoriously under-weights single narrow refutations. (iii) **Latency profile.** MCTS
-  gives a usable answer at any time, which is nice, but at our budget (≈500 k nodes) alpha-beta with
-  a decent eval reaches depth 6–7, and depth is what punishes a human's tactical errors. Revisit MCTS
-  only if a v3 adds a learned value function.
-- **Flat Monte Carlo** (sample each root move N times to a fixed depth with random play): strictly
-  dominated by the above. It cannot see forced sequences at all. Its only virtue is that it is 40 lines
-  — which makes it a fine *baseline opponent for testing* our real AI's strength, and nothing else.
-
-#### B.2.4 What a "ply" means, and why the game terminates
-
-An extra move is **not a new turn**. In the search it is a child at `depth − 1` with the *same side to
-move* and no negation:
-
-```
-v = +negamax(child, depth − 1, α, β)     // extra move: same player, same window sign
-v = -negamax(child, depth − 1, -β, -α)   // normal: opponent to move
-```
-
-This is the correct formulation because search depth measures *decisions*, and an extra move is a
-decision. It also gives the termination bound for free:
-
-- **Chain cap = 2.** A single turn is at most 3 board moves (initial + 2 extras).
-- Each link in a chain is *necessarily a capture* (only captures roll dice), so each link removes at
-  least one enemy piece. With 16 enemy pieces, the total number of chain links in an entire game is
-  ≤16 regardless of the cap — but the per-turn cap is what makes the *search* depth-bounded and the
-  *animation* time-bounded (§A.3.1: worst case 1540 ms).
-- Measured cost of the cap: banning chains 8.38 M nodes → cap 1: 11.87 M → cap 2: 12.86 M at depth 7.
-  **Cap 2 costs +53 % over banning them.** Affordable, and cap 3+ is not worth measuring because the
-  UX (a 2+ second uninterruptible enemy turn) is already at its limit.
-- In the deepest self-play games the maximum observed chain length was tracked and never exceeded the
-  cap, i.e. the cap binds rather than being decorative.
-
-*This section only addresses the search's need for a bound. The game-rules argument for why chains
-terminate (and the check/checkmate/mutual-destruction model) belongs to the rules recon; the search
-requires only that a turn has a compile-time maximum number of decisions, which the cap of 2
-guarantees.*
-
-#### B.2.5 Quiescence, redefined
-
-Standard quiescence extends the search over captures until the position is "quiet". Our version needs
-two changes:
-
-1. **A capture is not a stable evaluation point.** After a capture there is a ⅙ chance the attacker is
-   also gone. So the quiescence node must use the *collapsed + EV-biased* value, not the raw material
-   swing. Reuse the same `bias` term.
-2. **Mutual destruction makes bad trades cheap** (the Brief's "suicide-capture as a tactic"). Standard
-   SEE (static exchange evaluation) is therefore wrong: capturing a queen with a pawn when the type
-   matchup is ½× is a *good* trade in our game (you spend a pawn to guarantee a queen dies). So
-   quiescence must **not** prune "losing" captures by SEE. Instead prune by *expected* material:
-   `EΔ = Σ P(o)·Δmaterial(o)`, and search any capture with `EΔ > −0.5 pawn`. That single change is
-   what will make the AI play the variant rather than play chess badly.
-3. Depth limit 6 quiescence plies, and **captures granting extra moves are searched in quiescence**
-   (they are the sharpest tactic in the game).
-
----
-
-### B.3 Evaluation function
-
-#### B.3.1 The sketch
-
-All terms are computed for the side to move minus the opponent, in centipawn-equivalents.
-
-```
-eval(pos) =
-    Σ_p  side(p) · pieceValue(p, pos)            // material, type-aware
-  + Σ_p  side(p) · pst[class(p)][sq(p)][phase]   // piece-square tables
-  + W_MOB · Δ mobility                           // legal moves, capped per piece
-  + W_KS  · Δ kingSafety
-  + W_COV · Δ typeCoverage                       // vs the ENEMY's actual army  <-- the variant's soul
-  + W_THR · Δ superEffectiveThreats              // SE captures available next move
-  - W_VUL · Δ superEffectiveVulnerability        // SE captures the enemy has on us
-  + W_IMM · Δ immunityShield                     // our pieces no enemy piece can legally take
-  + W_TMP · tempoBonus                           // small, side-to-move
-  + W_STA · Δ statusScore                        // v2: burn/para/sleep on pieces
-  + W_HAZ · Δ hazardScore                        // v2: spikes-style square effects
-```
-
-with
-
-```
-pieceValue(p, pos) = baseValue[class(p)] · typeMultiplier(type(p)) · (1 + 0.15·armyFit(p, pos))
-
-baseValue = { P: 100, N: 320, B: 330, R: 500, Q: 900, K: 20000 }   // measured-prototype values
-
-typeMultiplier(t)  = static, precomputed from the 18×18 chart (table in B.3.2)
-
-armyFit(p, pos)    = normalised count of ENEMY pieces this piece can hit super-effectively,
-                     weighted by their value:
-                     Σ_{e ∈ enemy} value(e) · [eff(type(p), type(e)) == 2]
-                     −  Σ_{e ∈ enemy} value(e) · [eff(type(p), type(e)) == 0]      // dead weight
-                     all over Σ_{e} value(e)
-```
-
-Term definitions, concretely:
-
-| Term | Definition | Suggested weight | Why |
-|---|---|---|---|
-| `typeCoverage` | number of the 18 types the army holds ≥1 piece that hits 2× | 12 per type covered | rewards a broad draft; punishes mono-type armies |
-| `superEffectiveThreats` | Σ over (our piece, enemy piece) pairs where the capture is *available this move* and 2×, of `0.35 · value(enemy)` | 1.0 | 0.35 ≈ P(extra move) − P(mutual) from the measured table (§B.3.2), so the term is calibrated, not invented |
-| `superEffectiveVulnerability` | same, with colours swapped | 1.2 | asymmetric: fear beats greed, standard in chess evals |
-| `immunityShield` | Σ over our pieces of `0.10 · value(p)` if **no** enemy piece has a legal capture of `p` by type, else 0 | 1.0 | prices the Brief's "untouchable Flying piece" problem into the eval instead of leaving it as a rules exploit |
-| `mobility` | legal destination count per piece, capped at 8 per piece, **counting type-illegal captures as 0** | 3 per move | must use *variant* mobility, or the AI over-values a Ground rook staring at a Flying wall |
-| `kingSafety` | pawn-shield count + attacker count on the 8 king-adjacent squares, **× (1 − immunityFraction(king))** | −25 per attacker | a Ghost king attacked only by Normal/Fighting pieces is *not* in danger — this is the term that makes type knowledge feel powerful |
-
-**Design judgement I want on record:** the static per-type multiplier has a measured spread of only
-**±15 %** (§B.3.2). That means a naive "Steel pieces are worth more" eval is a *small* correction.
-The terms that actually carry the variant — `armyFit`, `typeCoverage`, `superEffectiveThreats`,
-`immunityShield`, and the king-safety immunity discount — are all **relational**: they depend on
-*which types the opponent drafted*. That is the correct shape for this game, because it is what makes
-"I know types" convert into "I win": the strong player reads *this* enemy army, not a type tier list.
-If you implement only one non-chess eval term, implement `superEffectiveVulnerability`.
-
-#### B.3.2 The type table, computed from the real Gen 9 chart
-
-`probe_rendersearch_typevalue.mjs`, real `@pkmn/data` type chart, against single-type defenders,
-including the d6 (P(crit) = P(miss) = 1/6):
-
-| type | ATK 2× / 1× / ½× / 0× | DEF 2× / 1× / ½× / 0× | P(extra move) | P(mutual kill) | P(illegal) | P(survive an attack) |
+| DOM board + per-frame `transform`/`opacity` writes from rAF | 8.3 / 9.2 / 12.5 | 8.3 / 9.3 / 16.9 | 8.3 / 9.0 / **42.1** | 8.3 / 8.9 / **91.7** | **16.7** / **33.3** / **333** |
+| DOM board + CSS/WAAPI keyframes (compositor-driven) | 8.3 / 9.2 / 9.4 | 8.3 / 8.5 / 9.4 | 8.3 / 9.0 / 15.7 | 8.4 / **17.6** / **83.2** | **49.9** / **58.4** / **391** |
+| Canvas2D, full redraw of board + 32 sprites + fx | 8.3 / 9.2 / 25.0 | 8.3 / 8.4 / 9.3 | 8.3 / 8.4 / 9.3 | 8.3 / 8.5 / 41.6 | **8.3 / 8.4 / 9.3** |
+| **Hybrid: DOM board + Canvas2D fx layer** | 8.3 / 8.4 / 8.7 | 8.3 / 8.4 / 9.1 | 8.3 / 8.4 / 9.1 | 8.3 / 8.4 / 9.3 | **8.3 / 8.4 / 8.6** |
+
+Two things fall out immediately.
+
+- **Canvas2D and the hybrid stay pinned to vsync at 4,000 simultaneous effects.** DOM breaks between
+  1,500 and 4,000.
+- **WAAPI/CSS keyframes break *earlier* than rAF style writes** at 1,500 (p95 17.6 vs 8.9). This is
+  counter-intuitive and worth knowing: each independently-timed composited animation gets its own
+  compositor layer, and 1,500 layers cost more than 1,500 transform writes on one layer each frame.
+  *Consequence: cap concurrent composited CSS animations at ~200 and push the rest to canvas.*
+
+#### 1.2 Per-frame CPU cost, isolated (ms/frame — the hardware-scalable numbers)
+
+| Work | 0 | 200 | 600 | 1500 | 4000 | 10000 |
 |---|---|---|---|---|---|---|
-| Fighting | 5 / 7 / 5 / 1 | 3 / 12 / 3 / 0 | .363 | .363 | .056 | .278 |
-| Ground | 5 / 10 / 2 / 1 | 3 / 12 / 2 / 1 | **.363** | .245 | .056 | .287 |
-| Fire | 4 / 10 / 4 / 0 | 3 / 9 / 6 / 0 | .315 | .315 | 0 | .389 |
-| Ice | 4 / 10 / 4 / 0 | 4 / 13 / 1 / 0 | .315 | .315 | 0 | **.204** |
-| Rock | 4 / 11 / 3 / 0 | 5 / 9 / 4 / 0 | .315 | .278 | 0 | .315 |
-| Water | 3 / 12 / 3 / 0 | 2 / 12 / 4 / 0 | .278 | .278 | 0 | .315 |
-| Grass | 3 / 8 / 7 / 0 | 5 / 9 / 4 / 0 | .278 | **.426** | 0 | .315 |
-| Flying | 3 / 12 / 3 / 0 | 3 / 11 / 3 / 1 | .278 | .278 | 0 | .324 |
-| Bug | 3 / 8 / 7 / 0 | 3 / 12 / 3 / 0 | .278 | **.426** | 0 | .278 |
-| Steel | 3 / 11 / 4 / 0 | 3 / **4** / **10** / 1 | .278 | .315 | 0 | **.583** |
-| Fairy | 3 / 12 / 3 / 0 | 2 / 12 / 3 / 1 | .278 | .278 | 0 | .324 |
-| Electric | 2 / 12 / 3 / 1 | 1 / 14 / 3 / 0 | .245 | .284 | .056 | .278 |
-| Poison | 2 / 11 / 4 / 1 | 2 / 11 / 5 / 0 | .245 | .324 | .056 | .352 |
-| Psychic | 2 / 13 / 2 / 1 | 3 / 13 / 2 / 0 | .245 | .245 | .056 | .241 |
-| Ghost | 2 / 14 / 1 / 1 | 2 / 12 / 2 / **2** | .245 | **.206** | .056 | .333 |
-| Dark | 2 / 13 / 3 / 0 | 3 / 12 / 2 / 1 | .241 | .278 | 0 | .287 |
-| Dragon | 1 / 15 / 1 / 1 | 3 / 11 / 4 / 0 | .206 | .206 | .056 | .315 |
-| Normal | **0** / 15 / 2 / 1 | 1 / 16 / 0 / 1 | **.167** | .245 | .056 | .213 |
+| Canvas2D: `clearRect` + 64 squares + 32 sprite `drawImage` + 32 rings + N particles | **0.027** | 0.052 | **0.102** | 0.167 | **0.352** | **0.842** |
+| DOM: write `transform`+`opacity` on N elements, then force style recalc + layout | 0.000 | 0.238 | **0.698** | 2.053 | **5.380** | — |
+| DOM: rebuild the entire 64-square board from scratch (`createElement` ×129 + layout) | **0.392** | | | | | |
 
-Derived scalar for `typeMultiplier`, using
-`1 + 0.9·(P_extra − μ) − 0.9·(P_mutual − μ) + 0.6·(P_survive − μ)`:
+Per-unit cost: **canvas particle ≈ 0.08 µs**, **animated DOM element ≈ 1.35 µs**. Canvas is **17×
+cheaper per moving thing**. But the DOM board costs **0.39 ms for a total teardown-and-rebuild**,
+which is a rounding error — a targeted diff of the ≤8 squares that actually changed is
+~0.05 ms.
+
+#### 1.3 DOM node count and bundle facts, measured in the real repo
+
+| Fact | Value |
+|---|---|
+| DOM nodes in a full 8×8 board with 32 pieces, rings and side markers | **129** |
+| Entry chunk `dist/assets/index-*.js` | 206,003 raw / **65,154 gz** |
+| React 19 + `react-dom/client`, bundled+minified alone | 190,850 raw / **59,285 gz** |
+| ⇒ the app's own code in the entry chunk | **≈ 5,900 gz (9%)** |
+| Preact 10 core, bundled+minified | 10,370 raw / **4,376 gz** |
+| `pixi.js@8` `dist/pixi.min.mjs` | 819,517 raw / **231,272 gz** |
+| `@lichess-org/chessground@10` `dist/chessground.min.js` | 32,686 raw / **12,089 gz** |
+| Lazy data chunks (gz) | species 76.9 · moves 77.9 · learnsets 75.6 · abilities 21.6 · items 21.9 · typechart 0.33 = **274 KB** |
+| CSS | 837 raw / **521 gz** |
+
+### 2. The four architectures, compared and decided
+
+#### DOM + CSS transforms
+- **For.** It is what we already have and it is the only option that gets accessibility for free: 64
+  focusable `<button>`s with `aria-label`s, native keyboard traversal, browser zoom, text selection,
+  high-contrast mode, and a screen reader that can read the board square by square. The
+  [WAI-ARIA `grid` pattern](https://www.w3.org/WAI/ARIA/apg/patterns/grid/) applies directly and gives
+  us arrow-key navigation with no custom hit-testing. `transform` and `opacity` are the two
+  compositor-only properties, so simple motion never touches layout
+  ([MDN, animation performance](https://developer.mozilla.org/en-US/docs/Web/Performance/Animation_performance_and_frame_rate)).
+  Zero bundle cost. Lichess's own board renderer, **Chessground**, is DOM-based —
+  "uses a custom DOM diff algorithm to reduce DOM writes to the absolute minimum… 10K gzipped… SVG
+  drawing of circles, arrows" (<https://github.com/lichess-org/chessground>). The largest chess site
+  in the world made this call.
+- **Against.** Measured ceiling ~1,000 concurrently animated elements before the frame breaks
+  (§1.2: 600 → 0.70 ms, 1,500 → 2.05 ms, and the frame-interval table shows p95 failure at 1,500 with
+  WAAPI). DIRECTION.md §"Visuals" asks for weather over the whole board, hazards on squares, status on
+  pieces and a capture animation *simultaneously* — that is a particle budget, and particles are where
+  DOM loses 17:1.
+- **Licensing note.** Chessground is **GPL-3.0**. This repo is Apache-2.0. Read it as an architectural
+  reference; do not vendor, copy or link it. That would relicense the project.
+
+#### Canvas2D (everything)
+- **For.** Cheapest per moving thing by a wide margin, and it held 8.3 ms at 4,000 particles *including
+  redrawing the board and all 32 sprites every frame*.
+- **Against.** It forfeits every accessibility affordance in one move: no focusable squares, no aria
+  tree, no keyboard model, nothing for a screen reader, and hit-testing, focus rings, hover states and
+  tooltips all become our code. The standard mitigation is a parallel invisible DOM tree mirroring the
+  canvas — at which point you are maintaining both and paying the DOM cost anyway. DIRECTION.md ranks
+  legibility as a hard constraint; a canvas board makes the most basic legibility affordance (reading
+  the board) a bespoke engineering project. **Rejected as the primary surface.**
+
+#### WebGL via PixiJS
+- **For.** Effectively unlimited sprite/particle throughput, real shaders (type-coloured additive
+  glows, distortion on a super-effective hit, weather as a full-board shader).
+- **Against, decisively.** **231 KB gz measured** — it would make our entry chunk 4.5× larger to solve
+  a problem the measurements say we do not have (Canvas2D: 10,000 particles at 0.84 ms). It brings a
+  WebGL context-loss recovery path, a texture-atlas pipeline, and a second rendering mental model.
+  Everything canvas gives up on accessibility, WebGL gives up too, plus more. **Rejected.** Revisit
+  only if a design lands that genuinely needs per-pixel shading over the whole board at 60 fps — and
+  even then, prefer a single fragment shader in a bare `WebGL2RenderingContext` (~4 KB of our own
+  code) over a framework.
+
+#### Hybrid: DOM board and pieces + Canvas2D effect layers ← **RECOMMENDED**
+- Measured cost at 4,000 particles: **8.3 / 8.4 / 8.6 ms** — identical to pure Canvas2D, i.e. the DOM
+  board contributes nothing detectable.
+- Keeps every accessibility affordance, keeps the 5.9 KB app bundle, and lifts the effect ceiling from
+  ~1,000 elements to >10,000.
+- This is also, in substance, the Chessground architecture (DOM pieces, separate SVG/overlay layer for
+  drawn shapes) with the overlay upgraded from SVG to Canvas2D because our overlay is particle-heavy
+  rather than vector-heavy.
+
+**Decision: hybrid.** Two canvases, not one: `fx-under` (below the pieces, for hazards, terrain,
+ground-level shockwaves, square auras) and `fx-over` (above, for explosions, beams, debris, weather).
+An empty canvas costs 0.027 ms/frame to clear and draw, so the second one is free.
+
+### 3. Frame-budget arithmetic
+
+Target: **60 fps on a mid laptop and on mobile**, i.e. a 16.67 ms frame. Following
+[web.dev RAIL](https://web.dev/articles/rail), reserve ~6 ms for the browser's own style/paint/
+composite/GPU work and give our JS **10 ms**.
+
+All measurements above are on Apple Silicon. Extrapolation factor for the target device class — and
+this is an estimate, not a measurement: **6×** for a mid-range Android or a 2019 Intel laptop
+(JS ~4×, canvas fill-rate ~6× at similar backing-store area). I use 6× everywhere to be
+conservative.
+
+Budget at 60 Hz on a 6×-slower device, worst frame during a big capture:
+
+| Line item | Measured here | ×6 | Share of the 10 ms |
+|---|---|---|---|
+| DOM: diff and write the ≤8 squares that changed + ≤32 piece transforms | ~0.05 ms | 0.30 ms | 3% |
+| DOM: piece adornments (type ring, status chip, item glyph, vigour pips) — ≤160 composited elements, CSS-animated, zero per-frame JS | 0 ms | 0 ms | 0% |
+| Canvas `fx-under`: hazard glyphs, terrain wash, square auras (~64 draws) | 0.03 ms | 0.18 ms | 2% |
+| Canvas `fx-over`: **design ceiling 1,200 simultaneous particles** + 20 beams | ~0.14 ms | 0.84 ms | 8% |
+| Presenter tick: advance the timeline, update ~1,200 particle states | ~0.05 ms | 0.30 ms | 3% |
+| **Total** | **~0.27 ms** | **1.62 ms** | **16%** |
+
+**Headroom: 6.2×.** That is the whole argument for rejecting WebGL. Even at 120 Hz (8.33 ms frame,
+~4 ms of JS budget) on a 6×-slower device the worst frame uses 40% of the budget.
+
+The two numbers to hold as hard ceilings, because they are where the measurements bend:
+
+- **≤ 1,200 simultaneous canvas particles.** 4,000 measured at 0.352 ms → 2.1 ms at 6×, which is 21%
+  of the budget for one effect. 1,200 keeps any single effect under 10%.
+- **≤ 250 persistent DOM nodes inside the board, and ≤ 200 concurrent composited CSS animations.**
+  We are at 129 nodes today; adornments and square-state glyphs take it to ~250. The 1,500-element
+  WAAPI failure (p95 17.6 ms) is the empirical wall.
+
+Explicitly **out of budget**: React reconciliation during an animation. React must not appear in the
+per-frame path at all (see §6.4).
+
+### 4. The existing DOM board: keep, extend, replace?
+
+**Verdict: extend.** `src/ui/App.tsx` is a working slice — it drafts from the real dex, lays pieces on
+real starting squares, and resolves outcomes through the real type chart. Its board is 129 DOM nodes
+with correct `aria-label`s (`"e4: white knight, Lucario, Fighting type"`) and native button focus. That
+accessibility work is done and a canvas rewrite throws it away for no measured gain.
+
+Four changes are needed, and they are the whole migration:
+
+1. **Move pieces out of the square buttons into one transform-positioned layer.** Today the sprite is
+   a child of the `<button>` for its square, so a move means unmounting one subtree and mounting
+   another — no animation is possible and React churns two subtrees. Change to Chessground's model: a
+   single `<div class="pieces">` spanning the board, one absolutely-positioned piece element per piece
+   keyed by a **stable piece id** (not by square), positioned with
+   `transform: translate(var(--x), var(--y))`. Moving a piece is then one custom-property write, the
+   browser animates it on the compositor, and captures/deaths become an exit animation on a element
+   that still exists. *Cost: ~1 day. This is the load-bearing refactor.*
+   - Accessibility is preserved by keeping the square `<button>`s as the interactive/AT layer with the
+     occupant named in their `aria-label` (as now), and marking the piece elements `aria-hidden`.
+2. **Extract inline styles into CSS with custom properties.** Every style in `App.tsx` is an inline
+   object literal, which means a new object identity per render and no way for CSS to animate anything.
+   Move to classes + `--type-color`, `--x`, `--y`, `--vigour`. *Cost: ~0.5 day. Also deletes most of
+   the render function's allocation.*
+3. **Add the layer stack and the two canvases.** *Cost: ~0.5 day for the scaffolding.*
+4. **Insert the Presenter between engine state and the board.** *Cost: ~2 days including the timeline.
+   This is new work rather than migration.*
+
+**Total migration cost: ~2 days**, plus ~2 days for the Presenter that would be needed under any
+architecture. A canvas or Pixi rewrite is ~2 weeks and starts by re-implementing focus, hit-testing
+and an aria mirror.
+
+What to keep verbatim: `src/engine/board.ts` (the precomputed `RAYS`/`BETWEEN`/`KNIGHT_MOVES` tables
+are exactly what the AI needs — see Part B), `src/engine/typechart.ts` (synchronous, statically
+imported, correct), `src/engine/rng.ts` (xoshiro128** with 4-word serialisable state — this is what
+makes root-level Monte Carlo sampling reproducible), `src/ui/typeColors.ts` (the palette spine
+DIRECTION.md fixes), and `src/data/dex.ts`'s lazy chunking.
+
+### 5. Performance budgets to hold the implementation to
+
+Every row is a CI gate, not an aspiration. "Measured today" is from this machine.
+
+| Budget | Target | Measured today | Enforcement |
+|---|---|---|---|
+| **Entry chunk (JS, gz)** | **≤ 110 KB** | 65.2 KB | `vite build` + a `size-limit`-style script that fails the build. Note 59.3 KB of that is React; our code has room to grow 8× before the gate trips. Reclaim lever if breached: `preact/compat` (−52 KB measured). |
+| **CSS (gz)** | ≤ 12 KB | 0.5 KB | same gate |
+| **Data on the critical path to a playable board (gz)** | **≤ 60 KB** | *would be 274 KB if loaded whole* | Split the bundles: see §5.1. |
+| **Total transfer to first interactive frame** | ≤ 200 KB gz + the 383 KB sprite sheet in parallel | — | Lighthouse in CI |
+| **Time to interactive (draft screen usable), cold cache, simulated Fast 3G / 4× CPU throttle** | **≤ 2.5 s** | not yet measurable (no draft screen) | Lighthouse CI budget |
+| **Time to interactive, warm cache** | ≤ 400 ms | — | same |
+| **Frame time, p95, during any effect, 60 Hz mid device** | **≤ 10 ms** | 8.4 ms p95 at 4,000 particles on this machine (≈ 1.6 ms of JS at 6× scaling) | a dev-mode frame-time HUD + a Playwright perf test that replays a scripted "worst frame" (super-effective capture + mutual destruction + weather + 6 hazard squares) and asserts p95 |
+| **Frame time, max (no dropped-frame spikes >2 frames)** | ≤ 33 ms | 8.6 ms hybrid @4,000 | same |
+| **Simultaneous canvas particles** | ≤ 1,200 | — | a hard cap in the particle pool allocator; over-budget emitters degrade (fewer particles, same silhouette) rather than drop frames |
+| **Persistent DOM nodes inside the board** | ≤ 250 | 129 | a test that counts `board.querySelectorAll('*').length` |
+| **Concurrent composited CSS animations** | ≤ 200 | — | asserted by the same test |
+| **JS heap after 100 moves with effects** | ≤ 60 MB, and **no monotonic growth** over a 200-move replay | — | a Playwright test taking two `performance.measureUserAgentSpecificMemory()` samples 100 moves apart; particle pools are pre-allocated typed arrays, so growth means a leak |
+| **Engine: legal sub-move generation for one position** | **≤ 5 µs** | **0.194 µs** measured (`genMoves`, one side, full board) | a Vitest benchmark with a threshold |
+| **Engine: `apply(state, action)` including all effect hooks** | ≤ 20 µs | — | same |
+| **AI think time, hard cap** | **≤ 3 s** at the top difficulty, ≤ 1 s at mid, with a **350 ms floor** so it never feels twitchy | depth 9 in 601 ms; depth 10 in 2.5 s | the worker checks the clock every 4096 nodes (≈0.6 ms granularity at 7 Mnps) and always returns the best move from the last completed iteration |
+| **AI: main-thread block during a search** | **0 ms** | — | the search only ever runs in a Web Worker; a lint rule forbids importing `search.ts` from anything under `src/ui/` |
+
+#### 5.1 How the 60 KB critical-path data budget is met (measured)
+
+The generated bundles today total 274 KB gz, and `species.json` alone is 76.9 KB gz. A draft screen
+does not need `baseStats`, `evoCondition`, `learnsetRef`, `tier` or `tags` for 1,367 formes — it needs
+number, name, types, BST, sprite offset and ability slots. I built that projection from the real
+`species.json` and measured it:
+
+| Projection of the real `species.json` | Raw | **gz** |
+|---|---|---|
+| As shipped, all 1367 formes, all 29 keys | 508,302 | **76,889** |
+| Tuple-per-entry `[num,name,types,bst,icon,abilities,formeKind]`, all 1367 formes | 115,887 | **26,110** |
+| Same, 1025 base formes only | 78,775 | **20,529** |
+| **Columnar (parallel arrays, `\|`-joined strings), 1025 base formes** | 60,651 | **17,449** |
+
+**4.4× smaller.** So the split is:
+
+| Chunk | Contents | gz | When |
+|---|---|---|---|
+| `dex-index` | columnar 1025-base draft index | **17.4 KB** | eager, on the critical path |
+| `move-effects` | the ~24 B packed derived `MoveEffect` record × 867 moves (`recon-moves.md` §6.5) | ~21 KB | eager |
+| `ability-item-effects` | 310 archetype records + 311/583 `shortDesc` strings (`recon-abilities-items.md` §7) | ~19 KB | eager |
+| `typechart` | as today | 0.33 KB | statically imported (already correct) |
+| **Critical path total** | | **≈ 58 KB** | ✅ under budget |
+| `species-detail` | the current full `species.json` | 76.9 KB | on idle (`requestIdleCallback`) or on first inspect |
+| `moves-full`, `items-full`, `abilities-full` | prose, full descs | 121 KB | on first inspect |
+| `learnsets` | 841-id union table | 75.6 KB | only behind the "Custom moveset" advanced toggle (`recon-moves.md` §6.4) |
+
+`src/data/dex.ts`'s `once()`-wrapped dynamic imports already implement exactly this pattern; it needs
+the extra, thinner chunk, not a new mechanism.
+
+#### 5.2 Sprites, and a conflict I have to flag
+
+Per `recon-data-substrate.md` §6, tiering is settled: one 383 KB icon sheet for board pieces, gen5
+stills (~970 B each, 32 species ≈ 31 KB) for draft cards and capture close-ups, animated GIFs
+(~85 KB each) opt-in only, official artwork for a single detail view. `PokemonIcon.tsx` already does
+the sheet correctly and `index.html` already has the `preconnect`.
+
+**The conflict:** BRIEF.md §4.6 requires *"Single-player vs AI must work offline"*, but the sprite plan
+**hotlinks `play.pokemonshowdown.com`**. A cold-start offline game currently renders 32 blank squares.
+
+**Resolution (recommended):**
+1. A service worker that, on first successful load, puts `pokemonicons-sheet.png`,
+   `itemicons-sheet.png` and the 18 type badges (~3 KB total) into the
+   [Cache API](https://developer.mozilla.org/en-US/docs/Web/API/Cache). This gives offline play after
+   one online session **without redistributing Nintendo/Creatures/GAME FREAK assets in the repo**,
+   which is the licensing constraint `recon-data-substrate.md` §6 raises.
+2. A **first-class text fallback**, not an error state: on sprite load failure, render a
+   type-coloured disc with the species' 3-letter abbreviation and the piece-class glyph. The game must
+   be fully playable in that state. This is cheap and it also covers the case where Showdown's CDN
+   changes paths.
+3. Add `decoding="async"` / `loading="eager"` semantics via a single hidden `<img>` preloader for the
+   sheet so the first paint of the board is not a flash of empty squares.
+
+The 32 gen5 stills (31 KB total) should be fetched during the *draft*, when the species are decided
+and the player is reading anyway — by the time the match starts they are warm.
+
+### 6. Effect layering, compositing, and the animation orchestration model
+
+DIRECTION.md commits us to four distinct, text-free capture animations, a dramatised bonus move,
+visible hazards/status/weather/trapping, a speed control and a skip, `prefers-reduced-motion`, and
+"animation must never gate play". That is an orchestration problem, not a rendering problem.
+
+#### 6.1 The six-layer stack — z-order by construction, not by luck
+
+Every z-index in the app is one of exactly six custom properties, declared once:
+
+```css
+:root {
+  --z-board:        0;   /* 64 <button> squares: base colour, coordinates, focus ring, aria       */
+  --z-square-state: 1;   /* DOM, inside each button: hazard glyph, terrain tint, legal-move dot,  */
+                         /*   last-move highlight, threat marker. <= 4 per square, never recreated */
+  --z-fx-under:     2;   /* Canvas2D: ground effects, shockwave rings, square auras, weather floor */
+  --z-pieces:       3;   /* DOM, one transform-positioned element per piece, keyed by piece id     */
+  --z-piece-adorn:  4;   /* DOM, children of the piece: type ring, status chip, item glyph,        */
+                         /*   vigour pips, ward shield. CSS-animated, no per-frame JS              */
+  --z-fx-over:      5;   /* Canvas2D: explosions, beams, debris, sparks, weather ceiling           */
+  --z-hud:          6;   /* React DOM, outside the board's stacking context                        */
+}
+```
+
+Rules that make z-order bugs structurally impossible:
+
+- **No literal `z-index` anywhere else.** A lint rule enforces it.
+- The board is a single `position: relative` stacking context with `isolation: isolate`, so nothing
+  inside it can escape and nothing outside can interleave.
+- Both canvases are `position: absolute; inset: 0; pointer-events: none; aria-hidden: true` — they can
+  never steal a click or confuse a screen reader.
+- Effects choose `under` or `over` **from data**, not from code position: each effect archetype carries
+  a `layer: 'under' | 'over'` field. Hazards, terrain and Sticky Web are `under` (a piece stands *on*
+  them); explosions, type-flashes and weather particles are `over`.
+
+#### 6.2 Tearing: one ticker, one write phase
+
+Tearing and layout thrash both come from interleaving reads and writes, or from two animation systems
+driving the same property. Both are prevented by policy:
+
+- **Exactly one `requestAnimationFrame` loop in the whole application** (a `Ticker` singleton).
+  Nothing else calls rAF. Every frame runs four phases in a fixed order:
+  `read` (any needed geometry, once) → `simulate` (advance the timeline and particle pools) →
+  `write` (all DOM custom-property writes, batched) → `draw` (clear + paint both canvases).
+  Reads never follow writes, so there is no forced synchronous layout.
+- **A property is owned by exactly one system.** A piece's `transform` is owned by CSS (via a custom
+  property the ticker writes); a particle's position is owned by canvas. Never a CSS transition *and*
+  a rAF write on the same property of the same element — that is the classic source of visible
+  stutter.
+- **Both canvases are drawn in the same `draw` phase**, so they can never present a frame apart.
+- `will-change: transform` only on the ≤32 piece elements and only while a move is in flight (it is
+  removed on completion; a permanent `will-change` on 250 elements is how you get the 1,500-layer
+  regression from §1.1).
+- **The [View Transition API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) is
+  explicitly rejected** for board animation: it snapshots the whole document and serialises
+  transitions, which is precisely the "animation gates play" failure DIRECTION.md forbids. It is
+  appropriate for screen-level transitions (draft → match) only.
+
+#### 6.3 Decoupling: the engine never waits, and never knows the UI exists
 
 ```
-Steel 1.148  Ground 1.109  Ghost 1.066  Fire 1.064  Rock 1.053  Flying 1.025  Fairy 1.025
-Water 1.020  Dragon 1.020  Fighting 0.998  Psychic 0.975  Poison 0.971  Dark 0.970
-Electric 0.962  Ice 0.953  Normal 0.888  Grass 0.887  Bug 0.864
-spread: Steel 1.148 -> Bug 0.864  (33 % top-to-bottom)
+engine (pure, no DOM)                  presenter (owns time)              renderer
+─────────────────────                  ────────────────────               ────────
+apply(state, action, roll)
+  → { state', events: EffectEvent[] }  ──▶  ingest(events)                  ──▶ DOM writes
+                                             build Cue[] on a beat grid     ──▶ canvas draws
+authoritative state advances                 interpolate displayed state
+INSTANTLY. Nothing awaits.                   accept input at any time
 ```
 
-The complete illegal-capture relation — **8 ordered pairs out of 324 (2.5 %)**:
+- `EffectEvent` is **pure serialisable data** in the replay log:
+  `{ seq: number, kind: EffectKind, actors: Square[], payload: {...} }`. The engine emits it as a
+  by-product of resolution. It contains no timing, no colours, no DOM references. Because it is in the
+  log, a replay reproduces the *animation* as well as the game — and a network client can render a
+  move it did not compute.
+- The presenter holds two states: `authoritative` (the engine's, always current) and `displayed`
+  (derived, lagging). Every visual is a pure function of `displayed`. This is what makes skipping
+  safe: `settle()` sets `displayed = authoritative` and jumps every in-flight cue to its end pose.
+- **Input is never gated.** `onSquareClick` calls `presenter.settle()` first and then dispatches. If
+  you click during an explosion, the explosion completes instantly and your move is accepted. Nothing
+  anywhere `await`s an animation.
+- The AI's reply is computed in the worker *while* the animation plays, so animation time is free
+  latency. At mid difficulty (≤1 s think time) and a ~900 ms capture animation, the AI's move is
+  usually ready before the player has finished watching theirs.
 
-```
-Normal→Ghost, Ghost→Normal, Fighting→Ghost, Electric→Ground,
-Ground→Flying, Psychic→Dark, Poison→Steel, Dragon→Fairy
-```
+#### 6.4 The beat grid: deterministic ordering for simultaneous effects
 
-Three balance facts that fall straight out of this table and that the balance/rules design should use:
+Free-form animation scheduling is where "many simultaneous effects" becomes an ordering bug. Instead,
+every action's cues are laid out on a fixed **beat grid**, so two effects can never race:
 
-1. **The die dominates the type chart.** For *any* attacker, P(crit) + P(miss) = 1/3. Roughly a third
-   of every capture is decided by the d6 alone, and no type has P(extra move) above .363 or below
-   .167. The RNG is doing more work than the types — which is exactly the video's stated intent
-   ("the mechanic that lets the worse player win"), but it means **type knowledge is worth less than
-   the concept implies** unless the rules amplify it (e.g. re-roll on 2× matchup, or crit only on 2×).
-2. **Steel is the best defensive type by a mile** (resists 10, immune to 1, P(survive) = .583, 2.9×
-   Ice's .204). Expect Steel to be the first pick in every draft. Either accept it as a known meta or
-   add a draft constraint.
-3. **Grass and Bug are traps** (P(mutual kill) = .426 — they suicide on almost half their attacks) and
-   **Normal cannot super-effectively hit anything at all** (0 of 18). A draft UI must surface this, or
-   a new player who picks "cool Pokémon" gets destroyed for reasons the game never explained.
+| Beat | Nominal ms (at 1× speed) | What plays | DIRECTION.md requirement it serves |
+|---|---|---|---|
+| 0 `MOVE` | 180 | the piece travels (compositor transform, eased) | baseline readability |
+| 1 `CLASH` | 220 | type-vs-type flash on the defender's square: the multiplier reads from the *shape* of the flash, not text — 2× = expanding double ring in the attacker's type colour; 1× = single soft pulse; 0.5× = two clashing rings that shatter inward; 0× = a hard grey rejection stamp with a recoil bounce on the attacker | "the four outcomes must be instantly distinguishable without reading text" |
+| 2 `DEATH` | 240 | defeated pieces dissolve into type-coloured particles. **Mutual destruction plays two dissolves simultaneously, mirrored** — it must be visibly *both* | "mutual destruction should visibly destroy both pieces" |
+| 3 `AFTERMATH` | 200 | ward pop (a shield cracking), thorns recoil, status applied, item consumed, hazard triggered, drain, Vigour pip change | "hazards visibly sitting on squares, status visibly afflicting a piece" |
+| 4 `GRANT` | 320 | **the bonus move.** Board dims by 25%, the granted piece gets a persistent pulsing aura in its type colour, a chevron banner slides in, and the legal targets for the extra move light up. The aura persists until the sub-move is played — a player cannot miss that they have it | "the free extra move must be dramatised… a player must never miss that they have it" |
+| 5 `AMBIENT` | ∞ | weather particles, terrain wash, idle sprite bob, trapped-piece chains, aura rings | "weather and terrain visibly changing the board, a trapped piece visibly held" |
 
-#### B.3.3 Efficiency
+- **Concurrency rule:** at most one *blocking* chain (beats 0–4) at a time; `AMBIENT` cues layer
+  freely and are never blocking. Since Pokémon Chess resolves one action at a time, the only real
+  concurrency is `AMBIENT` ∪ one chain — which is why this model can be this simple.
+- **A bonus-move chain replays beats 0–4 per sub-move**, so a 3-sub-move turn is at most
+  3 × 1160 ms ≈ 3.5 s at 1× speed. That is the worst case and it is the game's best moment; it should
+  be allowed to breathe. `settle()` is always one click away.
+- **Speed control multiplies every beat duration by `beatScale`:** 2× (0.5), 1× (1.0), 0.5× (2.0),
+  Instant (0). At `beatScale = 0` every cue completes in the frame it starts and the game is a pure
+  turn-based board — and a test must assert the game is completable in that mode.
+- **`prefers-reduced-motion: reduce`** sets `beatScale = 0` by default and swaps motion cues for
+  static ones: the `CLASH` flash becomes a one-frame outcome badge on the square, `DEATH` becomes an
+  immediate removal with a fade, `GRANT` becomes a persistent (non-pulsing) aura plus the banner.
+  `global.css` already has the media query scaffolding; this makes it a first-class mode rather than a
+  blanket duration override.
+- Every beat also writes a line to an `aria-live="polite"` log ("Charizard takes Venusaur — super
+  effective — Charizard moves again"). That is the accessibility path *and* the legibility path
+  DIRECTION.md's "legibility under load" constraint demands, and it costs nothing.
 
-Eval must be cheap: at 3 M nodes/s the whole eval has a ~300 ns budget.
+#### 6.5 Particle pools, so effects cannot allocate
 
-- **Incremental material.** Keep a running `materialScore` updated in `makeMove`/`unmakeMove`.
-  Zero cost at leaves.
-- **Precompute `eff[18][18]` as an `Int8Array(324)`** with values {0,1,2,4} (quarter-multiplier ×4)
-  so all effectiveness lookups are one indexed byte read. Also precompute
-  `immuneMask[18]` as an 18-bit bitmask so "can any enemy type take me" is one AND.
-- **`armyFit` is not recomputed per node.** It depends only on the *multiset of enemy types present*,
-  which changes at most once per capture. Cache it on the position and invalidate on capture.
-- **Two-tier eval.** A cheap `evalFast` (material + PST + incremental) at most leaves; the full
-  relational eval only at nodes within 1 ply of the horizon or in the PV. Standard lazy-eval with a
-  margin: if `evalFast ± 200` is already outside `[α, β]`, return it.
-
----
-
-### B.4 Engineering
-
-#### B.4.1 Web Worker — yes, and it is not optional
-
-The AI runs in a dedicated Worker
-([MDN](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Using_web_workers)).
-Rationale: at Normal difficulty the search is a **700 ms uninterruptible loop**. On the main thread
-that is 42 dropped frames, a frozen board, and an INP of 700 ms. In a Worker the board keeps
-animating the opponent's "thinking" indicator at 60 fps and the human can still hover squares and
-read the type panel.
-
-Protocol — deliberately tiny, and mirrors the pure-engine constraint:
+One pre-allocated struct-of-arrays pool, sized at the 1,200 budget:
 
 ```ts
-// main -> worker
-{ type: 'search', position: SerializedPosition, seed: number,
-  difficulty: Difficulty, softMs: number, hardMs: number, id: number }
-{ type: 'abort', id: number }
-// worker -> main
-{ type: 'progress', id, depth, nodes, bestMove, scoreCp }   // once per completed depth
-{ type: 'result',   id, bestMove, scoreCp, depth, nodes, ms }
+// 1200 particles x 9 float32 = 43 KB, allocated once, never grown.
+const px = new Float32Array(1200), py = new Float32Array(1200);
+const vx = new Float32Array(1200), vy = new Float32Array(1200);
+const life = new Float32Array(1200), maxLife = new Float32Array(1200);
+const size = new Float32Array(1200);
+const tint = new Uint8Array(1200);      // index into the 18 type colours
+const layer = new Uint8Array(1200);     // 0 = fx-under, 1 = fx-over
+let liveCount = 0;                       // pool is compacted, so the draw loop is contiguous
 ```
 
-The Worker imports the **same** `src/engine` module the UI does — that is the payoff of the Brief's
-pure-engine rule. No duplicated rules, and the Worker is trivially testable in Node because it has no
-DOM dependency. `SerializedPosition` is a compact struct (board `Int8Array(128)`, types
-`Int8Array(128)`, flags) transferred as an `ArrayBuffer` — zero-copy, no `structuredClone` of objects.
-Emit `progress` per depth so the UI can show a real "thinking, depth 6" indicator, which makes the
-wait feel intentional.
-
-#### B.4.2 WASM — no
-
-Measured: plain JS reaches **3.0–3.3 M nodes/s** in this search on this machine, and **8.5 M
-legal-nodes/s** for pure move generation. Typed arrays (`Int8Array` board, `Int32Array` move buffers)
-and monomorphic call sites get JS within roughly 2–3× of C for this workload. Against that:
-
-- Rust/AssemblyScript → `.wasm` adds a second toolchain to a Vite+TS project, a second language for
-  the *rules* (or a rules re-implementation, which is the exact bug factory the Brief's pure-engine
-  rule exists to prevent).
-- WASM threads need `SharedArrayBuffer`, which needs COOP/COEP response headers, which breaks
-  deploying to plain static hosting (GitHub Pages etc.).
-- The strength target (§B.5) is met by depth 6–7 in ≤1.2 s, which JS already does.
-
-Revisit only if a measured requirement appears for depth 9+.
-
-#### B.4.3 Transposition table and Zobrist keys
-
-The Zobrist key ([CPW](https://www.chessprogramming.org/Zobrist_Hashing)) must cover **everything the
-evaluation and legality depend on**, or the TT will return values from a position that plays
-differently. Ours needs more than chess:
-
-```
-key ^= Z.piece[class][color][square]          // 6 × 2 × 64
-key ^= Z.type[typeId][square]                 // 18 × 64      <-- REQUIRED: type changes legality
-key ^= Z.sideToMove                           // 1
-key ^= Z.castling[rights]                     // 16
-key ^= Z.epFile[file]                         // 8
-key ^= Z.chainDepth[0..2]                     // 3            <-- extra-move state is part of the position
-key ^= Z.status[statusId][square]              // v2: 5 non-volatile
-key ^= Z.volatile[volId][square]               // v2: 37 volatile  (pack as a per-square bitset)
-key ^= Z.item[itemId][square]                  // v2: only for items with board effects (~40, curated)
-key ^= Z.hazard[hazardId][square]              // v2
-```
-
-Two subtleties that will cause real bugs if missed:
-
-1. **`chainDepth` must be in the key.** The same board with "you have 1 extra move left" is a
-   different position from the same board with "your turn is over". Omit it and the TT will happily
-   hand a same-side-to-move value to an opponent-to-move node.
-2. **HP, if HP exists, must be in the key** — but 32 pieces × N HP values explodes the key space and
-   destroys hit rate. If the rules design lands on HP, bucket it (e.g. 4 buckets: full / hurt /
-   critical / 1) and hash the bucket. Say so explicitly in the rules design; the AI cannot absorb
-   fine-grained HP for free.
-
-Because the interior search is deterministic (we collapsed the chance nodes), the TT is **sound** —
-this is a second, non-obvious payoff of the collapse decision. With sampled chance nodes (mode H)
-the TT would be poisoned by stale samples.
-
-Table: 2^22 entries × 16 B = **64 MB**… too much for the memory budget (§A.4). Use 2^20 × 16 B =
-**16 MB**, single-probe, replace-if-depth≥stored, `{key32, move16, score16, depth8, flags8}` packed
-into two `Int32Array`s (no objects, no GC).
-
-#### B.4.4 Iterative deepening and time management
-
-```
-soft budget = 0.55 × difficultyMs      // don't START a new depth past this
-hard budget = 1.30 × difficultyMs      // ABORT mid-depth; keep previous depth's best move
-```
-
-- Check the clock every 4096 nodes (a counter compare, not a `Date.now()` per node).
-- On hard abort, discard the partial depth and return the last **completed** depth's move. Never
-  return a partially-searched depth's best move — that is how engines play blunders under time
-  pressure.
-- Aspiration windows: `[prev − 40, prev + 40]`, widen ×4 on fail.
-- **Move ordering** (this is where the strength actually comes from): TT move → captures with
-  `EΔ > 0` by descending `EΔ` → captures that grant extra moves (sharpest tactic in the game) →
-  killers → history → quiet moves by PST delta. Note the ordering key is *expected* material, not
-  SEE — same reasoning as §B.2.5.
-
-#### B.4.5 Incremental move generation
-
-Do not fully re-generate at every node. Two-stage:
-
-1. **Staged generation**: yield the TT move first and return immediately if it causes a cutoff
-   (measured in chess engines to avoid generating anything at ~60 % of nodes). Then captures, then
-   quiets.
-2. **Type-legality filter is free**: `eff[t_att*18 + t_def] === 0 → skip`. One byte read. It *reduces*
-   the branching factor by ~2.5 % of captures — a tiny bonus, and the only place where our variant
-   makes search easier than chess.
-3. Reuse a per-depth preallocated `Int32Array(256)` move buffer (my prototype does this; it is why the
-   probe hits 3 M nps in plain JS with zero allocation in the hot loop).
+Emitters request `n` particles and get `min(n, remaining)`. **Over-budget degrades gracefully**: an
+emitter denied particles reduces density but keeps its silhouette, so the frame never drops. Zero
+allocation per frame means zero GC pauses, which is what removes the 42–333 ms `max` spikes visible in
+the DOM rows of §1.1.
 
 ---
 
-### B.5 Difficulty levels, strength targets and latency
+## PART B — The AI opponent
 
-#### B.5.1 The type-misjudgement dial — measured
+### 1. Why off-the-shelf engines cannot be used, and what is salvageable
 
-The thematically right way to build a beginner AI for *this* game is not to make it search less. It is
-to make it **wrong about types**, because that is exactly the mistake a new Pokémon player makes and
-exactly the edge a knowledgeable player is supposed to have.
+#### 1.1 What actually blocks reuse
 
-Implementation: the AI gets its own `eff` table, in which each of the 324 entries is, with probability
-`typeErrorRate`, replaced by a uniformly random value from {0, ½, 1, 2}. It plays *correct chess* with
-a *wrong type model*. Illegal-capture attempts are resolved by the true engine, so a confused AI will
-occasionally try a capture that turns out to be no-effect — which is charming, legible, and exactly
-what a beginner does.
+1. **The position is not expressible in FEN.** A UCI engine's entire input is a FEN string: six
+   fields, one glyph per piece. Our piece carries a *type* (18), an *ability* (311 archetyped into 13),
+   an *item* (536 → 12-item Kit), *Vigour* ∈ [−3,+3], a non-volatile *status* (7), up to 4 *move slots
+   with charges*, and per-piece *ward* and *pristine* flags. There is no protocol field for any of it,
+   and no engine has a parser for one.
+2. **Fairy-Stockfish's variant DSL parameterises the wrong axis.**
+   (<https://github.com/fairy-stockfish/Fairy-Stockfish/wiki/Variant-configuration>) It is genuinely
+   powerful — ~90 variants, custom piece movement via Betza notation, custom boards, custom win
+   conditions. But every knob is about **geometry and global rules**. There is no way to express
+   "capture legality is a function of an 18×18 table indexed by attacker and defender *attributes*",
+   no way to express mutual destruction conditional on that table, no chance nodes, and no per-piece
+   mutable attributes. Encoding our 18 types as 18×6 = 108 distinct piece types is theoretically
+   possible and practically hopeless: the piece-value tables, the NNUE input and the move generator all
+   scale with piece-type count, and it still cannot express the one-shot ward.
+3. **NNUE evaluation is architecturally locked to 12 input planes** (piece × colour × square). Ours
+   needs at minimum 18 more per side, and the network would have to be retrained from a self-play
+   corpus that does not exist. The measured lesson from `recon-variants.md` §1.6 — Betza's
+   "balanced" armies scoring +62%/−71% over 400 engine games — is that this domain's evaluation
+   cannot be borrowed at all; it has to be fitted.
+4. **Three alpha-beta invariants are actually false in this variant.**
+   - **Null-move pruning** (<https://www.chessprogramming.org/Null_Move_Pruning>) assumes "having the
+     move is an advantage, so if passing still beats beta, the real move surely does". Under mutual
+     destruction, *being forced to act* is frequently bad (a piece with a 0.5× matchup against
+     everything nearby would rather stand still), so zugzwang-like positions are common rather than
+     rare. **Disable null-move pruning in v1.** Re-enable only behind a measured self-play A/B.
+   - **Static Exchange Evaluation** (<https://www.chessprogramming.org/Static_Exchange_Evaluation>)
+     assumes an exchange on one square resolves by comparing values down a recapture chain. Under
+     mutual destruction the attacker can die *whether or not* there is a recapture. Classical SEE is
+     not merely imprecise here, it has the wrong sign on a large class of moves. Replace it (§5.2).
+   - **"In check" as a search concept does not exist** under the king-capture model
+     (`recon-variants.md` §5, R1–R2). Check extensions, check evasion move generation, and
+     `is_checkmate()` all go away — replaced by "the enemy king is capturable", which is *cheap* and
+     *terminal*, and by the `T3` rule that exposing the enemy king ends your turn.
+5. **Randomness breaks the determinism alpha-beta assumes.** Not fatally — see §3 — but it means the
+   plain algorithm is not the right one out of the box.
 
-Measured, 30 games per row, both agents identical otherwise (mode J, 40 k nodes/move, colours
-alternated) — `probe_rendersearch_typeerr.mjs`:
+#### 1.2 What is salvageable — and it is most of the engineering
 
-| `typeErrorRate` | weak agent's score | record |
+Everything about *managing a tree* transfers; nothing about *chess semantics* does.
+
+| Salvageable | Why it survives | Status |
 |---|---|---|
-| 5 % | **47 %** | 10 W – 12 L – 8 D |
-| 15 % | **45 %** | 10 W – 13 L – 7 D |
-| 30 % | **37 %** | 8 W – 16 L – 6 D |
-| 50 % | **30 %** | 7 W – 19 L – 4 D |
-| 100 % (type-blind) | **25 %** | 5 W – 20 L – 5 D |
+| Iterative deepening + aspiration windows | pure tree management | **measured working**, EBF 3.8–4.2 |
+| Zobrist hashing (<https://www.chessprogramming.org/Zobrist_Hashing>) | needs a *factorised* key (§4) | **measured working** |
+| Transposition table | value cutoffs weaken (§4); still the best move-ordering cache | **measured**: removing value cutoffs costs ~1 ply |
+| Killer heuristic, history heuristic | ordering only | **measured working** |
+| PVS / null-window re-search (<https://www.chessprogramming.org/Principal_Variation_Search>) | ordering only | recommended |
+| Quiescence search (<https://www.chessprogramming.org/Quiescence_Search>) | needs a variant "unstable" predicate (§5.3) | **measured working** |
+| MVV-LVA | needs the outcome-aware clash value instead of raw victim value (§5.2) | recommended |
+| Late move reductions (<https://www.chessprogramming.org/Late_Move_Reductions>) | ordering-dependent, safe | v2 |
+| Lazy evaluation (<https://www.chessprogramming.org/Lazy_Evaluation>) | **critical here** — the good eval terms cost 6.5× (§5.1) | recommended |
+| Repetition detection via the hash | must count **sub-moves** (`recon-variants.md` §4.3), and must **exclude the RNG counter** — that doc's warning is exactly right | required |
+| `chess.js@1.4.0` as a **test oracle** | already in devDependencies; property-test our generator against it on positions where the variant reduces to chess (all types neutral, no abilities/items) | required |
+| `src/engine/board.ts`'s precomputed tables | `RAYS`, `BETWEEN`, `KNIGHT_MOVES`, `KING_MOVES`, `PAWN_ATTACKS` are exactly the hot-path tables a searcher wants, and the comment in that file says so | **already built** |
+| **Not salvageable** | NNUE, opening books, endgame tablebases, null-move pruning, classical SEE | — |
 
-This is a **clean, monotonic dial** that never bottoms out — even a completely type-blind AI still
-wins 25 % because it plays real chess. That is the ideal beginner opponent: beatable through Pokémon
-knowledge, not frustrating, and it *teaches* — when it walks a Ground rook into your Flying bishop,
-the player learns the immunity by watching the AI get it wrong.
+### 2. What was measured
 
-#### B.5.2 The five difficulties
+I built a working variant searcher in Node (V8 — the same engine a Web Worker runs) with **real
+variant rules**: the true 18×18 effectiveness table from `@pkmn/data` (which independently reproduces
+`recon-variants.md` §2.1 exactly — **8 illegal / 61 mutual-destruction / 204 neutral / 51
+super-effective** of 324 ordered pairs), type-illegal captures excluded from generation, mutual
+destruction on 0.5×, bonus sub-moves on 2× capped at 3 sub-moves, and king capture as the terminal.
 
-Each level composes three orthogonal knobs: **time budget**, **type-belief error**, and **blunder
-injection** (with probability `p`, play a random move from the top-`k` instead of the best).
+**Branching factor** over 120 plies of random play from a randomly-typed start position:
 
-| Level | Time budget (hard) | Depth reached (est.) | `typeErrorRate` | Blunder | Est. chess strength | Feel |
-|---|---|---|---|---|---|---|
-| **Rookie** | 150 ms | 3–4 | **100 %** | 12 % from top-5 | ~800 Elo | Plays chess, ignores types entirely. Loses trades to type knowledge constantly. |
-| **Trainer** | 300 ms | 4–5 | **50 %** | 6 % from top-3 | ~1200 | Knows some matchups, confidently wrong about others. |
-| **Gym Leader** | 700 ms | 5–6 | **15 %** | 2 % from top-3 | ~1500 | Mostly right on types; punishes real mistakes. **Default.** |
-| **Elite Four** | 1500 ms | 6–7 | **0 %** | 0 | ~1750 | Perfect type knowledge, full eval, exact root chance nodes. |
-| **Champion** | 3000 ms + full quiescence + 2^21 TT | 7–9 | **0 %** | 0 | ~1900 | For the player who has beaten Elite Four. Explicit "may take up to 3 s" label. |
+| Quantity | Measured |
+|---|---|
+| Mean legal moves per position | **30.9** (max 46) |
+| Mean captures available | **3.27** |
+| Mean *super-effective* captures available | **0.34** |
 
-Latency contract per level: `p50 = 0.55 × budget`, `p95 ≤ 1.3 × budget` (the hard abort guarantees the
-p95). The Elite Four row is the one to hold in CI: **p95 ≤ 1200 ms measured over 200 stored
-positions**.
+Two consequences: (a) our branching factor is essentially chess's (~31 vs ~35 — the 8 illegal type
+pairs shave a little), which puts us squarely in alpha-beta's home territory rather than MCTS's;
+(b) bonus-move chains are **rare** — 0.34 SE captures available per position means the average turn is
+~1.05 sub-moves, so extra moves cost the search almost nothing in practice while being the game's
+headline mechanic.
 
-Elo numbers are *estimates* anchored on the measured node counts (Gym Leader ≈ 700 ms × 3 M nps ≈
-2 M nodes ≈ depth 6 with our ordering) plus the well-known ~50–70 Elo/ply relationship for
-material+PST evals at this depth. **They are labelled estimates because I have not calibrated against
-humans.** Calibrate before shipping the labels: run each level against a flat-Monte-Carlo baseline and
-against each other in a 200-game round robin, and publish the actual score matrix.
+**Search throughput**, iterative deepening with TT + killers + history + quiescence
+(`tech-recon-search2.mjs`):
 
-Anti-frustration rules, which matter as much as the numbers:
-- The AI's *displayed* reasoning is honest at all levels: if Rookie thinks Ground beats Flying, the
-  hint panel must not secretly show the right answer. Its wrongness is content.
-- Never let a difficulty be weaker by *thinking slower*. Rookie at 150 ms feels snappy and dumb, which
-  is right; a slow dumb AI is the worst combination.
-- A **"Chaotic" personality toggle** (orthogonal to difficulty) switches interior chance nodes to
-  single-sample (mode H): the AI genuinely gambles, playing coin-flip captures a solid engine avoids.
-  It is measurably cheapest (75 k vs 43 k nodes… comparable) and produces the most memorable games.
-  Ship it as a labelled personality, never as the default, and document that it makes the AI
-  non-deterministic.
+| Depth | Nodes | Time | Mnps | EBF | TT hit% |
+|---|---|---|---|---|---|
+| 6 | 71,771 | **11.4 ms** | 6.30 | 2.99 | 25.7 |
+| 7 | 278,190 | **38.9 ms** | 7.15 | 3.88 | 24.2 |
+| 8 | 1,056,245 | **148 ms** | 7.12 | 3.80 | 25.6 |
+| 9 | 4,192,983 | **577 ms** | 7.27 | 3.97 | 26.8 |
+| 10 | 17,540,249 | **2,460 ms** | 7.13 | 4.18 | 29.2 |
+| 11 | 90,022,411 | 12,985 ms | 6.93 | 5.13 | 30.8 |
 
----
+**7.1 M nodes/sec in plain JavaScript**, EBF ≈ 4. For calibration: without a TT, killers or history
+(the first, naive version — `tech-recon-search.mjs`) the EBF was **28–42** and depth 8 took 24 s. The
+ordering machinery is worth ~3 plies and it all transfers from chess unchanged.
 
-### B.6 Effort estimate (agent-days)
+**Cost of each eval term** (`tech-recon-eval.mjs`):
 
-"Agent-day" = one focused day of an AI coding agent with review. Rendering and AI only; rules,
-data-generation, draft and UI-content are other recons' scope.
-
-| Work item | Days | Notes |
+| Operation | ns/call | Relative to material eval |
 |---|---|---|
-| **Rendering** | | |
-| Board + pieces + squares math + CSS + a11y tree | 1.5 | includes keyboard navigation, `aria-label` per square |
-| `MoveAnimator` (WAAPI) + durations table + 4 speed modes | 1.0 | |
-| `FxQueue` (pure, deterministic) + particle ring buffer | 1.0 | |
-| `Canvas2DRenderer` + 5 verdict effects + die reveal | 2.0 | this is where "satisfying" is won or lost; budget for iteration |
-| `StaticRenderer` + reduced-motion path + tests | 0.5 | |
-| Type Glyph mode (0-asset fallback) | 1.0 | pure CSS/SVG, contrast-checked |
-| `vendor-sprites.ts` + manifest + baked `spriteUrl`/`iconOffsets` | 0.5 | probe already proved the download path |
-| Perf harness in CI (size-limit, Playwright frame/memory gates) | 1.5 | 12 gates from §A.4 |
-| **Rendering subtotal** | **10.0** | |
-| **AI** | | |
-| 0x88 position + movegen + perft + `chess.js` differential tests | 2.0 | prototype exists and passes perft(5); productionising with types/status is the work |
-| Collapsed-interior / exact-root alpha-beta + iterative deepening + time mgmt | 2.0 | prototype exists |
-| Quiescence with expected-material pruning | 1.0 | the variant-specific part |
-| TT + Zobrist (incl. type/chain/status) + hit-rate instrumentation | 1.5 | |
-| Move ordering (TT, EΔ captures, extra-move-first, killers, history) | 1.0 | biggest strength-per-day item |
-| Evaluation: material + PST + mobility + king safety | 1.5 | |
-| Evaluation: the four relational type terms + `armyFit` caching | 2.0 | the soul; needs tuning iterations |
-| Worker plumbing + protocol + abort + progress | 1.0 | |
-| Difficulty system (type-error, blunder, personalities) | 0.5 | measured, mechanically simple |
-| Strength calibration: 200-game round robin + score matrix + Elo labels | 1.5 | mostly compute; needs a harness |
-| Search regression bench in CI (nodes + p95 latency gates) | 1.0 | |
-| **AI subtotal** | **15.0** | |
-| **Total** | **25 agent-days** | plus ~15 % contingency for eval tuning ⇒ **~29** |
+| Read an incrementally-maintained material accumulator | **4** | 0.05× |
+| Material eval, 64-square scan with a type-aware value table | **76** | 1.00× |
+| `genMoves` for one side, full board | **194** | 2.55× |
+| Material + **mobility** (needs both sides' move counts) | **470** | **6.17×** |
+| Material + **super-effective-threat scan** | **496** | **6.50×** |
 
-**Ship order.** v1 = board + pieces + normal/fast speed modes + gen5 stills + Gym Leader AI only
-(collapsed search, material + PST + `superEffectiveVulnerability`, 700 ms) ≈ 13 days. v1.1 = full FX
-suite, reduced motion, all 5 difficulties, Type Glyph mode ≈ 8 days. v2 = HD/animated sprites,
-status/hazard eval terms, Champion difficulty, calibration ≈ 8 days. Everything in v1 is on the
-critical path; nothing in v1.1+ is.
+Implied search speed if a node costs one `genMoves` plus one eval: 5.05 Mnps (incremental) / 3.70
+(material scan) / **1.51 (with mobility)** / 1.45 (with threats). So naively adding the good eval
+terms at every leaf costs **2.4×**, i.e. ~1.25 plies. §5.1 says what to do about it.
 
----
+### 3. Chance nodes: the measured answer
 
-## Risks and open questions
+`tech-recon-chance.mjs` and `tech-recon-star.mjs`, same position, same searcher, five randomness
+models:
 
-1. **Mobile is unmeasured.** Every frame number here is Apple Silicon. The 3–5× derating is an
-   assumption. **Action:** before v1 ships, run the `perf.html` and `tti.html` probes on a real
-   mid-range Android and a 4× CPU-throttled Lighthouse run, and update §A.4.
-2. **The strength numbers are estimates.** §B.5's Elo column is anchored on node counts, not on human
-   games. It could be off by 200 Elo either way. The *relative* ordering is measured; the absolute
-   labels are not.
-3. **The type-multiplier spread is small (±15 %).** If the rules design wants type knowledge to be
-   decisive, the *rules* must amplify it (e.g. crit only on ≥1× matchups, or a re-roll on 2×), because
-   the raw chart plus a d6 gives the die two-thirds of the vote. This is the most important thing my
-   measurements say to the rules designer.
-4. **Steel/Grass/Bug imbalance is real and quantified** (P(survive) .583 vs .204; P(mutual) .426 for
-   Grass and Bug). The draft design must either constrain or surface it.
-5. **HP would hurt the AI.** If pieces get HP, the Zobrist key and the TT hit rate degrade and the
-   eval gets a new continuous dimension. Bucket it (§B.4.3) and budget +2 agent-days.
-6. **Ability/item systems will re-open the search cost question.** Every ability that changes capture
-   resolution adds branches to the chance node. The collapse architecture absorbs this gracefully
-   (still one modal successor), which is another reason to prefer it — but the *eval* will need a term
-   per ability class, and that scales with the curated set size the abilities recon defines.
-7. **`prefers-reduced-data`** has poor support; I recommend defaulting Type Glyph mode on when it *is*
-   present, and otherwise offering it prominently.
+| Model | depth 5 | depth 6 | depth 7 | depth 8 | vs deterministic @ d6 |
+|---|---|---|---|---|---|
+| **Deterministic** (type chart only) | 4.0 ms | **16.1 ms** | 97 ms | 610 ms | **1.0×** |
+| Full expectiminimax, 3-way chance node per capture (MISS ⅙ / CRIT ⅙ / TYPE ⅔) | 106 ms | **1,946 ms** | — | — | **121×** |
+| …**+ star1 pruning**, bounds ±4500 cp | 70 ms | **1,652 ms** | 15,741 ms | — | **103×** |
+| **Input randomness** (public per-turn CRIT/FLINCH type), 1 sample per ply | 5.7 ms | **20.6 ms** | 100 ms | 604 ms | **1.28×** |
+| Input randomness, **3 samples per ply** | 732 ms | **8,544 ms** | — | — | **531×** |
+| EV-collapse of a post-commitment d6 (one child + a static correction) | 7.7 ms | 26.7 ms | 470 ms | 2,026 ms | **1.66×** |
 
----
+*(A separate run with the same probe measured 159× at depth 6 for the naive chance-node model; the
+121× above is from the second probe with slightly different ordering. Both are the same conclusion.)*
 
-## Appendix A — Probe inventory
+Four conclusions, each with a number behind it.
 
-All probes are in `/tmp/pkmn-probe` (Node) or `/tmp/corstest` (browser, served on `:8899`). Every
-table in this document traces to one of these.
+**(a) Full chance-node enumeration is unaffordable.** ~100–160× at depth 6 ≈ **4 plies of depth**
+surrendered. A depth-9 engine becomes a depth-5 engine. Depth 5 in this variant does not see a
+two-capture combination through a bonus move.
 
-| Probe | What it measured | Headline result |
+**(b) Star1 does not rescue it, and the reason is structural.** Ballard's *-minimax
+(<https://www.chessprogramming.org/Star1>, and Ballard 1983, *Artificial Intelligence* 21(3),
+<https://doi.org/10.1016/S0004-3702(83)80015-0>) recovers alpha-beta bounds at a chance node by
+using static bounds `[L,U]` on any child's value:
+`A_i = (α − Σ_{j<i} p_j v_j − U·Σ_{j>i} p_j) / p_i`. Its power is entirely in how tight `L,U` are.
+In our game a single capture can swing 950 cp and a king capture is ±29,000 — so honest bounds are
+wide, `A_i` falls below the score floor almost always, and the cut never fires. **Measured saving:
+20%.** Star2 (probing the most-likely child first to tighten the bound) would do better, but it
+cannot fix a domain where the outcome distribution genuinely spans "I win the game" to "I lose my
+queen". *Verdict: not worth the complexity.*
+
+**(c) Input randomness is the answer, and it costs 10–28%.** `recon-variants.md` §6.3 already
+recommends revealing the turn's random state publicly at turn start ("a CRIT type… and a FLINCH
+type… Both players see both") on *balance* grounds — because output randomness is ~5× louder than
+input randomness at equal rate. **It is independently the right AI decision, by two orders of
+magnitude.** With the roll public at the start of a turn:
+
+- The **root has no chance node at all.** The current turn's randomness is already resolved and known
+  to both sides; the search over the current turn is fully deterministic.
+- There is **exactly one chance node per ply boundary** (the opponent's future roll), not one per
+  capture — and the number of captures per position is 3.27, so this alone is a ~3× reduction in
+  chance-node count before any other trick.
+- Sampling one future roll per ply and letting iterative deepening + root averaging do the smoothing
+  costs **+10% at depth 6, +0% at depth 8** (604 ms vs 610 ms — inside noise).
+
+This is the single most consequential finding in Part B: **the ruleset choice that makes the game
+fairer is the same choice that makes the AI 100× cheaper.** If the design ever reverts to
+post-commitment rolls, the AI loses 4 plies and the difficulty ladder collapses by ~400 Elo.
+
+**(d) Sampling must happen at the root, never in the tree.** In-tree sampling with k samples costs
+≈ k^depth: k=3 measured at **531×** (8,544 ms at depth 6). The correct structure is:
+
+```
+bestMove(state, budgetMs, R):
+  futures = [ rngFork(state.rng, i) for i in 0..R-1 ]      # R fixed sampled futures, seeded
+  scores  = Map<Move, number>
+  for i in 0..R-1:                                          # common random numbers:
+      # every root move is evaluated against the SAME future i, so the comparison is paired
+      run one full iterative-deepening search with futures[i] driving every chance node
+      accumulate each root move's score into scores
+  return argmax(scores[m] / R)
+```
+
+Cost is **linear in R**, and common random numbers (the same future for every root move) removes most
+of the sampling variance because the comparison is paired rather than independent. Measured budgets:
+R = 6 at depth 8 ≈ 6 × 604 ms = **3.6 s**; R = 6 at depth 7 ≈ **0.7 s**; R = 4 at depth 8 ≈ **2.4 s**.
+`src/engine/rng.ts` already gives us exactly the primitive needed — a 4-word serialisable state, so
+`rngFork` is a pure function and every sampled future is reproducible in a replay.
+
+If any post-commitment d6 survives (a `willCrit` move, `Quick Claw`'s 20%, `Focus Band`'s 1-in-6),
+model it with the **EV-collapse** child: resolve the modal outcome and add a static probability
+correction (`−p_miss · value(attacker) + p_crit · τ`). Measured cost 1.66× ≈ 0.4 plies, and the exact
+distribution is shown to the player at the root anyway (`recon-variants.md` R3 makes this a UI
+obligation).
+
+#### 3.1 Why not MCTS/UCT, and why not flat Monte Carlo
+
+**MCTS/UCT** (<https://www.chessprogramming.org/UCT>; Browne et al., *A Survey of Monte Carlo Tree
+Search Methods*, IEEE TCIAIG 2012, <https://ieeexplore.ieee.org/document/6145622>) is the right tool
+when the branching factor is huge, the position is hard to evaluate statically, and tactics are
+shallow. Our domain is the opposite on all three counts:
+
+- **Branching factor 30.9, measured.** MCTS's advantage over alpha-beta grows with branching (Go: 250).
+  At 31 with EBF 4 after ordering, alpha-beta reaches depth 9–10 in a second; UCT with a comparable
+  budget explores a few hundred thousand playouts spread over a tree it cannot prune.
+- **We have a good static evaluation** — `recon-variants.md` §3.2 hands us a *derived, principled*
+  type-aware piece-value formula with precomputable 18×18 tables. That is exactly the asset alpha-beta
+  monetises and MCTS wastes.
+- **Tactics are sharp and deep.** A super-effective capture grants a bonus move; a bonus move can
+  itself capture; mutual destruction means a defended piece is not safe. These are 4–8 ply
+  calculations with narrow correct lines. Alpha-beta with quiescence finds them; UCT's averaged
+  backups smear them.
+- **Random rollouts are worse than useless here.** In a mutual-destruction game, random play
+  annihilates both armies in a few dozen plies, so a random-policy rollout's terminal value carries
+  almost no information about the root. Fixing that needs a learned policy network (AlphaZero,
+  <https://www.science.org/doi/10.1126/science.aar6404>), which needs a self-play pipeline and GPU
+  training we do not have and which would not fit in a 110 KB bundle.
+- MCTS *does* handle chance nodes gracefully (they are just another sampled child) — but §3(c)
+  already reduced our chance-node cost to +10%, so that advantage buys nothing.
+
+**Where MCTS *is* the right answer, and we should use it there:** the **draft**. Drafting is a
+32-pick sequential game with a combinatorial action space, no useful notion of depth, and an
+evaluation that only exists at the end (the army pairing's win probability). That is textbook UCT, and
+`recon-variants.md` §1.6's Chess18 recommendation ("engine-evaluate candidate pairings, publish the
+eval, ban or handicap the tails") is exactly a rollout-based procedure. Budget it as a v2 offline
+tool, not an in-game search.
+
+**Flat Monte Carlo** (sample N random continuations per root move, average) is rejected outright: with
+EBF 4 and 7 Mnps, alpha-beta sees a forced 4-move combination in 11 ms. Flat MC never sees it at any
+budget, because it has no notion of the opponent replying correctly.
+
+### 4. Extra-move chains, state-dependent legality, and the transposition table
+
+#### 4.1 A ply is a sub-move, not a turn
+
+`recon-variants.md` §4.1 proves the chain bound (`L ≤ 1 + N ≤ 17`) and §4.2 ships `T1: L ≤ 3`. The
+search consequence is that **the side to move does not alternate at every node**. The recursion must
+carry `(sideToMove, chainLeft, bonusPieceMask)` and, on a bonus sub-move, recurse **without negating**:
+
+```ts
+if (isCapture && effectiveness === SUPER && chainLeft > 0 && !bonusPieceMask.has(from)) {
+  score = search(state, side, depth - 1, alpha, beta, chainLeft - 1, bonusPieceMask | bit(to));
+} else {
+  score = -search(state, -side, depth - 1, -beta, -alpha, /*chainLeft*/ 2, /*mask*/ 0);
+}
+```
+
+This is a small change with four knock-on effects, each of which is a bug if missed:
+
+1. **Depth is measured in sub-moves**, so a nominal depth of 9 is ~8.6 turns (0.34 SE captures per
+   position ⇒ ~1.05 sub-moves per turn, measured). Do not report "depth" to the player as "moves
+   ahead".
+2. **Mate-distance scores must be `29000 − subMoveCount`**, not `− ply`, or the engine prefers a
+   slower king capture. My probe does this and it is why king-capture lines are found correctly.
+3. **Progress and repetition counters count sub-moves**, matching `recon-variants.md` §4.3's
+   "100 consecutive **sub-moves**". A turn-based counter under-counts by ~5% and, worse, is not
+   monotonic across a chain.
+4. **The `T3` rule (exposing the enemy king ends your turn) needs a cheap test after every sub-move.**
+   Do *not* run a full `genMoves` for the opponent (194 ns × every sub-move). Instead run
+   `isAttacked(enemyKingSquare, bySide)`: an 8-ray walk from the king square plus the knight ring plus
+   the pawn-attack table — all of which `src/engine/board.ts` already precomputes. ~30 table lookups,
+   ≈15 ns. Note it must respect type legality (a Ground piece does not "expose" a Flying king), so it
+   is `attackersOf(sq)` filtered by `EFF[attackerType][kingType] !== 0`.
+
+**One rules recommendation from the AI side:** make the bonus sub-move **optional** — generate an
+explicit `DeclineBonus` action at bonus nodes. Reasons: (i) a mandatory extra move can *force* a
+player into a self-harming capture, which is a zugzwang mechanic nobody designed and players will
+report as a bug; (ii) the search needs the decline branch anyway to evaluate the chain honestly;
+(iii) it is one line in move generation and it removes a whole class of degenerate lines. This is
+consistent with `recon-variants.md`'s Marseillais precedent, where the *count* of moves is fixed but
+each is chosen freely.
+
+#### 4.2 State-dependent legality: the ward problem, quantified
+
+`recon-abilities-items.md` §6.1 makes every ward **one-shot** (Air Balloon as the template), and §8
+question 5 flags the consequence: *"Move generation is no longer a pure function of piece positions —
+it depends on per-piece ward flags. Flag this early; it affects transposition-table keys."* That
+warning is correct, and here is what it costs.
+
+**What the legal move set actually depends on:**
+
+```
+generate(state) = f( occupancy, pieceClass, pieceType, wardIntact, boundBy,
+                     status(slp/frz ⇒ cannot move; par ⇒ halved range),
+                     itemPresent (Iron Ball, Ring Target, Shed Shell, Choice lock),
+                     abilityArchetype (WARD/EDGE-pierce/BIND/STRIDE),
+                     fieldState (Gravity disables RAY_ANY; terrain),
+                     hazardLayers,
+                     publicRoll (FLINCH type ⇒ that type cannot capture this turn),
+                     chainLeft, bonusPieceMask )
+```
+
+**The Zobrist key must be factorised, not a product.** The naive approach — one key per
+(square × pieceCode × type × ward × vigour × status × …) — is 82 million keys. The correct approach is
+one **independent** table per state dimension, XORed together
+(<https://www.chessprogramming.org/Zobrist_Hashing>):
+
+| Table | Entries | Notes |
 |---|---|---|
-| `/tmp/corstest/index.html` | CORS behaviour of Showdown sprites in a real browser | no ACAO ⇒ WebGL `texImage2D` throws, canvas tainted, `fetch` blocked |
-| `/tmp/corstest/perf.html` | script ms/frame: 64 DOM pieces, 400 DOM particles, 400 & 2000 canvas particles | 0.092 / 0.449 / 0.235 / 0.417 ms mean |
-| `/tmp/corstest/look.html` | visual quality of gen5@80px pixelated vs dex@80px smooth | gen5 pixelated looks best; screenshot inspected |
-| `/tmp/corstest/atlas.html` | packed atlas of the 733 gen-9 sprites | 1840 KB PNG (worse than individual) |
-| `/tmp/corstest/atlas1025.html` | packed atlas of all 1025, 3 scales, PNG/WebP | 2563 KB PNG vs 849 KB individual ⇒ **don't atlas** |
-| `/tmp/corstest/tti.html` | fetch+paint 32 sprites on a DOM board | 105 ms, FCP 76 ms, 32.7 KB |
-| `probe_rendersearch_img.mjs` | `@pkmn/img` output shape | it is a CSS `background-position` API; icon sheet 40×30, 12 cols |
-| `probe_rendersearch_sizes.mjs` | byte census of 6 sprite sources + CORS headers | table in §A.2.1 |
-| `probe_rendersearch_dl1025.mjs` | downloaded all 1025 gen5 sprites | **829 KB total, 1025/1025 present** |
-| `probe_rendersearch_gaps.mjs` | gen-9 view vs National Dex | gen 9 is missing **292** dex numbers incl. Alakazam, Machamp |
-| `probe_render_bundle.mjs` | baked-data payload sizes, gzip + brotli | columnar species 12.0 KB gz; learnsets 70.5 KB gz |
-| `/tmp/bundletest` (esbuild) | tree-shaken lib sizes | Pixi 165 KB gz, motion/mini 3 KB, React 58 KB |
-| `probe_render_perft.mjs` | move-gen correctness + speed | perft(5)=4,865,351 ✓ at 8.5 M legal-nodes/s |
-| `probe_render_ab.mjs` | plain chess vs variant with chance nodes, depths 1–7 | variant depth 7 = 7.6 M nodes vs 0.97 M plain |
-| `probe_render_star2.mjs` | sound full-window vs star1 (±3000 bounds) | star1 **1.7× worse** (22.3 M vs 12.9 M) |
-| `probe_render_modeE.mjs` | extra-move chain cap 0 / 1 / 2 | 8.38 M / 11.87 M / 12.86 M ⇒ cap 2 costs +53 % |
-| `probe_rendersearch_search.mjs` | 6 chance-node strategies × 2 positions × depths 4–7 | table in §B.2.1; collapse ≈ plain-chess cost |
-| `probe_rendersearch_agree.mjs` | root-move agreement of cheap vs sound search | G 42 %, J 46 %, root-hybrid 54 %; root-exact overhead +11 % |
-| `probe_rendersearch_selfplay.mjs` | equal-node-budget match, sound vs collapsed | 120 games, collapsed 53.8 % ± 4.6 % ⇒ **no significant difference** |
-| `probe_rendersearch_typeerr.mjs` | difficulty via corrupted type belief | 5 %→47 %, 15 %→45 %, 30 %→37 %, 50 %→30 %, 100 %→25 % |
-| `probe_rendersearch_typevalue.mjs` | real Gen 9 type chart × variant capture semantics | per-type table + 8 illegal pairs + 33 % value spread |
+| `Z_piece[square][pieceCode]` | 64 × 13 = 832 | side encoded in `pieceCode` |
+| `Z_type[square][type]` | 64 × 18 = 1,152 | **this is the one a chess engine does not have** |
+| `Z_ward[square]` | 64 | XOR in while the ward is intact |
+| `Z_vigour[square][v+3]` | 64 × 7 = 448 | `recon-abilities-items.md`'s single [−3,+3] counter |
+| `Z_status[square][st]` | 64 × 7 = 448 | none/slp/par/psn/tox/brn/frz |
+| `Z_charges[square][slot][n]` | 64 × 4 × 6 = 1,536 | 4 move slots, 0–5 charges |
+| `Z_pristine[square]`, `Z_item[square]` | 128 | |
+| `Z_side`, `Z_chain[0..2]`, `Z_crit[18]`, `Z_flinch[18]` | 40 | the public roll **must** be in the key |
+| `Z_field[weather][terrain]`, `Z_hazard[square][layer]` | ~300 | |
+| **Total** | **≈ 6,500 keys × 2 × 32 bits = 52 KB** | trivial; allocate once at module load |
 
-## Appendix B — Citations
+My probe implements the first two tables (64 × 13 × 18 = 14,976 keys) with incremental XOR through
+make/unmake and it works — the incremental hash is ~2 ns per move.
 
-Rendering / web platform
-- MDN, CORS-enabled image — https://developer.mozilla.org/en-US/docs/Web/HTML/CORS_enabled_image
-- MDN, `crossorigin` attribute — https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/crossorigin
-- MDN, `image-rendering` — https://developer.mozilla.org/en-US/docs/Web/CSS/image-rendering
-- MDN, `prefers-reduced-motion` — https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion
-- MDN, Web Animations API — https://developer.mozilla.org/en-US/docs/Web/API/Web_Animations_API
-- MDN, Using Web Workers — https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Using_web_workers
-- MDN, OffscreenCanvas — https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas
-- web.dev, Interaction to Next Paint — https://web.dev/articles/inp
-- web.dev, Largest Contentful Paint — https://web.dev/articles/lcp
-- Chrome, Time to Interactive — https://developer.chrome.com/docs/lighthouse/performance/interactive
-- PixiJS v8 guides — https://pixijs.com/8.x/guides
-- Motion (`animate`) — https://motion.dev/docs/animate
+**Two things the key must NOT contain**, both of which are silent-failure traps:
 
-Assets / licensing
-- Pokémon Showdown client (AGPLv3 code; `/sprites/` excluded from repo) — https://github.com/smogon/pokemon-showdown-client
-- `pkmn/ps` (MIT data + `@pkmn/img`) — https://github.com/pkmn/ps
-- PokéAPI sprites (no LICENSE file; verified 404) — https://github.com/PokeAPI/sprites
-- PokéAPI docs, fair-use policy — https://pokeapi.co/docs/v2
+- **The PRNG counter.** `recon-variants.md` §4.3 already flags this for repetition detection: a
+  monotonic RNG state makes repetition unreachable by construction. Same problem for the TT: it makes
+  every key unique and the table useless.
+- **Anything the mover cannot observe.** With everything public (`recon-abilities-items.md` §4.2
+  makes abilities and items public), this is satisfied — which is a real, unremarked benefit of that
+  decision. Hidden information would force the AI into an information-set search, a different and much
+  harder algorithm. `Illusion` is the one sanctioned exception and it should be modelled as a *known*
+  decoy from the AI's side (the AI plays it honestly; the human is the one who is fooled).
+
+**What the extra state costs, measured.** More state in the key ⇒ fewer real transpositions ⇒ fewer
+TT *value* cutoffs. I measured the extreme case by keeping the TT purely as a best-move cache and
+disabling value cutoffs entirely (`tech-recon-search2b.mjs`, `TT_VALUES=0`):
+
+| Depth | TT value cutoffs ON | TT as move-cache only | Cost |
+|---|---|---|---|
+| 8 | 154 ms (EBF 3.80) | 435 ms (EBF 4.86) | 2.8× |
+| 9 | **601 ms** (EBF 3.97) | **2,069 ms** (EBF 5.01) | **3.4×** |
+| 10 | 2,533 ms (EBF 4.18) | 11,207 ms (EBF 5.40) | 4.4× |
+
+**≈1 ply at a 1-second budget.** Acceptable, and mitigable:
+
+- **Epoch-split the key.** Hash the *slow-moving* state (types, wards, items, abilities, field) into a
+  single `epoch` word that changes only on a rare event — a ward popping, a Tera, a type mutation, a
+  weather change. Use `(Z_piece ⊕ Z_side ⊕ Z_chain ⊕ Z_roll ⊕ epoch)` as the probe key. Transpositions
+  *within* an epoch — which is the overwhelming majority of a search — still work. Epochs change at
+  most a couple of dozen times per game (at most 8 wards per side, one Tera per side).
+- **Keep the TT even when value hits are rare.** The measurement above still had full move ordering
+  from the TT's best-move field, and the alternative (no TT at all, `tech-recon-search.mjs`) had EBF
+  28–42. The best-move cache is worth ~3 plies on its own.
+- **Always validate a TT move before playing it.** Because legality is state-dependent, a stale TT
+  entry can hand back a move that is now illegal (the ward popped, the piece is bound, its type
+  changed). Verify membership in the freshly generated list. This is 20 lines and it is the difference
+  between an engine that works and one that occasionally plays an illegal move.
+
+**On incremental move generation: don't.** A dirty-piece incremental attack table is where variant
+engines acquire their hardest bugs, and it is exactly what state-dependent legality makes fragile — a
+ward popping invalidates attack sets that have nothing to do with the piece that moved. `genMoves`
+costs a **measured 194 ns** for a full board, which is ~35% of a node. Spend the engineering on
+ordering, which is measurably worth 3 plies, not on saving 35% (worth 0.2 plies).
+
+Do keep the two accumulators that are trivially correct because they are pure sums:
+
+1. **Type-aware material.** Measured 4 ns to read vs 76 ns to rescan — a 19× saving on the term
+   evaluated at every single leaf. Update in make/unmake: `acc += sign · PVAL[class][type]`.
+2. **A per-side 18-element type-count vector.** `recon-variants.md` §3.3 needs it for
+   `LIAB/ARM/BLOCK/BONUS` with live weights `ŵ`, and states the requirement precisely: "O(1) per
+   capture, no per-node loop over 18 types". Two `Int8Array(18)`s, incremented and decremented on
+   make/unmake.
+
+### 5. The evaluation function
+
+#### 5.1 Shape, and the tier each term sits in
+
+The cost measurements in §2 dictate the structure: terms are placed in tiers by how often they can
+afford to be computed.
+
+```
+eval(state, side) =
+  ── TIER 0: incremental, 4 ns, every node ────────────────────────────────────────────
+    Σ_p sign(p) · [ m(class_p) · (1 − α·LIAB(t_p, ŵ) + β·ARM(t_p, ŵ) − ε·BLOCK(t_p, ŵ))
+                    + τ·BONUS(t_p, ŵ) ]                    // recon-variants.md §3.2 verbatim,
+                                                           //   α=0.9 β=0.5 ε=0.3 τ=0.5(=50cp)
+  + Σ_p sign(p) · PST[class_p][square_p]                   // ordinary chess piece-square tables
+  + w_tempo · (side has the move)
+  + w_ward  · (wardsIntact(us) − wardsIntact(them))        // a one-shot ward ≈ half a tempo (25cp).
+                                                           //   Betza values permanent uncapturability
+                                                           //   at 5–10×; one-shot is nothing like that,
+                                                           //   and pricing it high would make the AI
+                                                           //   hoard wards instead of spending them
+  + w_stat  · (statusScore(us) − statusScore(them))        // slp/frz = the piece is worth ~0 for
+                                                           //   d6 mod 3 + 1 turns; par = −15% of m;
+                                                           //   brn = −1 on its clash rolls ≈ −8% of m;
+                                                           //   psn/tox = a countdown, priced by turns left
+  + w_chain · (chainLeft > 0 ? 40 : 0)                     // holding an unspent bonus move is real value
+
+  ── TIER 1: lazy, ~470 ns, only when |tier0 − α| < MARGIN (≈250 cp) ──────────────────
+  + w_mob   · (mobility(us) − mobility(them))              // legal sub-moves, capped at 12/piece so a
+                                                           //   queen doesn't dominate the term
+  + w_king  · (kingRing(them) − kingRing(us))              // weighted attackers on the 8 squares around
+                                                           //   each king. NO check term — king capture
+                                                           //   is terminal, so "check" is not a state
+  + w_haz   · hazardPressure                               // Σ over enemy hazard squares of
+                                                           //   P(we must step there) × layer cost
+  + w_bind  · boundPieces(them) − boundPieces(us)          // a bound piece's mobility is already counted;
+                                                           //   this prices the positional lock on top
+
+  ── TIER 2: root only, once per search, ~50 µs ───────────────────────────────────────
+  + w_cov   · typeCoverage(us) − typeCoverage(them)        // |{ enemy types we can hit at ≥1× }| / 18.
+                                                           //   This is the term that punishes a
+                                                           //   Normal-heavy army (0 super-effective
+                                                           //   matchups, recon-variants.md §2.2) and it
+                                                           //   changes only when a piece dies or Teras
+  + w_supply· scarce-type ownership (Steel: 11/18 SAFE)    // slow-moving, army-level
+```
+
+**Why the tiering.** Mobility and threats measured at 6.2–6.5× the material eval, which is 2.4× on
+total search speed ≈ 1.25 plies. Lazy evaluation recovers almost all of it because most leaves are
+far outside the window. Coverage and supply are *army-level* quantities that change only on a capture,
+so recomputing them per node is pure waste.
+
+**The threat term is free — put it in quiescence.** Quiescence already enumerates every capture at
+every leaf. While doing so, accumulate `Σ staticClash(a,d)` over the generated captures. That is a
+better threat term than a separate static scan (it is *actual* available captures, correctly
+type-filtered) and it costs nothing extra. This is the single best structural idea in the eval: the
+term that measured most expensive as a static scan is free as a by-product of a search we already run.
+
+**Weights must be fitted, not chosen.** `recon-variants.md` §1.6 is unambiguous: Betza's four
+hand-balanced armies were pronounced equal by human masters and later scored
+**+62% / +19% / −11% / −71%** over 400 engine games. Ship the starting coefficients from
+`recon-variants.md` §3.2 (α 0.9, β 0.5, ε 0.3, τ 0.5) as *initial* values, then run self-play
+(SPSA or a simple Texel-style tuning against a self-play corpus) and re-tune. Budget 2 weeks for the
+harness and the first calibration; treat it as ongoing.
+
+#### 5.2 The replacement for SEE: outcome-aware static clash
+
+This is the most important single function in the AI, because it drives move ordering, quiescence
+pruning, and the "is this capture good?" question the whole game turns on.
+
+```ts
+/** Expected material delta of capturing `d` with `a`, before any search. Pure table lookups. */
+function staticClash(a: Piece, d: Piece, roll: PublicRoll): number {
+  const e = EFF[a.type][d.type];              // 0 | 0.5 | 1 | 2   (Uint8Array(324))
+  if (e === 0) return ILLEGAL;                // never generated
+  const isCrit  = roll.critType === a.type;   // input randomness: known, not sampled
+  const bonus   = e >= 2 || isCrit;
+  const dies    = e === 0.5 && !isCrit;       // deterministic mutual destruction
+  return value(d)
+       - (dies ? value(a) : 0)
+       + (bonus ? TAU : 0)                    // TAU = 50 cp, recon-variants.md's τ
+       - (a.item === 'lifeorb' ? VIGOUR_CP : 0);
+}
+```
+
+This is exactly `recon-variants.md` §2.4B's `E[Δ] = v − P(death)·u + P(bonus)·τ`, evaluated with the
+*known* roll rather than an expectation — which is what input randomness buys us. It reproduces that
+document's key finding automatically: a queen taking an undefended knight is worth only +0.53 pawns,
+so the AI will correctly stop throwing queens at minor pieces, which is the behaviour that makes it
+feel like it understands the game.
+
+Ordering key: `staticClash` descending, then TT move, then killers, then history. Quiescence
+generates only captures with `staticClash > −MARGIN` plus all captures that could remove a king.
+
+#### 5.3 What "quiescent" means here
+
+In chess, a position is quiet when there are no captures. Here there are two more sources of
+instability, and both must be searched or the eval is systematically wrong:
+
+1. **Any capture is unstable**, including a losing one, because mutual destruction means a capture can
+   *cost* the mover a piece independent of recapture. Classical "only search winning captures"
+   pruning is wrong.
+2. **An unspent bonus move is unstable.** A leaf reached with `chainLeft > 0` and a super-effective
+   capture available is not a resting position. The quiescence search must follow bonus chains — my
+   probe does this (`if (e === SUPER) qsearch(sameSide, ...)`) and it is why the depth figures in §2
+   are honest.
+3. **A pending delayed effect is unstable** (Future Sight, Doom Desire, Perish Song, Wish — the D5
+   class in `recon-moves.md` §5). Horizon-extend by the pending duration, which is bounded at 5 by the
+   dataset (`condition.duration` max = 5), so the extension is provably finite.
+
+### 6. Engineering
+
+#### 6.1 Web Worker: mandatory, not an optimisation
+
+Think time is up to 3 s; a frame is 16.7 ms. The search is **180× a frame**, so it can never run on
+the main thread without the board freezing —
+[Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API) are the only option.
+
+Protocol (structured-clone only; no `SharedArrayBuffer`, which needs COOP/COEP headers we should not
+require for a static site):
+
+```
+main ──▶ worker   { type: 'search', state: SerialisedGameState, budgetMs, difficulty, rootSeed }
+main ──▶ worker   { type: 'stop' }                       // player moved / took back / changed setting
+worker ──▶ main   { type: 'progress', depth, score, pv, nodes, nps }   // every ~100 ms
+worker ──▶ main   { type: 'result', move, score, depth, nodes, pv }
+```
+
+- `SerialisedGameState` is the engine's own plain-object state (BRIEF §4.2 already requires the engine
+  be pure and serialisable) — so there is no separate marshalling layer, and the same bytes are the
+  replay format and the future network payload. Measured relevance: the whole position is ~64 × ~12
+  bytes plus a little side state, ≈ 1 KB — structured-clone cost is negligible next to a 600 ms search.
+- The worker imports **only** `src/engine/**` and the baked data — never React, never `src/ui/**`.
+  Enforce with a lint rule; it also keeps the worker chunk small and independently cacheable.
+- A `stop` message sets a flag the search checks on its node-count boundary, so a take-back is
+  instant.
+- Data loading in the worker: the searcher needs the type chart (0.33 KB), the packed move-effect
+  table (~21 KB) and the ability/item archetype records (~0.7 KB) — **~22 KB**, not the 274 KB dex. It
+  must never import `species.json` or `learnsets.json`.
+
+#### 6.2 WASM: no, and here is the arithmetic
+
+Measured JS throughput: **7.1 Mnps**. For scale, strong native chess engines run 5–50 Mnps
+single-threaded with far heavier move generation, so a JS implementation at 7 Mnps on this workload is
+already within a small factor of native. Jangda et al., *Not So Fast: Analyzing the Performance of
+WebAssembly vs. Native Code* (USENIX ATC 2019, <https://www.usenix.org/conference/atc19/presentation/jangda>)
+measured WebAssembly at 1.45–1.55× *slower than native C* on SPEC — so WASM is not a route to native
+speed, and the realistic win over well-JITed typed-array JS on a branchy, small-working-set search is
+**1.5–2.5×**.
+
+At EBF 4.0, a 2× speedup buys `log₄(2) = 0.5 plies`. Half a ply. In exchange for Rust in the
+toolchain, a second debugging story, a larger worker chunk, and a build step. **Reject.**
+
+Four things each buy more than WASM would, in descending order:
+
+| Change | Measured / expected gain |
+|---|---|
+| Keep resolution deterministic-within-a-turn (input randomness) | **~4 plies** (measured 100–160×) |
+| Epoch-split the TT key so value cutoffs survive state-dependence | **~1 ply** (measured 3.4× at depth 9) |
+| Lazy evaluation of the mobility/threat tier | **~1.25 plies** (measured 2.4×) |
+| LMR + futility pruning | ~1–2 plies (standard, unmeasured here) |
+
+**One WASM-shaped opportunity to keep on file for v3:** 64-bit bitboards. Move generation is a
+measured 194 ns / 35% of node cost, and bitboard generation would cut it several-fold — but JS has no
+fast 64-bit integer type (`BigInt` is far slower than two 32-bit halves, and the two-half trick eats
+most of the win). WASM's native `i64` is exactly the capability JS lacks. *If* move generation ever
+becomes the bottleneck, that is the case where WASM is genuinely the right tool. It is not the case
+today.
+
+Similarly, **Lazy SMP across 4 workers** (~1.7–2.5× in chess engines) buys another ~0.5 ply and costs
+a shared TT, which needs `SharedArrayBuffer` and COOP/COEP headers. Not v1.
+
+#### 6.3 Iterative deepening and time management
+
+```
+search(budgetMs):
+  best = firstLegalMove                              # never return nothing
+  for depth in 1..MAX:
+      score, move = rootSearch(depth, windowAround(prevScore))
+      if aborted: break                              # keep `best` from the last COMPLETE iteration
+      best, prevScore = move, score
+      elapsed = now()
+      # EBF is measured at ~4.0; predict the next iteration and stop early rather than abort late
+      if elapsed * 4.0 > budgetMs * 0.85: break
+  return best
+```
+
+- **Clock checks every 4096 nodes.** At 7.1 Mnps that is 0.58 ms of granularity — fine for a 350 ms
+  floor, and the check itself is amortised to nothing.
+- **Always return the last *completed* iteration's move.** A partially searched iteration can return a
+  worse move than the previous depth; this is the classic bug.
+- **Aspiration windows** around the previous iteration's score (±50 cp, widening on failure). With
+  root-level Monte Carlo averaging over R futures, reuse future *i−1*'s score as future *i*'s
+  aspiration centre — they are highly correlated because of common random numbers.
+- **A 350 ms minimum think time even when the answer is instant** (mate in 1, one legal move). An
+  opponent that replies in 4 ms reads as a script, not a player. Fill it with the "thinking" HUD and
+  the eval bar from the `progress` messages.
+
+### 7. Difficulty levels that differ in kind
+
+The thematic opportunity here is unusually clean, and it is the answer to a real design problem: an AI
+made weak by shallow search plays *incoherently* (it makes random-looking positional errors), whereas
+an AI made weak by **not knowing the type chart** plays *coherently but wrongly* — which is exactly
+how a human who is good at chess and new to Pokémon plays. It is also **learnable**: the player can
+notice "this opponent doesn't know Steel resists Fairy" and exploit it, which teaches the type chart
+through play rather than through a manual (BRIEF hard problem 9).
+
+**Mechanism.** The engine resolves captures with the true chart from `src/engine/typechart.ts`. The
+searcher takes its `Uint8Array(324)` effectiveness table as a **parameter**, and each difficulty
+supplies a different one. Three lines of code; the entire difficulty ladder hangs off it.
+
+| Level | Type chart the AI searches with | Depth / budget | Other |
+|---|---|---|---|
+| **Rookie** ≈ 800 | Only the matchups a beginner actually knows: the starter triangle (Fire>Grass>Water>Fire), Electric>Water, Ground>Electric, Water>Fire. **All other 0.5× and 2× entries flattened to 1×; all 8 immunities hidden** (it will attempt illegal captures and be rejected — which the UI should show as the AI making a mistake, not as a bug) | 2 sub-moves, 200 ms | Blunders by *misjudging types*, never by random move choice |
+| **Trainer** ≈ 1200 | Correct on the common matchups; **wrong on all 8 immunities and on Steel's 10 resistances** — the two things intermediate players demonstrably get wrong (`recon-variants.md` §2.2 identifies Steel as the most contested and most misunderstood type) | 4, 400 ms | 15%/turn chance of playing the 2nd-best root move |
+| **Gym Leader** ≈ 1600 | **Correct** | 6, 700 ms | Tier-0 eval only — no mobility, no coverage, no hazard terms. Sound tactics, poor strategy |
+| **Elite Four** ≈ 1900 | Correct | 8, 1.5 s, R = 4 root samples | Full Tier-0+1 eval; Tier-2 at root |
+| **Champion** ≈ 2100+ | Correct | ID to budget (9–10), 3 s, R = 8 | Everything on; opening randomisation off |
+
+Two further levers, both with prior art already collected:
+
+- **Army quality as difficulty** — Really Bad Chess deals armies "based on the player's skill level"
+  (`recon-variants.md` §1.6, §6.3 knob 5). Give the easy AI a smaller draft budget rather than a worse
+  brain. This produces a *sound* opponent in a *losing* position, which is far more instructive than a
+  blundering opponent in an equal one, and it is a one-line change in the draft.
+- **Contempt / risk appetite**, not strength: a "Reckless" personality with a negative draw score and
+  a higher `τ` will hunt bonus-move chains and mutual-destruction trades; a "Cautious" one with a high
+  `α` will avoid them. Same search, same depth, different *character*. This is nearly free and it makes
+  a 5-opponent roster feel like 5 opponents.
+
+**Elo caveat, stated honestly.** The numbers above are calibrated by analogy to chess engines at the
+same depth with a comparable hand-written eval; they are *estimates*, not measurements. There is no
+rating pool for this variant. The only way to get real numbers is a self-play ladder plus human
+games — and `recon-variants.md` §6.1 already flags that the pawn↔Elo constant it uses (1 pawn ≈ 70
+Elo) is itself an assumption. Measure it after launch by fitting `P(win)` against
+`(ΔElo_chess, Δtype-quiz-score)`, exactly as that document recommends.
+
+### 8. Effort estimate
+
+| Work | Estimate | Notes |
+|---|---|---|
+| **Rendering — credible first pass** | **1 week** | The 4 capture-outcome animations, piece movement, the bonus-move dramatisation, the layer stack, the presenter + beat grid, `prefers-reduced-motion`. This is the DIRECTION.md minimum. |
+| Rendering — full | +2–3 weeks | Hazard/status/weather/terrain/trap visuals, the item and ability glyph sets, the draft screen, the HUD, the `aria-live` log, the sprite tiering + service worker. |
+| Board refactor (pieces out of squares, CSS custom properties, layer stack) | 2 days | Prerequisite for any animation. |
+| **AI — playable opponent** | **1 week** | `board.ts` already has the tables; the searcher is ~600 lines, and I have a working reference implementation in `/tmp/pkmn-probe/tech-recon-search2.mjs` that already does variant rules, TT, killers, history and quiescence. |
+| AI — full | +2–3 weeks | Worker protocol, the difficulty ladder, time management, the Tier-1/2 eval terms, `staticClash`, root Monte Carlo, TT epoch-splitting, TT-move validation, illegal-move fuzzing. |
+| AI — self-play weight calibration harness | +2 weeks | Non-negotiable per `recon-variants.md` §1.6/§3.3. Also produces the Chess18-style pairing screen. |
+| Performance CI (bundle gates, frame-time replay test, node-count test, engine benchmarks) | 3 days | Cheap, and it is the only thing that keeps the budgets in §5 real. |
+
+**The biggest risk in Part B is not search strength — it is ruleset churn.** Freeze a narrow interface
+now and make the searcher depend only on it:
+
+```ts
+interface Rules {
+  generate(s: GameState): Action[];                       // the ONE legality predicate, shared with the UI
+  apply(s: GameState, a: Action): { state: GameState; events: EffectEvent[] };
+  terminal(s: GameState): Result | null;
+  staticClash(s: GameState, a: Action): number;           // ordering + quiescence key
+}
+```
+
+Every mechanic in `recon-moves.md` and `recon-abilities-items.md` lands behind `generate`/`apply`. The
+searcher then never needs to know that Rough Skin exists. `recon-variants.md` §6.4 warns that
+"Guarded mode" creates two legality paths — this interface is the place to prevent that: Guarded mode
+is a **filter over `generate`'s output**, never a second generator.
+
+---
+
+## 9. Conflicts, corrections and open questions
+
+1. **BRIEF §4.6 (offline single-player) contradicts `recon-data-substrate.md` §6 (hotlink Showdown's
+   CDN).** *Ruling:* both survive via the Cache API + a first-class text fallback (§5.2). Do not vendor
+   sprites into the repo; do not ship a game that renders 32 blank squares offline.
+2. **`recon-variants.md` recommends input randomness on balance grounds; I confirm it independently
+   on search grounds, and the AI case is stronger than the balance case.** Measured: full chance-node
+   enumeration costs 100–160× (≈4 plies) and star1 recovers only 20%; input randomness costs +10%.
+   *Ruling:* input randomness is now a **joint** requirement of the balance model and the AI
+   architecture. If it is ever revisited, the AI section must be re-derived, and the difficulty ladder
+   drops roughly 400 Elo.
+3. **`recon-abilities-items.md` §8 q5 is right, and now quantified.** One-shot wards make legality
+   state-dependent, which costs ≈1 ply of search (measured 3.4× at depth 9 in the worst case) unless
+   the TT key is epoch-split. *Ruling:* keep the one-shot ward — it is the best answer to the
+   untouchable-piece problem — and pay for it with epoch-splitting and TT-move validation.
+4. **The bonus sub-move should be optional; no doc currently says.** *Ruling (mine):* make it
+   optional, generate an explicit `DeclineBonus` action. A mandatory extra move is an undesigned
+   zugzwang mechanic, and the search needs the branch anyway.
+5. **`recon-variants.md` §4.3's warning about the PRNG counter applies to the transposition table too,
+   not just to repetition detection.** Putting RNG state in the TT key makes every key unique and the
+   table dead. Worth restating because it will be written by a different person.
+6. **The entry-chunk budget is a React budget.** Measured: 59.3 KB of the 65.2 KB entry chunk is React
+   19 + react-dom; our own code is 5.9 KB. *Ruling:* set the gate at 110 KB gz, and if it is ever
+   breached the answer is `preact/compat` (measured 4.4 KB core, ~52 KB reclaimed), not shaving
+   application code.
+7. **`species.json` must not be on the critical path.** 76.9 KB gz as shipped; a columnar draft index
+   of the 1025 base formes measures 17.4 KB gz — 4.4× smaller, and it contains everything a draft
+   screen needs. *Ruling:* add the thin chunk (§5.1).
+8. **Chessground is the right architectural model and the wrong dependency.** DOM board, custom DOM
+   diff, transform-positioned pieces, separate overlay layer, 12.1 KB gz measured. It is **GPL-3.0**
+   and this repo is Apache-2.0. *Ruling:* study it, cite it, do not link it.
+9. **My frame measurements were vsync-bound at 8.33 ms, not 16.67** — this machine has a 120 Hz
+   display. A design tuned only to a 60 Hz budget will visibly judder on modern laptops. *Ruling:*
+   state budgets against the 120 Hz frame (≈4 ms of JS) and treat 60 Hz as the slack case. The
+   recommended architecture passes both with >2.5× margin even at a 6× hardware penalty.
+10. **The 6× slow-hardware multiplier in §3 is an estimate, not a measurement.** It is the one
+    unverified number in Part A. *Action:* run the same `bench.html` harness under Chrome DevTools 4×
+    and 6× CPU throttling, and on one real mid-range Android, before the frame-time budget is treated
+    as settled. Everything else in this document was measured.
+11. **What I did not measure:** WASM (no Rust toolchain configured here, and §6.2 argues it is not
+    worth adding), Lazy SMP, LMR/futility gains, real Elo. The Elo column in §7 is the softest number
+    in this document; treat it as a target to verify, not a claim.
+
+---
+
+## 10. Sources
+
+Rendering and web performance
+- RAIL performance model (10 ms animation budget) — <https://web.dev/articles/rail>
+- Animation performance and compositor-only properties — <https://developer.mozilla.org/en-US/docs/Web/Performance/Animation_performance_and_frame_rate>
+- `will-change` and its costs — <https://developer.mozilla.org/en-US/docs/Web/CSS/will-change>
+- WAI-ARIA APG `grid` pattern (keyboard model for a 2-D board) — <https://www.w3.org/WAI/ARIA/apg/patterns/grid/>
+- `prefers-reduced-motion` — <https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion>
+- View Transition API (considered, rejected for board animation) — <https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API>
+- Cache API / service-worker asset caching (the offline answer) — <https://developer.mozilla.org/en-US/docs/Web/API/Cache>
+- Web Workers API — <https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API>
+- OffscreenCanvas (v2 option: move the fx draw into the worker) — <https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas>
+- Chessground — DOM board, custom DOM diff, "10K gzipped", SVG overlay; **GPL-3.0** — <https://github.com/lichess-org/chessground>
+- PixiJS — <https://pixijs.com/>; bundle measured from <https://cdn.jsdelivr.net/npm/pixi.js@8/dist/pixi.min.mjs>
 
 Search
-- Ballard, B. W., "The \*-minimax search procedure for trees containing chance nodes",
-  *Artificial Intelligence* 21(3):327–350, 1983. doi:10.1016/0004-3702(83)90016-7
-- Hauk, Buro & Schaeffer, "Rediscovering \*-Minimax Search", *Computers and Games* 2006, LNCS 3846 —
-  https://link.springer.com/chapter/10.1007/11922155_3
-- Wikipedia, Expectiminimax (chance-node bounds derivation) — https://en.wikipedia.org/wiki/Expectiminimax
-- CPW, Monte-Carlo Tree Search — https://www.chessprogramming.org/Monte-Carlo_Tree_Search
-- CPW, UCI — https://www.chessprogramming.org/UCI
-- CPW, Zobrist Hashing — https://www.chessprogramming.org/Zobrist_Hashing
-- CPW, Transposition Table — https://www.chessprogramming.org/Transposition_Table
-- CPW, Quiescence Search — https://www.chessprogramming.org/Quiescence_Search
-- CPW, Iterative Deepening — https://www.chessprogramming.org/Iterative_Deepening
-- CPW, Late Move Reductions — https://www.chessprogramming.org/Late_Move_Reductions
-- Stockfish — https://github.com/official-stockfish/Stockfish
-- Fairy-Stockfish — https://github.com/fairy-stockfish/Fairy-Stockfish
-- Fairy-Stockfish variant configuration (the option list; no chance/pairwise-capture support) —
-  https://github.com/fairy-stockfish/Fairy-Stockfish/wiki/Variant-configuration
-- stockfish.wasm (SharedArrayBuffer / COOP-COEP requirement) — https://github.com/lichess-org/stockfish.wasm
-- chess.js (test oracle) — https://github.com/jhlywa/chess.js
+- Expectiminimax — <https://www.chessprogramming.org/Expectiminimax>
+- Star1 / Star2 pruning — <https://www.chessprogramming.org/Star1>
+- Ballard, "The *-minimax search procedure for trees containing chance nodes", *Artificial Intelligence* 21(3), 1983 — <https://doi.org/10.1016/S0004-3702(83)80015-0>
+- Quiescence search — <https://www.chessprogramming.org/Quiescence_Search>
+- Static Exchange Evaluation (and why it does not transfer) — <https://www.chessprogramming.org/Static_Exchange_Evaluation>
+- Zobrist hashing — <https://www.chessprogramming.org/Zobrist_Hashing>
+- Transposition tables — <https://www.chessprogramming.org/Transposition_Table>
+- Killer heuristic — <https://www.chessprogramming.org/Killer_Heuristic>; history heuristic — <https://www.chessprogramming.org/History_Heuristic>
+- Principal Variation Search — <https://www.chessprogramming.org/Principal_Variation_Search>
+- Late Move Reductions — <https://www.chessprogramming.org/Late_Move_Reductions>
+- Null-move pruning and zugzwang (why to disable it here) — <https://www.chessprogramming.org/Null_Move_Pruning>
+- Lazy evaluation — <https://www.chessprogramming.org/Lazy_Evaluation>
+- UCT — <https://www.chessprogramming.org/UCT>
+- Browne et al., "A Survey of Monte Carlo Tree Search Methods", IEEE TCIAIG 4(1), 2012 — <https://ieeexplore.ieee.org/document/6145622>
+- Silver et al., "A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play", *Science* 362, 2018 — <https://www.science.org/doi/10.1126/science.aar6404>
+- Fairy-Stockfish, and its variant-configuration DSL — <https://github.com/fairy-stockfish/Fairy-Stockfish>, <https://github.com/fairy-stockfish/Fairy-Stockfish/wiki/Variant-configuration>
+- Jangda, Powers, Berger, Guha, "Not So Fast: Analyzing the Performance of WebAssembly vs. Native Code", USENIX ATC 2019 — <https://www.usenix.org/conference/atc19/presentation/jangda>
+
+Internal, treated as authoritative
+- [`DIRECTION.md`](./DIRECTION.md) — visuals and 60 fps as acceptance criteria; "animation must never gate play"
+- [`BRIEF.md`](./BRIEF.md) — §4 pre-decided constraints, §5 hard problems 7 and 8
+- [`recon-data-substrate.md`](./recon-data-substrate.md) — §6 sprite sizes (used, not re-measured), §7 bundle discipline
+- [`recon-moves.md`](./recon-moves.md) — §5 danger classes (the search's horizon-extension list), §6.5 bundle budget
+- [`recon-abilities-items.md`](./recon-abilities-items.md) — §2.4 the Clash contract, §6.1 one-shot wards, §8 q5 (the TT-key warning), §7 bundle budget
+- [`recon-variants.md`](./recon-variants.md) — §2.1 the 18×18 chart (independently reproduced here), §2.4 `E[Δ]` (the basis of `staticClash`), §3.2 the piece-value model (Tier-0 eval), §4 termination and sub-move counting, §5 the king-capture model, §6.3 input randomness
+
+---
+
+## Appendix: probe scripts and how to re-run them
+
+| Script | What it produced |
+|---|---|
+| `/tmp/pcbench/bench.html` | §1.1 frame-interval table and §1.2 per-frame CPU table. Serve it (`node -e "…"` static server on :8791) and call `window.runAll()`; the second pass is the inline `browser_evaluate` block that times each tick in isolation. |
+| `/tmp/pkmn-probe/tech-recon-search.mjs` | The 18×18 effectiveness census (8/61/204/51 — matches `recon-variants.md` §2.1), the branching-factor measurement (30.9 mean legal moves, 3.27 captures, 0.34 SE captures), and the naive no-TT baseline (EBF 28–42, depth 8 in 24 s). |
+| `/tmp/pkmn-probe/tech-recon-search2.mjs` | The engineered searcher: flat move stack, factorised Zobrist over (square, pieceCode, **type**), TT, killers, history, quiescence following bonus chains. Produces the §2 depth/time/Mnps/EBF table. **This is the reference implementation to port into `src/ai/`.** |
+| `/tmp/pkmn-probe/tech-recon-search2b.mjs` | Same, with `TT_VALUES=0` to model a near-unique key. Produces the §4.2 cost-of-state-dependence table. |
+| `/tmp/pkmn-probe/tech-recon-chance.mjs` | Four randomness models (deterministic / full expectiminimax / EV-collapse / MC sample) at depths 4–8. |
+| `/tmp/pkmn-probe/tech-recon-star.mjs` | Adds star1 pruning and the input-randomness model with configurable samples-per-ply. Produces the §3 table. |
+| `/tmp/pkmn-probe/tech-recon-eval.mjs` | Per-term eval costs (§2): 4 ns incremental, 76 ns material scan, 194 ns `genMoves`, 470–496 ns with mobility/threats. |
+| Bundle measurements | `rolldown` (already in `node_modules`) on a two-line React entry → 59,285 gz; on a Preact entry → 4,376 gz. `curl` + `gzip -c` for `pixi.min.mjs` (231,272 gz) and `chessground.min.js` (12,089 gz). `node -e` projections over the real `src/data/generated/species.json` for the §5.1 table. |
+
+Nothing in this document required modifying the repository.
