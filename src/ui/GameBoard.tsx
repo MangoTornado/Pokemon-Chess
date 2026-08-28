@@ -22,7 +22,8 @@ import type { Square } from '../engine/board.ts';
 import { effectiveness } from '../engine/typechart.ts';
 import { PokemonChess } from '../engine/variant.ts';
 import type { ResolvedMove, VariantMove } from '../engine/variant.ts';
-import { autodraft } from '../game/autodraft.ts';
+import type { Position } from '../engine/position.ts';
+import type { Loadout } from '../engine/variant.ts';
 import { BoardPiece } from './BoardPiece.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { OUTCOME_PRESENTATION, RESOLUTION_PRESENTATION, causeLabel, coinString } from './outcomes.ts';
@@ -44,13 +45,20 @@ interface SquareEffect {
 export interface GameBoardProps {
   dex: Dex;
   seed: string;
-  onNewGame: () => void;
+  /**
+   * The starting position and Pokémon loadout for the match.
+   *
+   * Passed in rather than drafted here, so the same board serves the sandbox (armies auto-drafted from
+   * the full dex), the draft screen (armies chosen by the player), and later the ranked and tutorial
+   * flows. The board itself has no opinion on how the pieces got there.
+   */
+  setup: { position: Position; loadout: Loadout };
+  onLeave: () => void;
 }
 
-export function GameBoard({ dex, seed, onNewGame }: GameBoardProps) {
-  const draft = useMemo(() => autodraft(dex, seed), [dex, seed]);
+export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
   const [game, setGame] = useState(() =>
-    PokemonChess.create({ position: draft.position, loadout: draft.loadout, seed }),
+    PokemonChess.create({ position: setup.position, loadout: setup.loadout, seed }),
   );
   const [selected, setSelected] = useState<Square | null>(null);
   const [effects, setEffects] = useState<readonly SquareEffect[]>([]);
@@ -59,11 +67,11 @@ export function GameBoard({ dex, seed, onNewGame }: GameBoardProps) {
 
   // A new seed means a new game, not a new board on an old game.
   useEffect(() => {
-    setGame(PokemonChess.create({ position: draft.position, loadout: draft.loadout, seed }));
+    setGame(PokemonChess.create({ position: setup.position, loadout: setup.loadout, seed }));
     setSelected(null);
     setEffects([]);
     setLast(null);
-  }, [draft, seed]);
+  }, [setup, seed]);
 
   useEffect(() => {
     if (effects.length === 0) return;
@@ -174,7 +182,7 @@ export function GameBoard({ dex, seed, onNewGame }: GameBoardProps) {
         game={game}
         result={result}
         pendingExtra={pendingExtra}
-        onNewGame={onNewGame}
+        onLeave={onLeave}
       />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 260px', gap: '1rem', alignItems: 'start' }}>
@@ -313,12 +321,12 @@ function StatusBar({
   game,
   result,
   pendingExtra,
-  onNewGame,
+  onLeave,
 }: {
   game: PokemonChess;
   result: ReturnType<PokemonChess['result']>;
   pendingExtra: boolean;
-  onNewGame: () => void;
+  onLeave: () => void;
 }) {
   const turnColor = game.turn === 'white' ? '#f6f4ef' : '#15171c';
   return (
@@ -377,7 +385,7 @@ function StatusBar({
         </span>
         <button
           type="button"
-          onClick={onNewGame}
+          onClick={onLeave}
           style={{
             background: 'var(--accent)',
             color: '#1a1500',
@@ -388,7 +396,7 @@ function StatusBar({
             cursor: 'pointer',
           }}
         >
-          New game
+          Leave match
         </button>
       </span>
     </div>
