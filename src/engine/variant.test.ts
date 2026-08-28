@@ -11,21 +11,31 @@ import type { Loadout, PokemonLoadout, VariantRules } from './variant.ts';
 const dex = await Dex.load();
 
 /**
+ * A four-slot moveset every slot of which is the given type, so a test controls a piece's effectiveness
+ * exactly. Real games auto-pick coverage from the learnset; these tests pin a single type on purpose, so
+ * "Grass attacker into Fire" resolves at 0.5× rather than finding a coverage slot.
+ */
+function monoMoveset(type: BattleType) {
+  const slot = { id: `test-${type}`, name: `${type} Strike`, type, category: 'Physical' as const, basePower: 80 };
+  return [slot, slot, slot, slot] as const;
+}
+
+/**
  * Builds a game from a FEN, assigning each piece a real species (so its stats are real) but overriding
- * the fought-as type per square, so a test can set up any matchup without hunting for a species of the
- * right type. HP comes from the assigned species.
+ * the fought-as type per square. Each piece's moveset is pinned to its declared type so effectiveness is
+ * exactly the declared-type matchup, unless a test opts into coverage.
  */
 function gameFrom(
   fen: string,
   spec: Record<string, { species: string; type: BattleType }>,
-  options: { seed?: string | number; rules?: Partial<VariantRules> } = {},
+  options: { seed?: string | number; rules?: Partial<VariantRules>; realMovesets?: boolean } = {},
 ): PokemonChess {
   const position = Position.fromFen(fen);
   const loadout = new Map<number, PokemonLoadout>();
   for (const { square, piece } of position.allPieces()) {
     const name = squareName(square);
-    const entry = spec[name] ?? { species: 'pikachu', type: 'Normal' };
-    loadout.set(piece.id, entry);
+    const entry = spec[name] ?? { species: 'pikachu', type: 'Normal' as BattleType };
+    loadout.set(piece.id, options.realMovesets ? entry : { ...entry, moves: monoMoveset(entry.type) });
   }
   return PokemonChess.create({
     dex,
@@ -72,6 +82,20 @@ describe('the type chart decides whether a capture is offered', () => {
       a7: { species: 'pidgey', type: 'Flying' },
     });
     expect(hasRawMove(game, 'a1', 'a7')).toBe(true);
+  });
+
+  it('lets a coverage move reach a target the declared type cannot touch', () => {
+    // Gengar declared Ghost cannot touch a Dark piece with its melee (Ghost→Dark 0.5×), but its real
+    // learnset includes Poison and Fighting coverage, so the capture is offered via a coverage slot.
+    const game = gameFrom('4k3/p7/8/8/8/8/8/R3K3 w - - 0 1', {
+      a1: { species: 'gengar', type: 'Ghost' },
+      a7: { species: 'umbreon', type: 'Dark' },
+    }, { realMovesets: true });
+    const offered = game.rawMoves().find((m) => m.move.to === parseSquare('a7'));
+    expect(offered).toBeDefined();
+    // The chosen slot is not the Ghost melee (slot 0) — coverage did the work.
+    expect(offered!.moveName).toBeTruthy();
+    expect(offered!.effectiveness).toBeGreaterThanOrEqual(1);
   });
 
   it('forecasts the verdict and multiplier before the move is played', () => {

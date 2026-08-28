@@ -1,0 +1,91 @@
+/**
+ * The four-slot moveset a piece fights with, chosen from its real learnset.
+ *
+ * In the games a Pokémon knows four moves, and that is what makes the whole move layer matter: Gengar
+ * declared Ghost cannot touch a Dark piece with its melee (Ghost→Dark is 0.5×) but *can* with Sludge Bomb
+ * or Focus Blast. Slot 0 is always a damaging move of the piece's own declared type — so an ordinary
+ * capture is "attack with your own type", the video's rule — and slots 1–3 are coverage, picked for type
+ * diversity so a piece is rarely without a legal, effective option. See SPEC §8.
+ *
+ * The picker is deterministic given the species, declared type and a seed, so a draft reproduces the same
+ * kit, and it draws only from the baked learnset, so a kit is always legal.
+ */
+
+import type { Dex } from '../data/dex.ts';
+import type { BattleType, MoveEntry, SpeciesEntry } from '../data/schema.ts';
+import { Rng } from '../engine/rng.ts';
+
+/** A resolved slot: the move id and the facts the Clash needs, so it need not re-look-up per action. */
+export interface MoveSlot {
+  readonly id: string;
+  readonly name: string;
+  readonly type: BattleType;
+  readonly category: 'Physical' | 'Special';
+  readonly basePower: number;
+}
+
+/** Exactly four slots. Slot 0 is the declared-type melee; 1–3 are coverage. */
+export type Moveset = readonly [MoveSlot, MoveSlot, MoveSlot, MoveSlot];
+
+const BATTLE_TYPES: readonly BattleType[] = [
+  'Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground',
+  'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy',
+];
+
+/** A synthetic melee slot for a piece whose declared type has no damaging move in its learnset. */
+function struggle(type: BattleType): MoveSlot {
+  return { id: 'struggle', name: 'Struggle', type, category: 'Physical', basePower: 50 };
+}
+
+function toSlot(move: MoveEntry): MoveSlot {
+  return {
+    id: move.id,
+    name: move.name,
+    // A status move has no offensive category; treat it as physical for slotting purposes (it will not
+    // be chosen as a damaging slot, but the type is what matters for coverage).
+    type: (BATTLE_TYPES as readonly string[]).includes(move.type) ? (move.type as BattleType) : 'Normal',
+    category: move.category === 'Special' ? 'Special' : 'Physical',
+    basePower: move.basePower || 60,
+  };
+}
+
+/**
+ * Builds a piece's moveset.
+ *
+ * Slot 0: the strongest damaging move whose type equals the declared type (STAB melee); Struggle if the
+ * learnset has none of that type. Slots 1–3: the strongest damaging move of each of the most useful
+ * *other* types the piece can learn, chosen to maximise distinct attacking types — which is what raises
+ * the share of matchups where the piece has an effective answer.
+ */
+export function buildMoveset(dex: Dex, species: SpeciesEntry, declaredType: BattleType, seed: string | number): Moveset {
+  const rng = new Rng(`kit:${seed}:${species.id}:${declaredType}`);
+  const learn = dex.learnsetOf(species.id).filter((m) => m.category !== 'Status' && m.basePower !== undefined);
+
+  // Best damaging move per type, by base power (ties broken by the seed for variety).
+  const bestByType = new Map<BattleType, MoveEntry>();
+  for (const move of learn) {
+    const type = move.type as BattleType;
+    if (!(BATTLE_TYPES as readonly string[]).includes(type)) continue;
+    const current = bestByType.get(type);
+    const power = move.basePower || 60;
+    const curPower = current ? current.basePower || 60 : -1;
+    if (!current || power > curPower || (power === curPower && rng.chance(50))) {
+      bestByType.set(type, move);
+    }
+  }
+
+  const slot0 = bestByType.has(declaredType) ? toSlot(bestByType.get(declaredType)!) : struggle(declaredType);
+
+  // Coverage: the highest-power moves of other types, most powerful first, capped at three distinct types.
+  const coverage = [...bestByType.entries()]
+    .filter(([type]) => type !== declaredType)
+    .sort((a, b) => (b[1].basePower || 60) - (a[1].basePower || 60))
+    .slice(0, 3)
+    .map(([, move]) => toSlot(move));
+
+  // Pad to four with repeats of slot 0 when a species has a tiny learnset (Ditto, Magikarp), so the
+  // shape is always four slots.
+  while (coverage.length < 3) coverage.push(slot0);
+
+  return [slot0, coverage[0]!, coverage[1]!, coverage[2]!];
+}

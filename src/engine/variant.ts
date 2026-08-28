@@ -42,6 +42,8 @@ import type { ClashRoll, ClashVerdict, Combatant } from '../rules/clash.ts';
 import type { DamageInput } from '../rules/damage.ts';
 import { computeStats } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
+import { buildMoveset } from '../game/moveset.ts';
+import type { Moveset } from '../game/moveset.ts';
 
 // ---------------------------------------------------------------------------
 // Loadouts and live state
@@ -51,6 +53,8 @@ import type { PieceStats } from '../rules/stats.ts';
 export interface PokemonLoadout {
   readonly species: string;
   readonly type: BattleType;
+  /** The four-slot moveset. Optional in a loadout — auto-picked from the learnset when absent. */
+  readonly moves?: Moveset;
 }
 
 /** Loadouts keyed by the chess piece's persistent id, which survives movement and promotion. */
@@ -86,6 +90,10 @@ export interface VariantMove {
   readonly effectiveness: number | null;
   /** Forecast verdict at representative luck, or `quiet` for a non-capture. */
   readonly forecast: Verdict;
+  /** The moveset slot this capture would use (the best legal one); 0 for a quiet move. */
+  readonly slot: number;
+  /** The name of the move used, for the UI; null for a quiet move. */
+  readonly moveName: string | null;
   /** True when this action must be played by the piece that just earned a bonus move. */
   readonly isExtraMove: boolean;
 }
@@ -174,6 +182,8 @@ export class PokemonChess {
     readonly rules: VariantRules,
     /** Battle stats per piece id, computed once — pieces do not change species mid-game (yet). */
     private readonly stats: ReadonlyMap<number, PieceStats>,
+    /** The four-slot moveset per piece id, so a capture can use coverage, not only the declared type. */
+    private readonly movesets: ReadonlyMap<number, Moveset>,
     /** Live HP per piece id. Absent means full HP (never damaged), so a fresh game stores nothing. */
     private readonly live: ReadonlyMap<number, LiveState>,
     private readonly rngState: RngState,
@@ -190,18 +200,23 @@ export class PokemonChess {
   }): PokemonChess {
     const position = options.position ?? Position.fromStartingPosition();
     const stats = new Map<number, PieceStats>();
+    const movesets = new Map<number, Moveset>();
     for (const { piece } of position.allPieces()) {
       const entry = options.loadout.get(piece.id);
       if (!entry) throw new Error(`no Pokémon assigned to piece ${piece.id}`);
       const species = options.dex.getSpecies(entry.species);
       if (!species) throw new Error(`unknown species ${entry.species}`);
       stats.set(piece.id, computeStats(species));
+      // A loadout may carry a hand-picked moveset (from the draft); otherwise auto-pick one from the
+      // species' learnset, keyed on the piece id so the kit is stable for the game.
+      movesets.set(piece.id, entry.moves ?? buildMoveset(options.dex, species, entry.type, `${options.seed}:${piece.id}`));
     }
     return new PokemonChess(
       position,
       options.loadout,
       options.rules ?? DEFAULT_RULES,
       stats,
+      movesets,
       new Map(),
       new Rng(options.seed).state,
       null,
@@ -311,21 +326,26 @@ export class PokemonChess {
           defender: null,
           effectiveness: null,
           forecast: 'quiet',
+          slot: 0,
+          moveName: null,
           isExtraMove: pending !== null,
         });
         continue;
       }
 
       const defenderId = move.captured.id;
-      const mult = this.multiplierAgainst(attacker.type, defenderId);
-      if (mult === 0) continue; // BLOCKED — never offered (never reached for a king, per R6).
+      // A capture is offered if ANY slot can hurt the defender; the best slot's effectiveness is shown.
+      const best = this.bestSlotAgainst(moverPiece.id, defenderId);
+      if (!best) continue; // BLOCKED — no slot can touch it (never reached for a king, per R6).
 
       out.push({
         move,
         attacker,
         defender: this.loadoutOf(defenderId),
-        effectiveness: mult,
+        effectiveness: best.multiplier,
         forecast: this.forecastVerdict(move),
+        slot: best.slot,
+        moveName: this.movesetOf(moverPiece.id)[best.slot]!.name,
         isExtraMove: pending !== null,
       });
     }
@@ -380,31 +400,31 @@ export class PokemonChess {
   // -------------------------------------------------------------------------
 
   /**
-   * Builds the two damage inputs for a Clash.
+   * Builds the two damage inputs for a Clash, given the attacker's chosen slot.
    *
-   * The attacker strikes with its declared type (slot 0, the melee slot); the defender counters with its
-   * own declared type. STAB always applies on slot 0, because attacking with your own type is the melee.
+   * The attacker strikes with its chosen move's type, power and category (STAB when that type equals its
+   * declared type — an ordinary same-type melee). The defender always counters with its own declared-type
+   * melee, because in a Clash it hits back with what it is, not with a chosen coverage move.
    */
-  private clashInputs(attackerId: number, defenderId: number): { atk: DamageInput; def: DamageInput } {
+  private clashInputs(attackerId: number, defenderId: number, slot: number): { atk: DamageInput; def: DamageInput } {
     const a = this.loadoutOf(attackerId);
     const d = this.loadoutOf(defenderId);
     const aStats = this.statsOf(attackerId);
     const dStats = this.statsOf(defenderId);
+    const move = this.movesetOf(attackerId)[slot] ?? this.movesetOf(attackerId)[0]!;
 
-    // Slot 0 is a physical/special melee of the piece's declared type; use whichever offensive stat is
-    // higher, matching the Assault spread's investment.
-    const aPhysical = aStats.atk >= aStats.spa;
+    const aPhysical = move.category === 'Physical';
     const dPhysical = dStats.atk >= dStats.spa;
 
     const atk: DamageInput = {
       attackerType: a.type,
-      moveType: a.type,
+      moveType: move.type,
       defenderType: d.type,
       category: aPhysical ? 'Physical' : 'Special',
-      basePower: MELEE_BASE_POWER,
+      basePower: move.basePower,
       offensiveStat: aPhysical ? aStats.atk : aStats.spa,
       defensiveStat: aPhysical ? dStats.def : dStats.spd,
-      stab: true,
+      stab: move.type === a.type,
     };
     const def: DamageInput = {
       attackerType: d.type,
@@ -431,11 +451,12 @@ export class PokemonChess {
     const attackerId = moverPiece.id;
     const defenderId = move.captured.id;
 
-    const attacker = this.loadoutOf(attackerId);
-    const mult = this.multiplierAgainst(attacker.type, defenderId);
-    if (mult === 0) return 'blocked';
+    // Use the best legal slot — coverage may make a capture the declared type could not.
+    const best = this.bestSlotAgainst(attackerId, defenderId);
+    if (!best) return 'blocked';
+    const mult = best.multiplier;
 
-    const { atk, def } = this.clashInputs(attackerId, defenderId);
+    const { atk, def } = this.clashInputs(attackerId, defenderId, best.slot);
     const aLive = this.liveOf(attackerId);
     const dLive = this.liveOf(defenderId);
     const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.statsOf(attackerId).spe, pristine: aLive.pristine };
@@ -511,7 +532,10 @@ export class PokemonChess {
     const defenderPiece = move.captured;
     const defenderId = defenderPiece.id;
     const defender = this.loadoutOf(defenderId);
-    const mult = this.multiplierAgainst(attacker.type, defenderId);
+    // Resolve with the best legal slot — the same one the forecast and the offer used.
+    const best = this.bestSlotAgainst(attackerId, defenderId);
+    const slot = best?.slot ?? 0;
+    const mult = best?.multiplier ?? this.multiplierAgainst(attacker.type, defenderId);
 
     const aLive = this.liveOf(attackerId);
     const dLive = this.liveOf(defenderId);
@@ -519,7 +543,7 @@ export class PokemonChess {
     const dStats = this.statsOf(defenderId);
     const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: aStats.spe, pristine: aLive.pristine };
     const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: dStats.spe, pristine: dLive.pristine };
-    const { atk, def } = this.clashInputs(attackerId, defenderId);
+    const { atk, def } = this.clashInputs(attackerId, defenderId, slot);
 
     const result = resolveClash(
       { attacker: aC, defender: dC, attackerBlow: atk, defenderBlow: def, attackerSuperEffective: mult > 1 },
@@ -610,9 +634,42 @@ export class PokemonChess {
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
-      position, this.loadout, this.rules, this.stats, live, rngState, pending,
+      position, this.loadout, this.rules, this.stats, this.movesets, live, rngState, pending,
       [...this.history, resolved],
     );
+  }
+
+  /** The four-slot moveset a piece fights with. */
+  movesetOf(pieceId: number): Moveset {
+    const m = this.movesets.get(pieceId);
+    if (!m) throw new Error(`no moveset for piece ${pieceId}`);
+    return m;
+  }
+
+  /**
+   * The slot a piece should attack a defender with, and its effectiveness — the best legal option.
+   *
+   * "Best" ranks the type outcome (super > neutral > resisted), then higher base power. A slot whose type
+   * is immune against the defender is never chosen; if every slot is immune the capture is not offered at
+   * all (except against a king, which R6 makes reachable). This is what lets coverage rescue a piece
+   * whose declared type cannot touch a defender — Gengar reaching a Dark piece with Sludge Bomb.
+   */
+  bestSlotAgainst(attackerId: number, defenderId: number): { slot: number; type: BattleType; multiplier: number } | null {
+    const moves = this.movesetOf(attackerId);
+    const defender = this.loadoutOf(defenderId);
+    const isKing = this.pieceById(defenderId)?.cls === 'king';
+    let best: { slot: number; type: BattleType; multiplier: number } | null = null;
+    for (let slot = 0; slot < moves.length; slot++) {
+      const type = moves[slot]!.type;
+      let mult = effectiveness(type, defender.type);
+      if (mult === 0 && isKing) mult = 1; // R6: a king is never immune as a defender
+      if (mult === 0) continue;
+      const power = moves[slot]!.basePower;
+      const score = mult * 1000 + power;
+      const bestScore = best ? best.multiplier * 1000 + moves[best.slot]!.basePower : -1;
+      if (!best || score > bestScore) best = { slot, type, multiplier: mult };
+    }
+    return best;
   }
 
   // -------------------------------------------------------------------------

@@ -20,7 +20,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dex } from '../data/dex.ts';
 import { ALL_SQUARES, rankOf, squareColor, squareName } from '../engine/board.ts';
 import type { Square } from '../engine/board.ts';
-import { effectiveness } from '../engine/typechart.ts';
 import { PokemonChess } from '../engine/variant.ts';
 import type { ResolvedMove, Side, Verdict, VariantMove } from '../engine/variant.ts';
 import type { Position } from '../engine/position.ts';
@@ -113,11 +112,13 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
 
     for (const { square, piece } of game.position.allPieces()) {
       if (piece.side === attackerPiece.side) continue;
-      // A king is never immune (R6), so it is never marked as untouchable even on a 0× matchup.
+      // A king is never immune (R6).
       if (piece.cls === 'king') continue;
-      const defender = game.loadoutOf(piece.id);
-      if (effectiveness(attacker.type, defender.type) === 0) {
-        out.set(square, `${attacker.type} cannot touch ${defender.type}`);
+      // Untouchable only if NO slot — melee or coverage — can hurt it. Coverage may reach what the
+      // declared type cannot, so this asks the engine rather than the declared type alone.
+      if (game.bestSlotAgainst(attackerPiece.id, piece.id) === null) {
+        const defender = game.loadoutOf(piece.id);
+        out.set(square, `${attacker.type} and its coverage cannot touch ${defender.type}`);
       }
     }
     return out;
@@ -496,6 +497,7 @@ function SidePanel({
                       <span style={{ color: p.color, fontWeight: 700, minWidth: 24 }}>{p.glyph}</span>
                       <span style={{ color: 'var(--text-dim)', minWidth: 24 }}>{squareName(o.move.to)}</span>
                       <span style={{ color: v.color }}>{v.label}</span>
+                      {o.moveName && <span style={{ color: 'var(--text-dim)', marginLeft: 'auto' }}>{o.moveName}</span>}
                     </div>
                   );
                 })}
