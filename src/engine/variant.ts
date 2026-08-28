@@ -44,6 +44,11 @@ import { computeStats } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
 import { buildMoveset } from '../game/moveset.ts';
 import type { Moveset } from '../game/moveset.ts';
+import {
+  applyBurn, applyPoison, applyRotation, cure, movementLock,
+  POISON_LETHAL_COUNT, POISON_RATE, SLEEP_TURN_CAP,
+} from './status.ts';
+import type { PieceStatus } from './status.ts';
 
 // ---------------------------------------------------------------------------
 // Loadouts and live state
@@ -175,6 +180,24 @@ interface PendingExtraMove {
 
 const MELEE_BASE_POWER = 80;
 
+/** Applies a rider status mark to a piece's status, routing each mark to the right applier. */
+function applyRider(status: PieceStatus, mark: string): PieceStatus {
+  switch (mark) {
+    case 'burned':
+      return applyBurn(status);
+    case 'poisoned':
+      return applyPoison(status, 'poisoned');
+    case 'badly-poisoned':
+      return applyPoison(status, 'badlyPoisoned');
+    case 'paralyzed':
+    case 'asleep':
+    case 'confused':
+      return applyRotation(status, mark);
+    default:
+      return status;
+  }
+}
+
 export class PokemonChess {
   private constructor(
     readonly position: Position,
@@ -186,6 +209,8 @@ export class PokemonChess {
     private readonly movesets: ReadonlyMap<number, Moveset>,
     /** Live HP per piece id. Absent means full HP (never damaged), so a fresh game stores nothing. */
     private readonly live: ReadonlyMap<number, LiveState>,
+    /** Status conditions per piece id. Absent means healthy, so a fresh game stores nothing. */
+    private readonly statuses: ReadonlyMap<number, PieceStatus>,
     private readonly rngState: RngState,
     private readonly pending: PendingExtraMove | null,
     readonly history: readonly ResolvedMove[],
@@ -196,7 +221,8 @@ export class PokemonChess {
     position?: Position;
     loadout: Loadout;
     seed: string | number;
-    rules?: VariantRules;
+    /** Any subset of the rules; unspecified fields take their `DEFAULT_RULES` value. */
+    rules?: Partial<VariantRules>;
   }): PokemonChess {
     const position = options.position ?? Position.fromStartingPosition();
     const stats = new Map<number, PieceStats>();
@@ -214,9 +240,10 @@ export class PokemonChess {
     return new PokemonChess(
       position,
       options.loadout,
-      options.rules ?? DEFAULT_RULES,
+      options.rules ? { ...DEFAULT_RULES, ...options.rules } : DEFAULT_RULES,
       stats,
       movesets,
+      new Map(),
       new Map(),
       new Rng(options.seed).state,
       null,
@@ -317,6 +344,8 @@ export class PokemonChess {
       }
 
       const moverPiece = this.position.pieceAt(move.from)!;
+      // A sleeping or paralyzed piece cannot act this turn; it offers no moves at all.
+      if (movementLock(this.statusOf(moverPiece.id)) !== null) continue;
       const attacker = this.loadoutOf(moverPiece.id);
 
       if (!move.captured) {
@@ -425,6 +454,8 @@ export class PokemonChess {
       offensiveStat: aPhysical ? aStats.atk : aStats.spa,
       defensiveStat: aPhysical ? dStats.def : dStats.spd,
       stab: move.type === a.type,
+      // A burned piece hits weaker with physical moves — the games' Attack halving, as a Clash penalty.
+      burned: this.statusOf(attackerId).burned !== undefined,
     };
     const def: DamageInput = {
       attackerType: d.type,
@@ -485,13 +516,19 @@ export class PokemonChess {
   play(move: Move): { game: PokemonChess; resolved: ResolvedMove } {
     const rng = new Rng(this.rngState);
     let roll: ClashRoll = { hits: true, crit: false, momentum: 100 };
+    let riderHits = false;
     if (move.captured) {
       const momentum = 85 + rng.below(16); // uniform 85..100
       let crit = this.rules.critCoins > 0;
       for (let i = 0; i < this.rules.critCoins; i++) crit = crit && rng.chance(50);
       roll = { hits: true, crit, momentum };
+      // Whether the chosen move's status rider lands, drawn from the same stream so it is replayable.
+      const mover = this.position.pieceAt(move.from);
+      const best = mover ? this.bestSlotAgainst(mover.id, move.captured.id) : null;
+      const rider = best ? this.movesetOf(mover!.id)[best.slot]?.rider : undefined;
+      if (rider) riderHits = rng.chance(rider.chance);
     }
-    const { game, resolved } = this.applyResolved(move, roll, rng.state);
+    const { game, resolved } = this.applyResolved(move, roll, rng.state, riderHits);
     return { game, resolved };
   }
 
@@ -505,6 +542,7 @@ export class PokemonChess {
     move: Move,
     roll: ClashRoll,
     nextRngState: RngState = this.rngState,
+    riderHits = false,
   ): { game: PokemonChess; resolved: ResolvedMove } {
     const moverPiece = this.position.pieceAt(move.from)!;
     const side = moverPiece.side;
@@ -523,8 +561,10 @@ export class PokemonChess {
         crit: false, momentum: roll.momentum, blowCount: 0,
         grantsBonus: false, removed: [], kingCaptured: false,
       };
+      // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
+      const up = this.checkup(side, nextPos, this.live, this.statuses);
       return {
-        game: this.next(nextPos, this.live, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, nextRngState, null, resolved),
         resolved,
       };
     }
@@ -577,19 +617,31 @@ export class PokemonChess {
         break;
       case 'rout':
         // Attacker removed; defender holds its square, wounded. A king that attacks and dies has lost.
-        nextPos = this.position.withPieceRemoved(move.from, true);
+        // No piece relocates, so the turn must be passed explicitly (withPieceRemoved does not flip it).
+        nextPos = this.position.withPieceRemoved(move.from, true).withTurnReturned();
         nextLive.delete(attackerId);
         removed.push(attackerId);
         setLive(defenderId, dC);
         break;
       case 'repel':
-        // No one moves; both keep their damage.
+        // No one moves and no one falls, but the attack was still the mover's action, so the turn passes.
+        nextPos = this.position.withTurnReturned();
         setLive(attackerId, aC);
         setLive(defenderId, dC);
         break;
     }
 
     const kingCaptured = removed.some((id) => this.pieceById(id)?.cls === 'king');
+
+    // Status: the attacker's move rider lands on a defender that SURVIVED the exchange (a repel, or a
+    // rout where the defender lives). A removed defender takes no status — it is already gone.
+    const nextStatus = new Map(this.statuses);
+    for (const id of removed) nextStatus.delete(id);
+    const defenderSurvives = dC.hp > 0 && !removed.includes(defenderId);
+    if (defenderSurvives && riderHits) {
+      const rider = this.movesetOf(attackerId)[slot]?.rider;
+      if (rider) nextStatus.set(defenderId, applyRider(this.statusOf(defenderId), rider.mark));
+    }
 
     // A bonus move is granted only by ADVANTAGE, only while the cap is unspent, and only if the piece can
     // actually continue — otherwise the turn passes.
@@ -620,8 +672,16 @@ export class PokemonChess {
       kingCaptured,
     };
 
+    // When the turn passes (no bonus, game not decided), the mover's side takes its end-of-turn Checkup.
+    if (pending === null && !kingCaptured) {
+      const up = this.checkup(side, posForNext, nextLive, nextStatus);
+      return {
+        game: this.next(up.position, up.live, up.statuses, nextRngState, null, resolved),
+        resolved,
+      };
+    }
     return {
-      game: this.next(posForNext, nextLive, nextRngState, pending, resolved),
+      game: this.next(posForNext, nextLive, nextStatus, nextRngState, pending, resolved),
       resolved,
     };
   }
@@ -629,14 +689,95 @@ export class PokemonChess {
   private next(
     position: Position,
     live: ReadonlyMap<number, LiveState>,
+    statuses: ReadonlyMap<number, PieceStatus>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
-      position, this.loadout, this.rules, this.stats, this.movesets, live, rngState, pending,
+      position, this.loadout, this.rules, this.stats, this.movesets, live, statuses, rngState, pending,
       [...this.history, resolved],
     );
+  }
+
+  /** The status a piece is carrying, defaulting to healthy. */
+  statusOf(pieceId: number): PieceStatus {
+    return this.statuses.get(pieceId) ?? {};
+  }
+
+  /**
+   * The end-of-turn Checkup for one side — the TCG's upkeep, resolved deterministically.
+   *
+   * Runs on the side that just finished its turn (so residual damage lands on the afflicted piece's own
+   * turn). Poison adds a counter and the piece faints at three — a visible three-turn death clock — but
+   * a king is never removed by it (the Regicide rule R7): it clamps to 1 HP instead. Burn clears after
+   * three of its owner's turns; sleep wakes after its set duration, capped at three; paralysis costs one
+   * turn then clears. Timing is by turn count, not coins, so the Checkup is deterministic and needs no
+   * randomness of its own.
+   */
+  private checkup(
+    side: Side,
+    position: Position,
+    live: ReadonlyMap<number, LiveState>,
+    statuses: ReadonlyMap<number, PieceStatus>,
+  ): { position: Position; live: ReadonlyMap<number, LiveState>; statuses: ReadonlyMap<number, PieceStatus> } {
+    let pos = position;
+    const nlive = new Map(live);
+    const nstat = new Map(statuses);
+
+    for (const { square, piece } of position.allPieces()) {
+      if (piece.side !== side) continue;
+      const st = nstat.get(piece.id);
+      if (!st) continue;
+      let s: PieceStatus = st;
+
+      // Rotation-class conditions age.
+      if (s.rotation) {
+        const r = s.rotation;
+        if (r.kind === 'paralyzed') {
+          s = cure(s, 'paralyzed'); // one turn lost, then clear
+        } else if (r.kind === 'asleep') {
+          const turns = r.turns + 1;
+          // `data`-less sleep uses the cap; Rest sets a shorter duration via the rotation's turn target.
+          if (turns >= SLEEP_TURN_CAP) s = cure(s, 'asleep');
+          else s = { ...s, rotation: { kind: 'asleep', turns } };
+        }
+        // Confusion clears on a defined event (see §9), not on the counter.
+      }
+
+      // Burn ages out after three of the owner's turns.
+      if (s.burned) {
+        const count = s.burned.count + 1;
+        if (count > 3) s = cure(s, 'burned');
+        else s = { ...s, burned: { kind: 'burned', count } };
+      }
+
+      // Poison accumulates and, at the lethal count, removes the piece — unless it is a king.
+      if (s.poisoned) {
+        const count = s.poisoned.count + POISON_RATE.poisoned;
+        if (count >= POISON_LETHAL_COUNT) {
+          if (piece.cls === 'king') {
+            // R7: residual damage may bring a king to 1 HP but never removes it. Cap the counter below
+            // lethal and clamp its HP to 1.
+            s = { ...s, poisoned: { kind: 'poisoned', count: POISON_LETHAL_COUNT - 1 } };
+            const l = nlive.get(piece.id) ?? { hp: this.statsOf(piece.id).maxHp, maxHp: this.statsOf(piece.id).maxHp, pristine: true };
+            nlive.set(piece.id, { ...l, hp: 1, pristine: false });
+          } else {
+            pos = pos.withPieceRemoved(square, false);
+            nlive.delete(piece.id);
+            nstat.delete(piece.id);
+            continue;
+          }
+        } else {
+          s = { ...s, poisoned: { kind: 'poisoned', count } };
+        }
+      }
+
+      if (Object.keys(s).length === 0) nstat.delete(piece.id);
+      else nstat.set(piece.id, s);
+    }
+
+    return { position: pos, live: nlive, statuses: nstat };
   }
 
   /** The four-slot moveset a piece fights with. */
@@ -721,6 +862,7 @@ export class PokemonChess {
     cls: PieceClass;
     pokemon: PokemonLoadout;
     live: LiveState;
+    status: PieceStatus;
   }[] {
     return this.position.allPieces().map(({ square, piece }) => ({
       square,
@@ -728,6 +870,7 @@ export class PokemonChess {
       cls: piece.cls,
       pokemon: this.loadoutOf(piece.id),
       live: this.liveOf(piece.id),
+      status: this.statusOf(piece.id),
     }));
   }
 }
@@ -735,3 +878,4 @@ export class PokemonChess {
 // Re-exported so consumers can import the common types from the game layer they already use.
 export type { SpeciesEntry };
 export type { Side } from './board.ts';
+export type { PieceStatus } from './status.ts';

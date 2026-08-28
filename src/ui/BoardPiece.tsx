@@ -11,6 +11,7 @@
 import type { SpeciesEntry } from '../data/schema.ts';
 import type { BattleType } from '../data/schema.ts';
 import type { PieceClass, Side } from '../engine/board.ts';
+import type { PieceStatus } from '../engine/variant.ts';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { GLYPH_FONT_STACK, ROLE_GLYPH, ROLE_RING_WEIGHT, ROLE_SPRITE_SCALE } from './pieceRoles.ts';
 import { TYPE_COLORS } from './typeColors.ts';
@@ -24,7 +25,15 @@ export interface BoardPieceProps {
   /** Current hit points, for the HP bar. Omit to hide the bar (e.g. in a draft preview). */
   hp?: number;
   maxHp?: number;
+  /** Status condition, for the rotation and counter-pip markers. */
+  status?: PieceStatus;
 }
+
+/** How far the sprite tilts for each rotation-class status — the TCG's rotate-the-card marking. */
+const ROTATION_DEGREES: Record<string, number> = { asleep: -20, paralyzed: 20, confused: 180 };
+
+/** Colour of each counter-class status pip. */
+const PIP_COLOR: Record<'poisoned' | 'burned', string> = { poisoned: '#a33ea1', burned: '#ee8130' };
 
 /** Green when healthy, amber when bloodied, red when nearly gone — the standard HP-bar reading. */
 function hpColor(fraction: number): string {
@@ -33,11 +42,15 @@ function hpColor(fraction: number): string {
   return '#f85149';
 }
 
-export function BoardPiece({ species, type, cls, side, hp, maxHp }: BoardPieceProps) {
+export function BoardPiece({ species, type, cls, side, hp, maxHp, status }: BoardPieceProps) {
   const typeColor = TYPE_COLORS[type];
   const isWhite = side === 'white';
   const showHp = hp !== undefined && maxHp !== undefined && maxHp > 0;
   const fraction = showHp ? Math.max(0, Math.min(1, hp / maxHp)) : 1;
+  const tilt = status?.rotation ? ROTATION_DEGREES[status.rotation.kind] ?? 0 : 0;
+  const pips: ('poisoned' | 'burned')[] = [];
+  if (status?.poisoned) for (let i = 0; i < status.poisoned.count; i++) pips.push('poisoned');
+  if (status?.burned) pips.push('burned');
 
   return (
     <>
@@ -54,16 +67,24 @@ export function BoardPiece({ species, type, cls, side, hp, maxHp }: BoardPiecePr
         }}
       />
 
-      <PokemonIcon
-        species={species}
-        scale={ROLE_SPRITE_SCALE[cls]}
-        flipped={!isWhite}
+      {/* A tilted (or upside-down) sprite is the TCG's rotate-the-card marking for a rotation-class
+          status. The rotation is on a wrapper so it composes with the icon's own scale and flip. */}
+      <span
         style={{
           position: 'relative',
           zIndex: 1,
-          filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))',
+          display: 'inline-flex',
+          transform: tilt ? `rotate(${tilt}deg)` : undefined,
+          transition: 'transform 200ms ease',
         }}
-      />
+      >
+        <PokemonIcon
+          species={species}
+          scale={ROLE_SPRITE_SCALE[cls]}
+          flipped={!isWhite}
+          style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))' }}
+        />
+      </span>
 
       {/* The role badge is the primary role cue, so it sits above the sprite and never overlaps the
           ring's colour. Its own light/dark treatment is what identifies the owning army. */}
@@ -122,6 +143,34 @@ export function BoardPiece({ species, type, cls, side, hp, maxHp }: BoardPiecePr
               transition: 'width 220ms ease, background 220ms ease',
             }}
           />
+        </span>
+      )}
+
+      {/* Counter-class status pips (poison purple, burn orange) — the TCG's stackable markers. */}
+      {pips.length > 0 && (
+        <span
+          aria-hidden
+          style={{
+            position: 'absolute',
+            bottom: '3%',
+            right: '4%',
+            display: 'flex',
+            gap: '2cqmin',
+            zIndex: 2,
+          }}
+        >
+          {pips.map((kind, i) => (
+            <span
+              key={`${kind}-${i}`}
+              style={{
+                width: '9cqmin',
+                height: '9cqmin',
+                borderRadius: '50%',
+                background: PIP_COLOR[kind],
+                boxShadow: '0 0 0 1cqmin rgba(0,0,0,0.5)',
+              }}
+            />
+          ))}
         </span>
       )}
     </>

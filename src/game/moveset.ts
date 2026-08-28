@@ -15,6 +15,14 @@ import type { Dex } from '../data/dex.ts';
 import type { BattleType, MoveEntry, SpeciesEntry } from '../data/schema.ts';
 import { Rng } from '../engine/rng.ts';
 
+/** A status rider a move can inflict on a surviving defender, carried on the slot. */
+export interface MoveRider {
+  /** The status mark, e.g. `burned`, `paralyzed`, `poisoned`, `badly-poisoned`, `asleep`. */
+  readonly mark: string;
+  /** Chance in percent (100 for a guaranteed primary status). */
+  readonly chance: number;
+}
+
 /** A resolved slot: the move id and the facts the Clash needs, so it need not re-look-up per action. */
 export interface MoveSlot {
   readonly id: string;
@@ -22,6 +30,21 @@ export interface MoveSlot {
   readonly type: BattleType;
   readonly category: 'Physical' | 'Special';
   readonly basePower: number;
+  /** A status this move can inflict, if any — so the engine applies it without a dex lookup. */
+  readonly rider?: MoveRider;
+}
+
+const STATUS_MARK: Record<string, string> = {
+  brn: 'burned', par: 'paralyzed', slp: 'asleep', psn: 'poisoned', tox: 'badly-poisoned', frz: 'asleep',
+};
+
+/** Extracts a move's status rider (primary status or the first status secondary) for the slot. */
+function riderOf(move: MoveEntry): MoveRider | undefined {
+  if (move.status && STATUS_MARK[move.status]) return { mark: STATUS_MARK[move.status]!, chance: 100 };
+  for (const sec of move.secondaries ?? []) {
+    if (sec.status && STATUS_MARK[sec.status]) return { mark: STATUS_MARK[sec.status]!, chance: sec.chance ?? 100 };
+  }
+  return undefined;
 }
 
 /** Exactly four slots. Slot 0 is the declared-type melee; 1–3 are coverage. */
@@ -38,6 +61,7 @@ function struggle(type: BattleType): MoveSlot {
 }
 
 function toSlot(move: MoveEntry): MoveSlot {
+  const rider = riderOf(move);
   return {
     id: move.id,
     name: move.name,
@@ -46,6 +70,7 @@ function toSlot(move: MoveEntry): MoveSlot {
     type: (BATTLE_TYPES as readonly string[]).includes(move.type) ? (move.type as BattleType) : 'Normal',
     category: move.category === 'Special' ? 'Special' : 'Physical',
     basePower: move.basePower || 60,
+    ...(rider ? { rider } : {}),
   };
 }
 

@@ -15,8 +15,8 @@ const dex = await Dex.load();
  * exactly. Real games auto-pick coverage from the learnset; these tests pin a single type on purpose, so
  * "Grass attacker into Fire" resolves at 0.5× rather than finding a coverage slot.
  */
-function monoMoveset(type: BattleType) {
-  const slot = { id: `test-${type}`, name: `${type} Strike`, type, category: 'Physical' as const, basePower: 80 };
+function monoMoveset(type: BattleType, rider?: { mark: string; chance: number }) {
+  const slot = { id: `test-${type}`, name: `${type} Strike`, type, category: 'Physical' as const, basePower: 80, ...(rider ? { rider } : {}) };
   return [slot, slot, slot, slot] as const;
 }
 
@@ -274,6 +274,95 @@ describe('king capture is the win condition', () => {
   it('reports playing while both kings stand', () => {
     const game = gameFrom(ROOK_VS_PAWN, {});
     expect(game.result().kind).toBe('playing');
+  });
+});
+
+describe('status conditions and the Checkup', () => {
+  /**
+   * A white attacker on a1 with a guaranteed status rider, next to a bulky black piece on a2 it cannot
+   * knock out — so the capture repels and the rider lands on the surviving black defender. Both kings
+   * present. The `defenderType` controls whether the black piece is a normal wall or the king.
+   */
+  function riderGame(mark: string, fen = '4k3/8/8/8/8/8/p7/R3K3 w - - 0 1', defenderType: BattleType = 'Steel'): PokemonChess {
+    const position = Position.fromFen(fen);
+    const loadout = new Map<number, PokemonLoadout>();
+    for (const { square, piece } of position.allPieces()) {
+      const name = squareName(square);
+      if (name === 'a1') {
+        loadout.set(piece.id, { species: 'chansey', type: 'Normal', moves: monoMoveset('Normal', { mark, chance: 100 }) });
+      } else if (piece.side === 'black' && piece.cls !== 'king') {
+        loadout.set(piece.id, { species: 'blissey', type: defenderType, moves: monoMoveset(defenderType) });
+      } else {
+        loadout.set(piece.id, { species: 'blissey', type: defenderType, moves: monoMoveset(defenderType) });
+      }
+    }
+    return PokemonChess.create({ dex, position, loadout: loadout as Loadout, seed: `status:${mark}`, rules: { guarded: false, critCoins: 0 } });
+  }
+
+  it('applies a rider to a defender that survives, and paralysis then locks it for a turn', () => {
+    const game = riderGame('paralyzed');
+    const targetId = game.position.pieceAt(parseSquare('a2'))!.id;
+    const { game: after, resolved } = game.play(findMove(game, 'a1', 'a2')!);
+    // Feeble Chansey cannot dent a Blissey wall, so the attack repels and the paralysis rider lands.
+    expect(resolved.verdict).toBe('repel');
+    expect(after.statusOf(targetId).rotation?.kind).toBe('paralyzed');
+    // On black's turn the paralyzed piece offers no moves.
+    expect(after.turn).toBe('black');
+    expect(after.legalMoves().some((m) => m.move.from === parseSquare('a2'))).toBe(false);
+    // After black's turn passes, its Checkup clears the paralysis.
+    const blackMove = after.legalMoves()[0]!;
+    const cleared = after.play(blackMove.move).game;
+    expect(cleared.statusOf(targetId).rotation).toBeUndefined();
+  });
+
+  it('poison is a visible death clock: a poisoned piece faints on its third Checkup', () => {
+    const game = riderGame('badly-poisoned');
+    const targetId = game.position.pieceAt(parseSquare('a2'))!.id;
+    let g = game.play(findMove(game, 'a1', 'a2')!).game;
+    expect(g.statusOf(targetId).poisoned).toBeDefined();
+
+    // Advance black turns; the poisoned piece accrues counters each of its own Checkups and is removed.
+    let removed = false;
+    for (let i = 0; i < 8 && !g.isOver(); i++) {
+      const moves = g.legalMoves();
+      const mine = moves.find((m) => m.move.from !== parseSquare('a2')) ?? moves[0];
+      if (!mine) break;
+      g = g.play(mine.move).game;
+      if (!g.position.allPieces().some((p) => p.piece.id === targetId)) {
+        removed = true;
+        break;
+      }
+    }
+    expect(removed).toBe(true);
+  });
+
+  it('never removes a king by poison — the Regicide rule clamps it to 1 HP instead', () => {
+    // The black king on a2 is the one poisoned. It must never faint from the tick.
+    const game = riderGame('badly-poisoned', 'k7/8/8/8/8/8/8/R3K3 b - - 0 1');
+    // Set up: black king on a8; a white rook a1 poisons... needs adjacency. Use a direct construction:
+    // white rook on a1 (Normal, poison rider), black king on a2.
+    const fen = '4K3/8/8/8/8/8/k7/R7 w - - 0 1';
+    const pos = Position.fromFen(fen);
+    const loadout = new Map<number, PokemonLoadout>();
+    for (const { square, piece } of pos.allPieces()) {
+      const name = squareName(square);
+      loadout.set(piece.id, name === 'a1'
+        ? { species: 'chansey', type: 'Normal', moves: monoMoveset('Normal', { mark: 'badly-poisoned', chance: 100 }) }
+        : { species: 'blissey', type: 'Steel', moves: monoMoveset('Steel') });
+    }
+    const g0 = PokemonChess.create({ dex, position: pos, loadout: loadout as Loadout, seed: 'kingpoison', rules: { guarded: false, critCoins: 0 } });
+    const kingId = g0.position.pieceAt(parseSquare('a2'))!.id;
+    // Rook a1 attacks the king a2: R6 makes a king reachable, and it is a weak hit → repel + poison.
+    let g = g0.play(findMove(g0, 'a1', 'a2')!).game;
+    expect(g.statusOf(kingId).poisoned).toBeDefined();
+    for (let i = 0; i < 10 && !g.isOver(); i++) {
+      const moves = g.legalMoves();
+      if (moves.length === 0) break;
+      g = g.play(moves[0]!.move).game;
+    }
+    // The king is still on the board — poison never delivered the killing blow (only a Clash may).
+    expect(g.position.allPieces().some((p) => p.piece.id === kingId)).toBe(true);
+    void game;
   });
 });
 

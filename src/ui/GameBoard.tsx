@@ -233,6 +233,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
               const piece = game.position.pieceAt(square);
               const pokemon = piece ? game.loadoutOf(piece.id) : null;
               const live = piece ? game.liveOf(piece.id) : null;
+              const status = piece ? game.statusOf(piece.id) : null;
               const option = options.get(square);
               const isSelected = square === selected;
               const denial = denied.get(square);
@@ -275,6 +276,7 @@ export function GameBoard({ dex, seed, setup, onLeave, ai }: GameBoardProps) {
                       side={piece.side}
                       hp={live.hp}
                       maxHp={live.maxHp}
+                      {...(status ? { status } : {})}
                     />
                   )}
 
