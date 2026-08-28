@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "gen:data": "node scripts/gen-data.ts"
+    "gen:data": "node scripts/gen-data.ts",
+    "serve": "node server/main.ts",
+    "serve:build": "npm run build && node server/main.ts"
   },
   "dependencies": {
     "react": "^19.2.8",

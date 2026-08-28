@@ -1,0 +1,1846 @@
+{
+  "moves": [
+    {
+      "input": {
+        "name": "Trick Room",
+        "category": "Status",
+        "target": "all",
+        "basePower": 0,
+        "type": "Psychic",
+        "pseudoWeather": "trickroom",
+        "shortDesc": "Goes last. For 5 turns, turn order is reversed."
+      },
+      "compiled": {
+        "id": "trickroom",
+        "name": "Trick Room",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "BOARD",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "trickroom",
+                "dur": 5
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "applies trickroom"
+      }
+    },
+    {
+      "input": {
+        "name": "Baton Pass",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Normal",
+        "selfSwitch": "copyvolatile",
+        "handlers": [
+          "onHit"
+        ],
+        "shortDesc": "User switches, passing stat changes and more."
+      },
+      "compiled": {
+        "id": "batonpass",
+        "name": "Baton Pass",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "RELOCATE",
+                "to": "origin"
+              },
+              {
+                "op": "MARK",
+                "mark": "legacy",
+                "dur": "persist"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Retreat and leave your stat boosts on the square for the next friendly piece to inherit."
+      }
+    },
+    {
+      "input": {
+        "name": "Metronome",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Normal",
+        "handlers": [
+          "onHit"
+        ],
+        "shortDesc": "Picks a random move."
+      },
+      "compiled": {
+        "id": "metronome",
+        "name": "Metronome",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "INVOKE",
+                "pool": "metronome",
+                "depth": 1
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Use a random move you own (never another Metronome), shown before it resolves."
+      }
+    },
+    {
+      "input": {
+        "name": "Transform",
+        "category": "Status",
+        "target": "normal",
+        "basePower": 0,
+        "type": "Normal",
+        "handlers": [
+          "onHit"
+        ],
+        "shortDesc": "Copies target's stats, moves, types, and Ability."
+      },
+      "compiled": {
+        "id": "transform",
+        "name": "Transform",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "TARGET",
+            "ops": [
+              {
+                "op": "BECOME",
+                "type": "target"
+              },
+              {
+                "op": "EQUIP",
+                "ability": "copy-target"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Copy the target's type, ability and moves — but keep your own HP and chess role."
+      }
+    },
+    {
+      "input": {
+        "name": "Perish Song",
+        "category": "Status",
+        "target": "all",
+        "basePower": 0,
+        "type": "Normal",
+        "handlers": [
+          "onHitField"
+        ],
+        "shortDesc": "All active Pokemon will faint in 3 turns."
+      },
+      "compiled": {
+        "id": "perishsong",
+        "name": "Perish Song",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "BOARD",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "perish",
+                "dur": 3,
+                "data": 3
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Every piece on the board perishes in three turns unless it leaves."
+      }
+    },
+    {
+      "input": {
+        "name": "Sketch",
+        "category": "Status",
+        "target": "normal",
+        "basePower": 0,
+        "type": "Normal",
+        "handlers": [
+          "onHit"
+        ],
+        "shortDesc": "Permanently copies the last move target used."
+      },
+      "compiled": {
+        "id": "sketch",
+        "name": "Sketch",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "EQUIP",
+                "item": null
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Permanently learn the last move used against you into one of your slots."
+      }
+    },
+    {
+      "id": "wonderguard",
+      "missing": true
+    },
+    {
+      "input": {
+        "name": "Belly Drum",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Normal",
+        "handlers": [
+          "onHit"
+        ],
+        "shortDesc": "User loses 50% max HP. Maximizes Attack."
+      },
+      "compiled": {
+        "id": "bellydrum",
+        "name": "Belly Drum",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  2
+                ],
+                "of": "max"
+              },
+              {
+                "op": "BOOST",
+                "d": {
+                  "atk": 12
+                }
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Halve your own HP to max out Attack."
+      }
+    },
+    {
+      "id": "airballoon",
+      "missing": true
+    },
+    {
+      "input": {
+        "name": "Substitute",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Normal",
+        "volatileStatus": "substitute",
+        "handlers": [
+          "onHit",
+          "onTryHit"
+        ],
+        "shortDesc": "User takes 1/4 its max HP to put in a substitute."
+      },
+      "compiled": {
+        "id": "substitute",
+        "name": "Substitute",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  4
+                ],
+                "of": "max"
+              },
+              {
+                "op": "MARK",
+                "mark": "substitute",
+                "dur": "persist",
+                "data": 4
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Spend a quarter of your HP to place a decoy that absorbs the next Clash."
+      }
+    },
+    {
+      "input": {
+        "name": "Explosion",
+        "category": "Physical",
+        "target": "allAdjacent",
+        "basePower": 250,
+        "type": "Normal",
+        "selfdestruct": "always",
+        "shortDesc": "Hits adjacent Pokemon. The user faints."
+      },
+      "compiled": {
+        "id": "explosion",
+        "name": "Explosion",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "RING1_ALL",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  2
+                ],
+                "of": "max"
+              }
+            ]
+          },
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "REMOVE"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "ranged Normal attack (RING1_ALL)"
+      }
+    },
+    {
+      "input": {
+        "name": "Fissure",
+        "category": "Physical",
+        "target": "normal",
+        "basePower": 0,
+        "type": "Ground",
+        "ohko": true,
+        "shortDesc": "OHKOs the target. Fails if user is a lower level."
+      },
+      "compiled": {
+        "id": "fissure",
+        "name": "Fissure",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "MELEE",
+            "ops": [
+              {
+                "op": "CLASH",
+                "slot": 0
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "melee Ground attack"
+      }
+    },
+    {
+      "input": {
+        "name": "Sticky Web",
+        "category": "Status",
+        "target": "foeSide",
+        "basePower": 0,
+        "type": "Bug",
+        "sideCondition": "stickyweb",
+        "shortDesc": "Lowers Speed of grounded foes by 1 on switch-in."
+      },
+      "compiled": {
+        "id": "stickyweb",
+        "name": "Sticky Web",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "FOE_ZONE",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "stickyweb",
+                "dur": "persist",
+                "layers": 1
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "applies stickyweb"
+      }
+    },
+    {
+      "input": {
+        "name": "Court Change",
+        "category": "Status",
+        "target": "all",
+        "basePower": 0,
+        "type": "Normal",
+        "handlers": [
+          "onHitField"
+        ],
+        "shortDesc": "Swaps user's field effects with the opposing side."
+      },
+      "compiled": {
+        "id": "courtchange",
+        "name": "Court Change",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "BOARD",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "courtchange"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Swap which side owns every hazard and screen on the board."
+      }
+    },
+    {
+      "input": {
+        "name": "Protect",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Normal",
+        "volatileStatus": "protect",
+        "handlers": [
+          "onHit",
+          "onPrepareHit"
+        ],
+        "shortDesc": "Prevents moves from affecting the user this turn."
+      },
+      "compiled": {
+        "id": "protect",
+        "name": "Protect",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "protect"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "applies protect"
+      }
+    },
+    {
+      "input": {
+        "name": "Rest",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Psychic",
+        "handlers": [
+          "onHit",
+          "onTry"
+        ],
+        "shortDesc": "User sleeps 2 turns and restores HP and status."
+      },
+      "compiled": {
+        "id": "rest",
+        "name": "Rest",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MEND",
+                "frac": [
+                  1,
+                  1
+                ],
+                "of": "max"
+              },
+              {
+                "op": "MARK",
+                "mark": "asleep",
+                "data": 2
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Fall asleep for two turns and fully restore HP."
+      }
+    },
+    {
+      "input": {
+        "name": "U-turn",
+        "category": "Physical",
+        "target": "normal",
+        "basePower": 70,
+        "type": "Bug",
+        "selfSwitch": true,
+        "shortDesc": "User switches out after damaging the target."
+      },
+      "compiled": {
+        "id": "uturn",
+        "name": "U-turn",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "MELEE",
+            "ops": [
+              {
+                "op": "CLASH",
+                "slot": 0
+              }
+            ]
+          },
+          {
+            "trigger": "ON_CAPTURE",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "RELOCATE",
+                "to": "origin"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "melee Bug attack; repositions"
+      }
+    },
+    {
+      "input": {
+        "name": "Earthquake",
+        "category": "Physical",
+        "target": "allAdjacent",
+        "basePower": 100,
+        "type": "Ground",
+        "shortDesc": "Hits adjacent Pokemon. Double damage on Dig."
+      },
+      "compiled": {
+        "id": "earthquake",
+        "name": "Earthquake",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "RING1_ALL",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  3
+                ],
+                "of": "max"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "ranged Ground attack (RING1_ALL)"
+      }
+    },
+    {
+      "input": {
+        "name": "Thunderbolt",
+        "category": "Special",
+        "target": "normal",
+        "basePower": 90,
+        "type": "Electric",
+        "secondaries": [
+          {
+            "chance": 10,
+            "status": "par"
+          }
+        ],
+        "shortDesc": "10% chance to paralyze the target."
+      },
+      "compiled": {
+        "id": "thunderbolt",
+        "name": "Thunderbolt",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "MELEE",
+            "ops": [
+              {
+                "op": "CLASH",
+                "slot": 0
+              }
+            ]
+          },
+          {
+            "trigger": "ON_DAMAGED",
+            "region": "TARGET",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "paralyzed"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "chance:10"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "melee Electric attack; applies paralyzed"
+      }
+    },
+    {
+      "input": {
+        "name": "Will-O-Wisp",
+        "category": "Status",
+        "target": "normal",
+        "basePower": 0,
+        "type": "Fire",
+        "status": "brn",
+        "shortDesc": "Burns the target."
+      },
+      "compiled": {
+        "id": "willowisp",
+        "name": "Will-O-Wisp",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "MELEE",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "burned"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "applies burned"
+      }
+    },
+    {
+      "input": {
+        "name": "Recover",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Normal",
+        "shortDesc": "Heals the user by 50% of its max HP."
+      },
+      "compiled": {
+        "id": "recover",
+        "name": "Recover",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MEND",
+                "frac": [
+                  1,
+                  2
+                ],
+                "of": "max"
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "heals"
+      }
+    },
+    {
+      "input": {
+        "name": "Dragon Dance",
+        "category": "Status",
+        "target": "self",
+        "basePower": 0,
+        "type": "Dragon",
+        "boosts": {
+          "atk": 1,
+          "spe": 1
+        },
+        "shortDesc": "Raises the user's Attack and Speed by 1."
+      },
+      "compiled": {
+        "id": "dragondance",
+        "name": "Dragon Dance",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "BOOST",
+                "d": {
+                  "atk": 1,
+                  "spe": 1
+                }
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "changes stats"
+      }
+    },
+    {
+      "input": {
+        "name": "Stealth Rock",
+        "category": "Status",
+        "target": "foeSide",
+        "basePower": 0,
+        "type": "Rock",
+        "sideCondition": "stealthrock",
+        "shortDesc": "Hurts foes on switch-in. Factors Rock weakness."
+      },
+      "compiled": {
+        "id": "stealthrock",
+        "name": "Stealth Rock",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "FOE_ZONE",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "stealthrock",
+                "dur": "persist",
+                "layers": 1
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "applies stealthrock"
+      }
+    },
+    {
+      "input": {
+        "name": "Spikes",
+        "category": "Status",
+        "target": "foeSide",
+        "basePower": 0,
+        "type": "Ground",
+        "sideCondition": "spikes",
+        "shortDesc": "Hurts grounded foes on switch-in. Max 3 layers."
+      },
+      "compiled": {
+        "id": "spikes",
+        "name": "Spikes",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "FOE_ZONE",
+            "ops": [
+              {
+                "op": "MARK",
+                "mark": "spikes",
+                "dur": "persist",
+                "layers": 3
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "applies spikes"
+      }
+    },
+    {
+      "input": {
+        "name": "Future Sight",
+        "category": "Special",
+        "target": "normal",
+        "basePower": 120,
+        "type": "Psychic",
+        "handlers": [
+          "onTry"
+        ],
+        "shortDesc": "Hits two turns after being used."
+      },
+      "compiled": {
+        "id": "futuresight",
+        "name": "Future Sight",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "MELEE",
+            "ops": [
+              {
+                "op": "CLASH",
+                "slot": 0
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "melee Psychic attack"
+      }
+    }
+  ],
+  "abilities": [
+    {
+      "input": {
+        "name": "Levitate",
+        "shortDesc": "This Pokemon is immune to Ground; Gravity/Ingrain/Smack Down/Iron Ball nullify it.",
+        "flags": [
+          "breakable"
+        ]
+      },
+      "compiled": {
+        "id": "levitate",
+        "name": "Levitate",
+        "effects": [
+          {
+            "trigger": "CLASH_LEGAL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "VETO",
+                "scope": "type"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "vs-type:Ground"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Cannot be captured by Ground."
+      }
+    },
+    {
+      "input": {
+        "name": "Wonder Guard",
+        "handlers": [
+          "onTryHit"
+        ],
+        "shortDesc": "This Pokemon can only be damaged by supereffective moves and indirect damage.",
+        "flags": [
+          "breakable",
+          "failroleplay",
+          "failskillswap",
+          "noentrain",
+          "noreceiver"
+        ]
+      },
+      "compiled": {
+        "id": "wonderguard",
+        "name": "Wonder Guard",
+        "effects": [
+          {
+            "trigger": "CLASH_LEGAL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "VETO",
+                "scope": "absolute"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "not-super-effective"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Only a super-effective attack can damage it."
+      }
+    },
+    {
+      "input": {
+        "name": "Intimidate",
+        "handlers": [
+          "onStart"
+        ],
+        "shortDesc": "On switch-in, this Pokemon lowers the Attack of opponents by 1 stage."
+      },
+      "compiled": {
+        "id": "intimidate",
+        "name": "Intimidate",
+        "effects": [
+          {
+            "trigger": "ON_ENTER",
+            "region": "RING1_FOES",
+            "ops": [
+              {
+                "op": "BOOST",
+                "d": {
+                  "atk": -1
+                }
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "On arrival, lowers the Attack of adjacent enemies."
+      }
+    },
+    {
+      "input": {
+        "name": "Rough Skin",
+        "handlers": [
+          "onDamagingHit"
+        ],
+        "shortDesc": "Pokemon making contact with this Pokemon lose 1/8 of their max HP."
+      },
+      "compiled": {
+        "id": "roughskin",
+        "name": "Rough Skin",
+        "effects": [
+          {
+            "trigger": "ON_DAMAGED",
+            "region": "REACTIVE",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  8
+                ],
+                "of": "max"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "contact"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "A piece that strikes it in contact loses HP."
+      }
+    },
+    {
+      "input": {
+        "name": "Sturdy",
+        "handlers": [
+          "onDamage",
+          "onTryHit"
+        ],
+        "shortDesc": "If this Pokemon is at full HP, it survives one hit with at least 1 HP. Immune to OHKO.",
+        "flags": [
+          "breakable"
+        ]
+      },
+      "compiled": {
+        "id": "sturdy",
+        "name": "Sturdy",
+        "effects": [
+          {
+            "trigger": "CLASH_RESULT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "CLAMP",
+                "to": 1,
+                "when": "pristine"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Survives a would-be knockout at 1 HP if it was at full health."
+      }
+    },
+    {
+      "input": {
+        "name": "Shadow Tag",
+        "handlers": [
+          "onFoeMaybeTrapPokemon",
+          "onFoeTrapPokemon"
+        ],
+        "shortDesc": "Prevents foes from choosing to switch unless they also have this Ability."
+      },
+      "compiled": {
+        "id": "shadowtag",
+        "name": "Shadow Tag",
+        "effects": [
+          {
+            "trigger": "ALWAYS",
+            "region": "KING_RING",
+            "ops": [
+              {
+                "op": "VETO",
+                "scope": "bind"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "not-class:king"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Adjacent enemies cannot move away."
+      }
+    },
+    {
+      "input": {
+        "name": "Protean",
+        "handlers": [
+          "onPrepareHit"
+        ],
+        "shortDesc": "This Pokemon's type changes to the type of the move it is using. Once per switch-in."
+      },
+      "compiled": {
+        "id": "protean",
+        "name": "Protean",
+        "effects": [
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "BECOME",
+                "type": "target"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Becomes the type of the move it uses."
+      }
+    },
+    {
+      "input": {
+        "name": "Mold Breaker",
+        "handlers": [
+          "onModifyMove",
+          "onStart"
+        ],
+        "shortDesc": "This Pokemon's moves and their effects ignore the Abilities of other Pokemon."
+      },
+      "compiled": {
+        "id": "moldbreaker",
+        "name": "Mold Breaker",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "final",
+                "x": 1.3
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Strengthens its attacks in some condition."
+      }
+    },
+    {
+      "input": {
+        "name": "Magic Guard",
+        "handlers": [
+          "onDamage"
+        ],
+        "shortDesc": "This Pokemon can only be damaged by direct attacks."
+      },
+      "compiled": {
+        "id": "magicguard",
+        "name": "Magic Guard",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "final",
+                "x": 0.75
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Reduces damage in some condition."
+      }
+    },
+    {
+      "input": {
+        "name": "Regenerator",
+        "handlers": [
+          "onSwitchOut"
+        ],
+        "shortDesc": "This Pokemon restores 1/3 of its maximum HP, rounded down, when it switches out."
+      },
+      "compiled": {
+        "id": "regenerator",
+        "name": "Regenerator",
+        "effects": [
+          {
+            "trigger": "ALWAYS",
+            "region": "SELF",
+            "ops": []
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "This Pokemon restores 1/3 of its maximum HP, rounded down, when it switches out."
+      }
+    },
+    {
+      "input": {
+        "name": "Disguise",
+        "handlers": [
+          "onCriticalHit",
+          "onDamage",
+          "onEffectiveness",
+          "onUpdate"
+        ],
+        "shortDesc": "(Mimikyu only) The first hit it takes is blocked, and it takes 1/8 HP damage instead.",
+        "flags": [
+          "breakable",
+          "cantsuppress",
+          "failroleplay",
+          "failskillswap",
+          "noentrain",
+          "noreceiver",
+          "notrace",
+          "notransform"
+        ]
+      },
+      "compiled": {
+        "id": "disguise",
+        "name": "Disguise",
+        "effects": [
+          {
+            "trigger": "ON_DAMAGED",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "VETO",
+                "scope": "rider"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "status-immunity"
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Prevents or removes certain status conditions."
+      }
+    },
+    {
+      "input": {
+        "name": "Multiscale",
+        "handlers": [
+          "onSourceModifyDamage"
+        ],
+        "shortDesc": "If this Pokemon is at full HP, damage taken from attacks is halved.",
+        "flags": [
+          "breakable"
+        ]
+      },
+      "compiled": {
+        "id": "multiscale",
+        "name": "Multiscale",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "final",
+                "x": 0.5
+              }
+            ],
+            "guards": [
+              {
+                "cond": "pristine"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Halves damage taken while at full health."
+      }
+    },
+    {
+      "input": {
+        "name": "Huge Power",
+        "handlers": [
+          "onModifyAtk"
+        ],
+        "shortDesc": "This Pokemon's Attack is doubled."
+      },
+      "compiled": {
+        "id": "hugepower",
+        "name": "Huge Power",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "atk",
+                "x": 2
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Doubles physical attack strength."
+      }
+    },
+    {
+      "input": {
+        "name": "Speed Boost",
+        "handlers": [
+          "onResidual"
+        ],
+        "shortDesc": "This Pokemon's Speed is raised 1 stage at the end of each full turn on the field."
+      },
+      "compiled": {
+        "id": "speedboost",
+        "name": "Speed Boost",
+        "effects": [
+          {
+            "trigger": "ON_CHECKUP",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MEND",
+                "frac": [
+                  1,
+                  16
+                ],
+                "of": "max"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "conditional"
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Acts each end of turn."
+      }
+    },
+    {
+      "input": {
+        "name": "Trace",
+        "handlers": [
+          "onStart",
+          "onUpdate"
+        ],
+        "shortDesc": "On switch-in, or when it can, this Pokemon copies a random adjacent foe's Ability.",
+        "flags": [
+          "failroleplay",
+          "noentrain",
+          "noreceiver",
+          "notrace"
+        ]
+      },
+      "compiled": {
+        "id": "trace",
+        "name": "Trace",
+        "effects": [
+          {
+            "trigger": "ON_DAMAGED",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "VETO",
+                "scope": "rider"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "status-immunity"
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Prevents or removes certain status conditions."
+      }
+    },
+    {
+      "input": {
+        "name": "Download",
+        "handlers": [
+          "onStart"
+        ],
+        "shortDesc": "On switch-in, Attack or Sp. Atk is raised 1 stage based on the foes' weaker Defense."
+      },
+      "compiled": {
+        "id": "download",
+        "name": "Download",
+        "effects": [
+          {
+            "trigger": "ON_ENTER",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "REVEAL",
+                "what": "threats"
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Fires an effect on arrival."
+      }
+    }
+  ],
+  "items": [
+    {
+      "input": {
+        "name": "Leftovers",
+        "category": "held",
+        "handlers": [
+          "onResidual"
+        ],
+        "shortDesc": "At the end of every turn, holder restores 1/16 of its max HP."
+      },
+      "compiled": {
+        "id": "leftovers",
+        "name": "Leftovers",
+        "effects": [
+          {
+            "trigger": "ON_CHECKUP",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MEND",
+                "frac": [
+                  1,
+                  16
+                ],
+                "of": "max"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Restores a little HP at the end of each turn."
+      }
+    },
+    {
+      "input": {
+        "name": "Life Orb",
+        "category": "held",
+        "handlers": [
+          "onAfterMoveSecondarySelf",
+          "onModifyDamage"
+        ],
+        "shortDesc": "Holder's attacks do 1.3x damage, and it loses 1/10 its max HP after the attack."
+      },
+      "compiled": {
+        "id": "lifeorb",
+        "name": "Life Orb",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "final",
+                "x": 1.3
+              }
+            ]
+          },
+          {
+            "trigger": "ON_STRUCK",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  10
+                ],
+                "of": "max"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Attacks hit harder, but the holder loses HP after attacking."
+      }
+    },
+    {
+      "input": {
+        "name": "Focus Sash",
+        "category": "held",
+        "handlers": [
+          "onDamage"
+        ],
+        "shortDesc": "If holder's HP is full, will survive an attack that would KO it with 1 HP. Single use."
+      },
+      "compiled": {
+        "id": "focussash",
+        "name": "Focus Sash",
+        "effects": [
+          {
+            "trigger": "CLASH_RESULT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "CLAMP",
+                "to": 1,
+                "when": "pristine"
+              },
+              {
+                "op": "EQUIP",
+                "item": null,
+                "consume": true
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Survives a would-be knockout at 1 HP if at full health, then breaks."
+      }
+    },
+    {
+      "input": {
+        "name": "Choice Band",
+        "category": "held",
+        "handlers": [
+          "onModifyAtk",
+          "onModifyMove",
+          "onStart"
+        ],
+        "shortDesc": "Holder's Attack is 1.5x, but it can only select the first move it executes."
+      },
+      "compiled": {
+        "id": "choiceband",
+        "name": "Choice Band",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "atk",
+                "x": 1.5
+              }
+            ]
+          },
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "TEMPO",
+                "kind": "lock-slot"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Physical attacks hit 1.5x, but the first move used is the only one usable after."
+      }
+    },
+    {
+      "input": {
+        "name": "Choice Specs",
+        "category": "held",
+        "handlers": [
+          "onModifyMove",
+          "onModifySpA",
+          "onStart"
+        ],
+        "shortDesc": "Holder's Sp. Atk is 1.5x, but it can only select the first move it executes."
+      },
+      "compiled": {
+        "id": "choicespecs",
+        "name": "Choice Specs",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "spa",
+                "x": 1.5
+              }
+            ]
+          },
+          {
+            "trigger": "ON_ACT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "TEMPO",
+                "kind": "lock-slot"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Special attacks hit 1.5x, but the first move used is the only one usable after."
+      }
+    },
+    {
+      "input": {
+        "name": "Air Balloon",
+        "category": "held",
+        "handlers": [
+          "onAfterSubDamage",
+          "onDamagingHit",
+          "onStart"
+        ],
+        "shortDesc": "Holder is immune to Ground-type attacks. Pops when holder is hit."
+      },
+      "compiled": {
+        "id": "airballoon",
+        "name": "Air Balloon",
+        "effects": [
+          {
+            "trigger": "CLASH_LEGAL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "VETO",
+                "scope": "element"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "vs-type:Ground"
+              }
+            ]
+          },
+          {
+            "trigger": "ON_DAMAGED",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "EQUIP",
+                "item": null,
+                "consume": true
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Immune to Ground until struck, then the balloon pops."
+      }
+    },
+    {
+      "input": {
+        "name": "Rocky Helmet",
+        "category": "held",
+        "handlers": [
+          "onDamagingHit"
+        ],
+        "shortDesc": "If holder is hit by a contact move, the attacker loses 1/6 of its max HP."
+      },
+      "compiled": {
+        "id": "rockyhelmet",
+        "name": "Rocky Helmet",
+        "effects": [
+          {
+            "trigger": "ON_DAMAGED",
+            "region": "REACTIVE",
+            "ops": [
+              {
+                "op": "STRIKE",
+                "frac": [
+                  1,
+                  6
+                ],
+                "of": "max"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "contact"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "A piece that strikes it in contact loses HP."
+      }
+    },
+    {
+      "input": {
+        "name": "Eviolite",
+        "category": "held",
+        "handlers": [
+          "onModifyDef",
+          "onModifySpD"
+        ],
+        "shortDesc": "If holder's species can evolve, its Defense and Sp. Def are 1.5x."
+      },
+      "compiled": {
+        "id": "eviolite",
+        "name": "Eviolite",
+        "effects": [
+          {
+            "trigger": "CLASH_ROLL",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MODIFY",
+                "slot": "final",
+                "x": 0.67
+              }
+            ],
+            "guards": [
+              {
+                "cond": "nfe"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "A not-fully-evolved holder takes less damage."
+      }
+    },
+    {
+      "input": {
+        "name": "Heavy-Duty Boots",
+        "category": "other",
+        "shortDesc": "When switching in, the holder is unaffected by hazards on its side of the field."
+      },
+      "compiled": {
+        "id": "heavydutyboots",
+        "name": "Heavy-Duty Boots",
+        "effects": [
+          {
+            "trigger": "ON_ENTER",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "UNMARK",
+                "filter": "hazard"
+              }
+            ],
+            "guards": [
+              {
+                "cond": "self-only"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Ignores hazards on arrival."
+      }
+    },
+    {
+      "input": {
+        "name": "Sitrus Berry",
+        "category": "berry",
+        "handlers": [
+          "onEat",
+          "onTryEatItem",
+          "onUpdate"
+        ],
+        "shortDesc": "Restores 1/4 max HP when at 1/2 max HP or less. Single use.",
+        "isBerry": true
+      },
+      "compiled": {
+        "id": "sitrusberry",
+        "name": "Sitrus Berry",
+        "effects": [
+          {
+            "trigger": "CLASH_RESULT",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MEND",
+                "frac": [
+                  1,
+                  4
+                ],
+                "of": "max"
+              },
+              {
+                "op": "EQUIP",
+                "item": null,
+                "consume": true
+              }
+            ]
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Restores 1/4 max HP when at 1/2 max HP or less. Single use."
+      }
+    },
+    {
+      "input": {
+        "name": "Leftovers",
+        "category": "held",
+        "handlers": [
+          "onResidual"
+        ],
+        "shortDesc": "At the end of every turn, holder restores 1/16 of its max HP."
+      },
+      "compiled": {
+        "id": "leftovers",
+        "name": "Leftovers",
+        "effects": [
+          {
+            "trigger": "ON_CHECKUP",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "MEND",
+                "frac": [
+                  1,
+                  16
+                ],
+                "of": "max"
+              }
+            ]
+          }
+        ],
+        "provenance": "curated",
+        "summary": "Restores a little HP at the end of each turn."
+      }
+    },
+    {
+      "input": {
+        "name": "Black Sludge",
+        "category": "held",
+        "handlers": [
+          "onResidual"
+        ],
+        "shortDesc": "Each turn, if holder is a Poison type, restores 1/16 max HP; loses 1/8 if not."
+      },
+      "compiled": {
+        "id": "blacksludge",
+        "name": "Black Sludge",
+        "effects": [
+          {
+            "trigger": "ALWAYS",
+            "region": "SELF",
+            "ops": []
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Each turn, if holder is a Poison type, restores 1/16 max HP; loses 1/8 if not."
+      }
+    },
+    {
+      "input": {
+        "name": "Assault Vest",
+        "category": "held",
+        "handlers": [
+          "onDisableMove",
+          "onModifySpD"
+        ],
+        "shortDesc": "Holder's Sp. Def is 1.5x, but it can only select damaging moves."
+      },
+      "compiled": {
+        "id": "assaultvest",
+        "name": "Assault Vest",
+        "effects": [
+          {
+            "trigger": "ALWAYS",
+            "region": "SELF",
+            "ops": []
+          }
+        ],
+        "provenance": "handlers",
+        "summary": "Holder's Sp. Def is 1.5x, but it can only select damaging moves."
+      }
+    },
+    {
+      "input": {
+        "name": "Weakness Policy",
+        "category": "held",
+        "handlers": [
+          "onDamagingHit"
+        ],
+        "shortDesc": "If holder is hit super effectively, raises Attack, Sp. Atk by 2 stages. Single use.",
+        "boosts": {
+          "atk": 2,
+          "spa": 2
+        }
+      },
+      "compiled": {
+        "id": "weaknesspolicy",
+        "name": "Weakness Policy",
+        "effects": [
+          {
+            "trigger": "ALWAYS",
+            "region": "SELF",
+            "ops": [
+              {
+                "op": "BOOST",
+                "d": {
+                  "atk": 2,
+                  "spa": 2
+                }
+              }
+            ]
+          }
+        ],
+        "provenance": "fields",
+        "summary": "If holder is hit super effectively, raises Attack, Sp. Atk by 2 stages. Single use."
+      }
+    },
+    {
+      "input": {
+        "name": "Poke Ball",
+        "category": "pokeball",
+        "shortDesc": "A device for catching wild Pokemon. It is designed as a capsule system."
+      },
+      "compiled": {
+        "id": "pokeball",
+        "name": "Poke Ball",
+        "effects": [
+          {
+            "trigger": "ALWAYS",
+            "region": "NONE",
+            "ops": []
+          }
+        ],
+        "provenance": "inert",
+        "summary": "A device for catching wild Pokemon. It is designed as a capsule system."
+      }
+    }
+  ]
+}
