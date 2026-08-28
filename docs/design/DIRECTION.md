@@ -28,6 +28,10 @@ quietly resolve against it.
 5. > "In accordance with that new layer, this is what i mean by a fully fledged and fleshed out game, it
    > should be very well designed and thought out with many cool mechanics"
 
+6. > "You should also be able to add friends and queue into battles with random people not just the bot, as
+   > well as do friendly battles, there should also be a ranking system tied to a ranked mode, with ranks
+   > maybe related to typical badges earned in a pokemon game, I think that is a good addition"
+
 ## What "fully fledged" means, definitively
 
 Directive 5 is the interpretive key to all the others. The target is **a complete game**, not a clever
@@ -43,6 +47,7 @@ Concretely, the finished thing has all of these, each designed rather than bolte
 | **The presentation** | Distinct animations per outcome, coherent art direction, effects with real identity. |
 | **The opponent** | An AI that plays the variant properly and misjudges *types* at lower difficulties. |
 | **The onboarding** | A chess player and a Pokémon player can each learn this without a manual. |
+| **Multiplayer** | Friends, matchmaking against strangers, friendly games, and a ranked ladder. |
 
 "Many cool mechanics" is an explicit instruction to be generous with depth. When in doubt, add the
 mechanic and make it legible — do not trim it for tidiness. The bar to clear is not "is this defensible?"
@@ -207,11 +212,76 @@ A first-class environment for playtests and trial runs, not a debug menu.
 
 #### Accounts
 
-- **Local-first.** A profile persists on-device with no server, and the whole game — sandbox, single-player,
-  progression, collection — works offline. Never gate core play behind an account.
-- Trading and any ladder inherently need a server. Design the data model so a local profile can later sync
-  to an account without migration pain, but stage the backend rather than blocking the game on it.
+- **Local-first for solo play.** A profile persists on-device, and sandbox, single-player and collection all
+  work offline with no server. Never gate core play behind an account — the game must be playable within
+  seconds of loading.
+- **A real backend is required**, not optional, because directive 6 adds friends, matchmaking, friendly
+  games and a ranked ladder, and directive 4 adds trading. Design the local profile so it can later bind to
+  a server account without a migration nightmare, but do not pretend the server is avoidable.
 - Treat a collection as data worth not losing: export/import, and be explicit about what happens on clear.
+
+### Multiplayer, and the badge ladder
+
+Directive 6 requires: friends, queueing against strangers, friendly games, and ranked play.
+
+#### This is where the pure engine pays off
+
+The engine was already required to be pure, deterministic and seeded. That decision now becomes
+load-bearing rather than merely tidy: because the same TypeScript engine module runs in Node and in the
+browser, **the server can authoritatively validate every move with the identical code the client runs**, and
+a whole game serialises to a seed plus an action list. That gives cheat resistance, tiny network messages,
+free spectating, and reconnect-by-replay almost for nothing. Protect this property — any impurity that
+creeps into the engine costs all of it at once.
+
+Required, in dependency order:
+
+1. **Authoritative server.** The client never decides outcomes. The server owns the RNG seed and resolves
+   every capture, or the d6 becomes trivially cheatable, which would destroy ranked play specifically.
+2. **Friends.** Add, accept, block, presence, and invite-to-game.
+3. **Friendly games.** Direct challenge with agreed settings, no rating effect. Also the natural home for
+   playing a specific format or a shared seed.
+4. **Matchmaking.** Queue against strangers with rating-based pairing, a widening search, and a stated
+   target queue time. Must handle the collection problem: pair players on comparable pools, or use a
+   format that neutralises collection depth, so a new player is not fed to someone with 800 Pokémon.
+5. **Ranked mode** with a real rating system underneath and badges on top.
+6. **Reconnection and abandonment.** Turn timers, a grace period, and a stated forfeit policy. Non-negotiable
+   for a ranked ladder to mean anything.
+
+#### Ranks as gym badges
+
+The owner's suggestion, and it is a good one — it is instantly legible to any Pokémon player and it makes
+climbing feel like a journey rather than a number going up.
+
+Recommended shape:
+
+- **Glicko-2 rating internally** (Elo's uncertainty handling is too weak for a new ladder), never shown as
+  the primary identity. The badge is the identity; the number is the machinery.
+- **The eight Kanto badges as the ladder tiers**, in canon order — **Boulder, Cascade, Thunder, Rainbow,
+  Soul, Marsh, Volcano, Earth** — each subdividable (I/II/III) if more granularity is wanted.
+- **Elite Four** as the tiers above the eighth badge, then **Champion** as a top-N leaderboard rank rather
+  than a rating threshold, so it stays genuinely scarce.
+- Badges are **displayed as earned**, cumulatively, exactly as a Pokémon game shows a badge case. Losing
+  rating should not visibly strip a badge you earned; separate "highest badge earned" from "current tier"
+  so the ladder can be brutal without the profile feeling punitive.
+- Later regions (Johto, Hoenn, …) are the natural way to extend the ladder for a second season rather than
+  inflating Kanto into 64 tiers.
+
+#### A mechanic worth adding: Gym Leader promotion matches
+
+Strongly recommended, because it is nearly free and it is *exactly* the right idea for this game.
+
+To promote past a badge tier, the player must defeat that **Gym Leader** — a named AI opponent fielding a
+**mono-type army**. Brock brings Rock. Misty brings Water. Lt. Surge brings Electric. Erika brings Grass.
+Koga brings Poison. Sabrina brings Psychic. Blaine brings Fire. Giovanni brings Ground.
+
+Why this is a better fit here than in any other chess variant: **type is the core mechanic**, so a mono-type
+army is not a cosmetic gimmick — it is a genuine, readable, solvable puzzle. A pure Rock army has exactly
+known weaknesses, and the player's task is to bring a team that exploits them. It teaches the type chart by
+making the player *use* it, which is precisely the skill the whole game is premised on. It also gives the
+single-player, collection and ranked layers a shared spine: you draft from your collection, against a
+themed opponent, to earn a ladder badge.
+
+This should be designed alongside the ranked ladder, not bolted on afterwards.
 
 #### Growing the collection
 
