@@ -24,6 +24,8 @@ import { GameBoard } from './GameBoard.tsx';
 import { TutorScreen } from './TutorScreen.tsx';
 import { LadderScreen, LadderMatch } from './LadderScreen.tsx';
 import { OnlineScreen } from './OnlineScreen.tsx';
+import { SandboxScreen } from './SandboxScreen.tsx';
+import { CollectionScreen } from './CollectionScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
 import { AvatarView } from './AvatarView.tsx';
 import { useSession } from './useSession.ts';
@@ -39,6 +41,8 @@ type Screen =
   | { readonly kind: 'tutorial' }
   | { readonly kind: 'ladder' }
   | { readonly kind: 'online' }
+  | { readonly kind: 'sandbox' }
+  | { readonly kind: 'collection' }
   | { readonly kind: 'gym'; readonly gymId: string }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
@@ -108,6 +112,16 @@ export function App() {
           gym={GYM_BY_ID.get(screen.gymId)!}
           ladder={ladder}
           onExit={() => setScreen({ kind: 'ladder' })}
+          {...(session.profile ? { onClaimReward: session.claimReward } : {})}
+        />
+      )}
+
+      {screen.kind === 'collection' && (
+        <CollectionScreen
+          dex={dex}
+          signedIn={!!session.profile}
+          onExit={() => setScreen({ kind: 'title' })}
+          onSignIn={() => setScreen({ kind: 'account' })}
         />
       )}
 
@@ -118,6 +132,10 @@ export function App() {
           onExit={() => setScreen({ kind: 'title' })}
           onSignIn={() => setScreen({ kind: 'account' })}
         />
+      )}
+
+      {screen.kind === 'sandbox' && (
+        <SandboxScreen dex={dex} onExit={() => setScreen({ kind: 'title' })} />
       )}
 
       {screen.kind === 'title' && (
@@ -131,6 +149,8 @@ export function App() {
           onTutorial={() => setScreen({ kind: 'tutorial' })}
           onLadder={() => setScreen({ kind: 'ladder' })}
           onOnline={() => setScreen({ kind: 'online' })}
+          onSandbox={() => setScreen({ kind: 'sandbox' })}
+          onCollection={() => setScreen({ kind: 'collection' })}
         />
       )}
 
@@ -209,12 +229,16 @@ function TitleScreen({
   onTutorial,
   onLadder,
   onOnline,
+  onSandbox,
+  onCollection,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onTutorial: () => void;
   onLadder: () => void;
   onOnline: () => void;
+  onSandbox: () => void;
+  onCollection: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
   const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
@@ -345,9 +369,23 @@ function TitleScreen({
           <small>Choose all 32 pieces from every Pokémon</small>
         </BigButton>
       </div>
+
+      <div style={{ display: 'flex', gap: '1.1rem', flexWrap: 'wrap' }}>
+        <button type="button" onClick={onCollection} style={linkStyle}>
+          Collection & Pokédex
+        </button>
+        <button type="button" onClick={onSandbox} style={linkStyle}>
+          Sandbox — AI-vs-AI batch playtests
+        </button>
+      </div>
     </section>
   );
 }
+
+const linkStyle = {
+  background: 'none', border: 'none', color: 'var(--text-dim)',
+  cursor: 'pointer', fontSize: '0.82rem', textDecoration: 'underline', padding: 0,
+} as const;
 
 function Segmented({
   label,

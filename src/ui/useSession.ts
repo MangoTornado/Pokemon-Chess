@@ -23,6 +23,8 @@ export interface Session {
   updateProfile: (input: { displayName?: string; bio?: string; status?: string; avatar?: Avatar }) => Promise<ApiError | null>;
   /** Reports a rated match result to the server, updating the signed-in profile's rating and badges. */
   recordLadderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) => Promise<ApiError | null>;
+  /** Claims a reward Pokémon into the collection, updating the signed-in profile's dex count. */
+  claimReward: (species: string) => Promise<ApiError | null>;
 }
 
 export function useSession(): Session {
@@ -79,5 +81,14 @@ export function useSession(): Session {
     return r.error;
   }, []);
 
-  return { profile, register, login, logout, updateProfile, recordLadderResult };
+  const claimReward: Session['claimReward'] = useCallback(async (species) => {
+    const r = await api.claimReward(species);
+    if (r.ok) {
+      setProfile(r.value.profile);
+      return null;
+    }
+    return r.error;
+  }, []);
+
+  return { profile, register, login, logout, updateProfile, recordLadderResult, claimReward };
 }

@@ -52,7 +52,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Accounts, passwords, sessions | ✅ | `server/` — scrypt, secure cookies, zero native deps. |
 | Profiles (display name, bio, status) | ✅ | server-side; validated and moderated-by-shape. |
 | Character customization (avatar) | ✅ | `profile/avatar.ts` — games-faithful, shared client/server model. |
-| Collection / Pokédex (individuals) | ◑ | stored; starter grant on register. No acquisition loop (rewards, evolution, trading) yet. |
+| Collection / Pokédex (individuals) | ◑ | `ui/CollectionScreen.tsx` — the owned grid (duplicates counted) and a Pokédex figure of distinct species / 1025. **Acquisition loop shipped:** a Gym win offers three Pokémon to catch (`RewardChooser`), claimed via `POST /api/collection/claim`. Evolution-through-play and trading remain. |
 | Client UI for accounts/profile | ✅ | `ui/AccountScreen.tsx`, `ui/AvatarCustomizer.tsx`, `ui/useSession.ts`, `net/api.ts` — sign-up, login, profile fields, and the region-grouped trainer customizer, wired to the backend and routed from `App.tsx`. |
 | Ranked ladder + gym badges | ◑ | **Single-player ladder shipped.** `src/ladder/` + `ui/LadderScreen.tsx` — eight Kanto Gym Leaders fielding mono-type armies (`game/gymArmy.ts`), gyms unlock in canon order, Elo rating with league tiers, and a badge case a losing streak never strips (§17.8). Local-first, syncing to the account when signed in (`POST /api/ladder/result`, server-authoritative). Missing: human matchmaking (needs the multiplayer tract). |
 | Multiplayer (matchmaking, friendly games, live games) | ◑ | **Online play shipped.** `server/matches.ts` + `ui/OnlineScreen.tsx` — in-memory rooms, matchmaking queue (random pairing) and private games by shareable code. Since a game is a seed + action list, both clients draft the same armies from the shared seed and the server relays the growing action list; the board plays it via GameBoard's new controlled mode (`game/replay.ts`). Client polls for the opponent's moves. Pending: friends graph/presence, chat, turn timers, and **server-side move validation** — the engine's constructors use parameter properties that Node's strip-only TS rejects, so legality is client-trusted for now and online play is unranked. |
@@ -67,7 +67,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | HP bars, forecast preview, refusal affordance | ✅ | on the board. |
 | Effect animations for moves/abilities/items | ○ | depend on effects executing in the Clash first. |
 | **Tutorial** (DIRECTION directive 7) | ✅ | `src/tutor/` + `ui/TutorScreen.tsx` — a lesson is a real game on a hand-built position, not a script (§18.1). Twelve lessons across the two branch tracks (movement, type chart) and the shared spine: the four capture outcomes each caused by the player, the untouchable-piece refusal, the miss and crit reveals, a status lesson, and king capture. `lessons.test.ts` proves every goal reachable and every beat producible against the live engine — a rotted lesson fails CI. |
-| Sandbox / batch simulator | ○ | designed in BRIEF-METAGAME §19; not built. It is how balance gets *measured*. |
+| Sandbox / batch simulator | ✅ | `src/sim/batch.ts` + `ui/SandboxScreen.tsx` — runs many seeded AI-vs-AI games and reports win/draw shares, White score and average length; deterministic and rot-proofed (a deeper AI must outscore a shallower one). Already surfacing balance data (e.g. a large first-move edge at equal AI strength). |
 
 ## Suggested order from here
 
@@ -78,4 +78,5 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 4. ~~The ladder & Gym Leader matches~~ — **done** (single-player). Eight gyms, Elo + badges, persisted.
 5. ~~Multiplayer~~ — **core shipped.** Matchmaking + private games, server-relayed live play. Remaining:
    friends graph, chat, timers, and server-side validation (needs the engine to build under strip-only TS).
-6. **Trading, sandbox/batch simulator, richer visuals** — round out the complete game. **Next.**
+6. ◑ **Sandbox and the collection loop done.** Remaining in this bucket: **trading** (a two-party
+   offer/accept protocol — its own feature), evolution-through-play, and richer effect visuals.

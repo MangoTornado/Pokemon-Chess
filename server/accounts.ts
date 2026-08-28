@@ -238,6 +238,22 @@ export class Accounts {
   }
 
   /**
+   * Claims a post-match reward Pokémon into the collection, returning the updated profile.
+   *
+   * Validation is deliberately light: the collection has zero competitive weight (SPEC §17.11 — ranked is
+   * point-buy from a shared pool, so collection depth is worth nothing in a match), so a spare grant is a
+   * completionist reward, not an advantage. The id shape is checked and the total is capped to keep the
+   * table from growing without bound; duplicates are allowed, because you own individuals (§17.8).
+   */
+  claimSpecies(accountId: number, species: unknown): Result<PublicProfile> {
+    if (typeof species !== 'string' || !/^[a-z0-9.'-]{1,40}$/.test(species)) return fail('Unknown Pokémon.');
+    const { n } = this.db.raw.prepare('SELECT COUNT(*) AS n FROM collection WHERE account_id = ?').get(accountId) as { n: number };
+    if (n >= 2000) return fail('Your collection is full.');
+    this.grant(accountId, species);
+    return ok(this.publicProfile(accountId)!);
+  }
+
+  /**
    * Records a rated match result and updates the account's rating, games count, and badge case.
    *
    * The rating maths lives server-side so the number is authoritative — the client reports only the

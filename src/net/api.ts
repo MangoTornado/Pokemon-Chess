@@ -87,6 +87,9 @@ export const api = {
 
   collection: () => call<{ collection: CollectionEntry[] }>('GET', '/api/collection'),
 
+  /** Claims a post-match reward Pokémon into the collection; returns the updated profile. */
+  claimReward: (species: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/claim', { species }),
+
   avatarOptions: () => call<{ trainers: TrainerOption[] }>('GET', '/api/avatar-options'),
 
   /** Reports a rated match result; the server updates rating and the badge case and returns the profile. */

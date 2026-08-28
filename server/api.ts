@@ -136,6 +136,14 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     return json(200, { collection: accounts.collection(accountId) });
   }
 
+  if (method === 'POST' && path === '/api/collection/claim') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const result = accounts.claimSpecies(accountId, asObject(req.body).species);
+    if (!result.ok) return json(400, result.error);
+    return json(200, { profile: result.value });
+  }
+
   // Viewing another player's public profile: /api/profile/:username
   const profileMatch = /^\/api\/profile\/([A-Za-z0-9_-]{1,20})$/.exec(path);
   if (method === 'GET' && profileMatch) {
