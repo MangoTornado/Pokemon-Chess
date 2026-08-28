@@ -46,6 +46,99 @@ code {
   font-size: 0.9em;
 }
 
+/*
+ * Capture-outcome animations.
+ *
+ * Each of the four outcomes gets a visually distinct motion, not just a distinct colour, so a player can
+ * tell what happened without reading and without relying on hue. The super-effective flash is the loudest
+ * of them on purpose: the free extra move it grants is the most consequential event in the game.
+ */
+
+.pc-effect {
+  animation-duration: 700ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  animation-fill-mode: both;
+}
+
+/* Captured and continuing: a bright expanding bloom that draws the eye back to the piece. */
+.pc-effect-super {
+  animation-name: pc-super;
+}
+
+@keyframes pc-super {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba(63, 185, 80, 0.95);
+    filter: brightness(1.6);
+  }
+  45% {
+    box-shadow: inset 0 0 0 14px rgba(63, 185, 80, 0.55);
+    filter: brightness(1.25);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(63, 185, 80, 0);
+    filter: brightness(1);
+  }
+}
+
+/* An ordinary capture: a brief, unshowy settle. */
+.pc-effect-neutral {
+  animation-name: pc-neutral;
+}
+
+@keyframes pc-neutral {
+  0% {
+    box-shadow: inset 0 0 0 10px rgba(230, 237, 243, 0.5);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(230, 237, 243, 0);
+  }
+}
+
+/* Both destroyed: an amber shudder, so a trade never reads as a clean capture. */
+.pc-effect-mutual {
+  animation-name: pc-mutual;
+}
+
+@keyframes pc-mutual {
+  0% {
+    box-shadow: inset 0 0 0 12px rgba(227, 160, 8, 0.9);
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-3px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-2px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(227, 160, 8, 0);
+    transform: translateX(0);
+  }
+}
+
+/* Refused: a hard red pulse that reads as a rejection rather than as nothing happening. */
+.pc-effect-denied {
+  animation-name: pc-denied;
+  animation-duration: 420ms;
+}
+
+@keyframes pc-denied {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(248, 81, 73, 0);
+  }
+  30%,
+  70% {
+    box-shadow: inset 0 0 0 8px rgba(248, 81, 73, 0.85);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
