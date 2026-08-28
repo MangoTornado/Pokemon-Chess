@@ -1,98 +1,107 @@
 /**
- * How each capture outcome is presented.
+ * How each Clash verdict and each effectiveness tier is presented.
  *
- * Kept in one place because the same four outcomes have to read consistently in three different
- * situations: as a *prediction* while a player considers a move, as a *result* once it resolves, and as a
- * *lesson* in the tutorial. Inconsistency between those is how a player ends up unsure what the rules are.
- *
- * Colour is never the only channel. Each outcome also has a distinct glyph and distinct wording, because
- * roughly one in twelve men cannot reliably separate the green and red these outcomes naturally want.
+ * Kept in one place because the same outcomes must read consistently as a *prediction* while a player
+ * weighs a move, as a *result* once it resolves, and as a *lesson* in the tutorial. Colour is never the
+ * only channel — each verdict has a distinct glyph and distinct wording too, because the greens and reds
+ * these outcomes want are the pair most commonly confused.
  */
 
-import type { CaptureOutcome } from '../engine/typechart.ts';
-import type { CritFlip, Resolution, ResolutionCause } from '../engine/variant.ts';
+import type { Verdict } from '../engine/variant.ts';
 
 export interface OutcomePresentation {
   readonly label: string;
   readonly glyph: string;
   readonly color: string;
-  /** What the rule is, phrased for a player who has not read a manual. */
   readonly detail: string;
 }
 
-export const OUTCOME_PRESENTATION: Record<CaptureOutcome, OutcomePresentation> = {
+/** Presentation keyed by the effectiveness tier, for the pre-move forecast on the board. */
+export type EffectivenessTier = 'super' | 'neutral' | 'resisted' | 'immune';
+
+export function tierOf(multiplier: number): EffectivenessTier {
+  if (multiplier === 0) return 'immune';
+  if (multiplier < 1) return 'resisted';
+  if (multiplier > 1) return 'super';
+  return 'neutral';
+}
+
+export const TIER_PRESENTATION: Record<EffectivenessTier, OutcomePresentation> = {
   super: {
     label: 'Super effective',
-    glyph: '× 2',
+    glyph: '×2',
     color: '#3fb950',
-    detail: 'The capture succeeds and this piece immediately moves again.',
+    detail: 'Your attack hits hard. A knockout here lets your piece move again.',
   },
   neutral: {
     label: 'Neutral',
-    glyph: '× 1',
+    glyph: '×1',
     color: '#a0a8b4',
-    detail: 'An ordinary chess capture.',
+    detail: 'An even matchup.',
   },
   resisted: {
     label: 'Not very effective',
     glyph: '½',
     color: '#e3a008',
-    detail: 'Both pieces are destroyed.',
+    detail: 'Your attack is weak here. You may fail to knock it out — and it hits back.',
   },
   immune: {
     label: 'No effect',
     glyph: '⊘',
     color: '#f85149',
-    detail: 'This capture is impossible — that piece cannot be touched by this type at all.',
+    detail: 'This capture is impossible — that type cannot be touched by yours at all.',
   },
 };
 
-export const RESOLUTION_PRESENTATION: Record<Resolution, OutcomePresentation> = {
+/** Presentation keyed by the resolved Clash verdict. */
+export const VERDICT_PRESENTATION: Record<Verdict, OutcomePresentation> = {
   quiet: {
     label: 'Move',
     glyph: '→',
     color: '#a0a8b4',
     detail: 'No capture.',
   },
+  advantage: {
+    label: 'Super effective — move again',
+    glyph: '↻',
+    color: '#3fb950',
+    detail: 'The target fell to a super-effective blow and your piece may move again.',
+  },
   capture: {
     label: 'Captured',
     glyph: '×',
-    color: '#a0a8b4',
-    detail: 'The target was removed.',
+    color: '#7ee787',
+    detail: 'The target fell. Your piece took the square, perhaps wounded.',
   },
-  'capture-and-continue': {
-    label: 'Captured — move again',
-    glyph: '↻',
-    color: '#3fb950',
-    detail: 'The target was removed and this piece may move again.',
-  },
-  'mutual-destruction': {
+  mutual: {
     label: 'Both destroyed',
     glyph: '✕',
     color: '#e3a008',
-    detail: 'The attack failed to land cleanly and both pieces were destroyed.',
+    detail: 'Both pieces fell in the exchange.',
+  },
+  rout: {
+    label: 'Routed',
+    glyph: '⤬',
+    color: '#f85149',
+    detail: 'Your piece failed to break through and fell to the counterattack.',
+  },
+  repel: {
+    label: 'Repelled',
+    glyph: '⟲',
+    color: '#f0883e',
+    detail: 'Neither piece fell. Your attacker returned to where it started.',
+  },
+  blocked: {
+    label: 'No effect',
+    glyph: '⊘',
+    color: '#f85149',
+    detail: 'This capture is impossible.',
   },
 };
 
-/**
- * One line naming *why* a resolution happened, which is what stops variance reading as a cheat.
- *
- * Coins are named as coins rather than as a percentage. A player who is told they had a 6.25% chance has
- * to trust the game; a player who watches four coins land has seen it.
- */
-export function causeLabel(cause: ResolutionCause | null, crit: CritFlip | null): string | null {
-  if (cause === 'critical-hit') {
-    return `Critical hit — ${crit?.coins.length ?? 0} heads`;
-  }
-  if (cause === 'type') {
-    if (!crit) return 'By type matchup';
-    const heads = crit.coins.filter(Boolean).length;
-    return `By type matchup — ${heads} of ${crit.coins.length} heads, no crit`;
-  }
-  return null;
-}
-
-/** Renders a coin run as characters, so the flip is legible in text and to a screen reader. */
-export function coinString(crit: CritFlip): string {
-  return crit.coins.map((head) => (head ? '●' : '○')).join(' ');
+/** One line naming why a Clash resolved as it did, so a crit or a bad matchup does not read as a cheat. */
+export function verdictCause(verdict: Verdict, crit: boolean, momentum: number): string | null {
+  if (verdict === 'quiet') return null;
+  const luck = crit ? 'critical hit' : `momentum ${momentum}`;
+  return `by the Clash — ${luck}`;
 }

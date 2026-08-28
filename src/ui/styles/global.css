@@ -61,7 +61,8 @@ code {
 }
 
 /* Captured and continuing: a bright expanding bloom that draws the eye back to the piece. */
-.pc-effect-super {
+/* ADVANTAGE — a super-effective knockout that grants a bonus move: the loudest effect on purpose. */
+.pc-effect-advantage {
   animation-name: pc-super;
 }
 
@@ -80,8 +81,8 @@ code {
   }
 }
 
-/* An ordinary capture: a brief, unshowy settle. */
-.pc-effect-neutral {
+/* CAPTURE — an ordinary knockout: a brief, unshowy settle. */
+.pc-effect-capture {
   animation-name: pc-neutral;
 }
 
@@ -119,6 +120,36 @@ code {
   100% {
     box-shadow: inset 0 0 0 0 rgba(227, 160, 8, 0);
     transform: translateX(0);
+  }
+}
+
+/* ROUT — the attacker died in a failed assault: a sharp red inward strike on the square it fell to. */
+.pc-effect-rout {
+  animation-name: pc-rout;
+}
+
+@keyframes pc-rout {
+  0% {
+    box-shadow: inset 0 0 0 14px rgba(248, 81, 73, 0.9);
+    filter: brightness(0.8);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(248, 81, 73, 0);
+    filter: brightness(1);
+  }
+}
+
+/* REPEL — the attack bounced, nobody fell: a soft orange ripple that settles without drama. */
+.pc-effect-repel {
+  animation-name: pc-repel;
+}
+
+@keyframes pc-repel {
+  0% {
+    box-shadow: inset 0 0 0 8px rgba(240, 136, 62, 0.7);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(240, 136, 62, 0);
   }
 }
 

@@ -21,11 +21,23 @@ export interface BoardPieceProps {
   type: BattleType;
   cls: PieceClass;
   side: Side;
+  /** Current hit points, for the HP bar. Omit to hide the bar (e.g. in a draft preview). */
+  hp?: number;
+  maxHp?: number;
 }
 
-export function BoardPiece({ species, type, cls, side }: BoardPieceProps) {
+/** Green when healthy, amber when bloodied, red when nearly gone — the standard HP-bar reading. */
+function hpColor(fraction: number): string {
+  if (fraction > 0.5) return '#3fb950';
+  if (fraction > 0.2) return '#e3a008';
+  return '#f85149';
+}
+
+export function BoardPiece({ species, type, cls, side, hp, maxHp }: BoardPieceProps) {
   const typeColor = TYPE_COLORS[type];
   const isWhite = side === 'white';
+  const showHp = hp !== undefined && maxHp !== undefined && maxHp > 0;
+  const fraction = showHp ? Math.max(0, Math.min(1, hp / maxHp)) : 1;
 
   return (
     <>
@@ -84,6 +96,34 @@ export function BoardPiece({ species, type, cls, side }: BoardPieceProps) {
       >
         {ROLE_GLYPH[cls]}
       </span>
+
+      {/* HP bar across the top of the square, hidden at full health to keep a fresh board uncluttered. */}
+      {showHp && fraction < 1 && (
+        <span
+          aria-hidden
+          style={{
+            position: 'absolute',
+            top: '4%',
+            left: '12%',
+            right: '12%',
+            height: '7cqmin',
+            borderRadius: '3cqmin',
+            background: 'rgba(0,0,0,0.55)',
+            zIndex: 2,
+            overflow: 'hidden',
+          }}
+        >
+          <span
+            style={{
+              display: 'block',
+              height: '100%',
+              width: `${fraction * 100}%`,
+              background: hpColor(fraction),
+              transition: 'width 220ms ease, background 220ms ease',
+            }}
+          />
+        </span>
+      )}
     </>
   );
 }

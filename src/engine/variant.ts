@@ -1,162 +1,122 @@
 /**
- * The Pokémon Chess rules layer.
+ * The Pokémon Chess rules layer — real HP, the Clash, and king capture.
  *
- * Standard chess decides where a piece may *go*; this module decides what happens when it *arrives*.
- * That is the whole game. Every piece fights as exactly one Pokémon type, and the type matchup splits
- * the single chess notion of "capture" into four outcomes, which reprices every square on the board:
+ * Standard chess (`position.ts`) decides where a piece may go; this decides what happens when it arrives.
+ * Every piece is a level-50 Pokémon with real hit points, and a capture is a **Clash**: a bounded
+ * exchange of blows in Speed order (`clash.ts`), classified into five outcomes that realise the video's
+ * four rules —
  *
- * | Multiplier | Outcome              | Consequence                                          |
- * |------------|----------------------|------------------------------------------------------|
- * | `0`        | no effect            | the capture is **illegal** and is never offered       |
- * | `< 1`      | not very effective   | **both** pieces are destroyed                        |
- * | `1`        | neutral              | an ordinary chess capture                            |
- * | `> 1`      | super effective      | the capture succeeds and the piece **moves again**    |
+ * | Verdict     | Defender | Attacker | Square | Bonus | Video rule |
+ * |-------------|----------|----------|--------|-------|------------|
+ * | `advantage` | removed  | survives | attacker's | **yes** | super-effective → move again |
+ * | `capture`   | removed  | survives, often wounded | attacker's | no | neutral → ordinary capture |
+ * | `mutual`    | removed  | removed  | empty  | no | both pieces removed |
+ * | `rout`      | survives, wounded | removed | defender's | no | a failed assault |
+ * | `repel`     | survives | survives, returns to origin | defender's | no | the miss / bounce |
  *
- * Randomness sits on top, but only where it belongs. **The capture outcome itself is deterministic**: the
- * type chart decides it and the player can see the verdict before committing. What is random is the
- * *bonus* — after a plain capture, four coins are flipped, and four heads is a critical hit that grants
- * the extra move anyway.
+ * plus `blocked`: a 0× matchup that is never offered at all.
  *
- * That split is not a compromise, it is what the measurements demanded. `recon-tcg.md` counted every
- * attack in the current Scarlet & Violet card era: of 4 435 attacks, only **0.8%** let a coin decide
- * whether the attack does anything at all, and 91.7% of all flips gate a *rider* rather than the outcome.
- * Independently, `recon-variants.md` measured the source video's d6 — where a 1 destroys both pieces — at
- * roughly **5.5 pawns of pure noise per game, about 25× the entire first-move advantage in chess**. The
- * conclusion both reached:
+ * The win condition is **king capture** (the Regicide rule), not checkmate. Checkmate is not a well-formed
+ * predicate here — whether a piece "attacks" the king depends on type legality and on randomness not yet
+ * drawn — so you win by actually removing the enemy king in a Clash. See SPEC §4, §5, §12.
  *
- * > Output randomness is fine when the stake is a rider. It is catastrophic when the stake is a piece.
+ * Provisional scope: this resolves the melee Clash (slot 0, the piece's declared type), which is the
+ * video's core and the default line of play. Coverage moves, abilities, items, status, hazards, weather
+ * and evolution await the content compiler; the Clash and damage layers already take the modifier inputs
+ * those will supply, so wiring them is additive.
  *
- * So the die's "1 misses and both die" rule is gone. A coin may hand you extra tempo; it may never take
- * your piece. The probability alphabet is powers of one half, never sixths, because that is the only
- * randomiser the Pokémon board game uses — 1/16 is presented to the player as "four heads", not as 6.25%.
- *
- * ## Status: provisional
- *
- * This implements the four capture outcomes, which are the concept's core and are not expected to change,
- * plus the critical-hit flip. It deliberately does **not** yet implement moves, abilities, items, status,
- * hazards, weather or evolution; those await the full specification being written in `docs/design/`.
- *
- * Purity is preserved: no DOM, no I/O, no ambient randomness. A game is fully determined by its seed
- * plus its action list, which is what makes replays, server-authoritative validation and AI search
- * possible at all.
+ * Purity is preserved: the RNG state is threaded through game state, so a game is fully determined by its
+ * seed and its action list — the property replay, server validation and AI search require.
  */
 
-import type { BattleType } from '../data/schema.ts';
+import type { BattleType, SpeciesEntry } from '../data/schema.ts';
+import type { Dex } from '../data/dex.ts';
 import type { PieceClass, Side, Square } from './board.ts';
 import { Position } from './position.ts';
 import type { Move, Piece } from './position.ts';
 import { Rng } from './rng.ts';
 import type { RngState } from './rng.ts';
-import { captureOutcome, effectiveness } from './typechart.ts';
-import type { CaptureOutcome } from './typechart.ts';
+import { effectiveness } from './typechart.ts';
+import { resolveClash } from '../rules/clash.ts';
+import type { ClashRoll, ClashVerdict, Combatant } from '../rules/clash.ts';
+import type { DamageInput } from '../rules/damage.ts';
+import { computeStats } from '../rules/stats.ts';
+import type { PieceStats } from '../rules/stats.ts';
 
 // ---------------------------------------------------------------------------
-// Loadouts
+// Loadouts and live state
 // ---------------------------------------------------------------------------
 
-/**
- * The Pokémon standing in a chess piece's shoes.
- *
- * `type` is a single type even for a dual-typed species, because that is the draft decision the source
- * video made central: Lapras taken as Water is a different piece from Lapras taken as Ice, and which one
- * you chose determines what it can and cannot capture.
- */
+/** The Pokémon in a chess piece's shoes, and the single type it fights and defends as. */
 export interface PokemonLoadout {
-  /** Species id, as in `species.json`. */
   readonly species: string;
-  /** The single type this piece fights as. */
   readonly type: BattleType;
 }
 
-/**
- * Loadouts keyed by the chess piece's persistent id.
- *
- * Keyed by id rather than by square because ids survive movement and promotion — a promoting pawn keeps
- * its id and changes class, which is exactly the shape evolution needs.
- */
+/** Loadouts keyed by the chess piece's persistent id, which survives movement and promotion. */
 export type Loadout = ReadonlyMap<number, PokemonLoadout>;
 
-// ---------------------------------------------------------------------------
-// Outcomes
-// ---------------------------------------------------------------------------
-
-/** Why a capture resolved the way it did. Kept distinct from the outcome so the UI can explain it. */
-export type ResolutionCause = 'type' | 'critical-hit';
-
-/**
- * A critical-hit flip: a run of coins where every head is needed.
- *
- * Expressed as coins rather than a probability because the player should watch coins land rather than be
- * asked to trust a percentage, and because powers of one half are the only randomiser the Pokémon board
- * game uses.
- */
-export interface CritFlip {
-  /** Each flip in order; `true` is heads. */
-  readonly coins: readonly boolean[];
-  /** True only when every coin came up heads. */
-  readonly isCrit: boolean;
+/** A piece's live hit points, tracked apart from the loadout because it changes as the game runs. */
+export interface LiveState {
+  readonly hp: number;
+  readonly maxHp: number;
+  /** True until the piece has taken any damage — gates survive-once effects. */
+  readonly pristine: boolean;
 }
 
-export type Resolution =
-  /** A move that captured nothing. */
-  | 'quiet'
-  /** The target was removed and the attacker took the square. */
-  | 'capture'
-  /** The target was removed, the attacker took the square, and may move again. */
-  | 'capture-and-continue'
-  /** Both pieces were removed. */
-  | 'mutual-destruction';
+// ---------------------------------------------------------------------------
+// Move previews and results
+// ---------------------------------------------------------------------------
 
-/** A legal action, with everything the UI needs to explain it before it is taken. */
+/** The full verdict vocabulary, including the never-offered case, for the UI and forecasts. */
+export type Verdict = ClashVerdict | 'quiet' | 'blocked';
+
+/**
+ * A legal action, with a forecast of what a capture would do at representative luck.
+ *
+ * The forecast is computed at Momentum 100 with no crit — the plain reading a player should default to.
+ * The true odds across all 16 Momentum values are available on demand for the "your king can be taken"
+ * banner, but the previewed verdict is what colours the board.
+ */
 export interface VariantMove {
   readonly move: Move;
   readonly attacker: PokemonLoadout;
-  /** Null for a move that captures nothing. */
   readonly defender: PokemonLoadout | null;
-  /** Type multiplier against the defender, or null when nothing is being captured. */
-  readonly multiplier: number | null;
-  /** The type-chart verdict, or null when nothing is being captured. */
-  readonly outcome: CaptureOutcome | null;
-  /**
-   * True when this action must be played by the piece that just captured.
-   *
-   * Extra moves belong to a specific piece, not merely to the side, which is what makes a
-   * super-effective capture feel like the piece pressing its advantage.
-   */
+  /** Type multiplier of the attacker's declared type against the defender, or null for a quiet move. */
+  readonly effectiveness: number | null;
+  /** Forecast verdict at representative luck, or `quiet` for a non-capture. */
+  readonly forecast: Verdict;
+  /** True when this action must be played by the piece that just earned a bonus move. */
   readonly isExtraMove: boolean;
 }
 
-/** What actually happened, once the dice were rolled. */
 export interface ResolvedMove {
   readonly move: Move;
   readonly side: Side;
   readonly attacker: PokemonLoadout;
   readonly defender: PokemonLoadout | null;
-  readonly multiplier: number | null;
-  readonly typeOutcome: CaptureOutcome | null;
-  /**
-   * The critical-hit flip, or null when none was made.
-   *
-   * Only a capture that already succeeded on type and did *not* already grant a bonus move flips for a
-   * crit, since a crit has nothing to add to a super-effective capture and nothing to offer a capture that
-   * destroyed the attacker.
-   */
-  readonly crit: CritFlip | null;
-  readonly resolution: Resolution;
-  readonly cause: ResolutionCause | null;
-  /** True when the attacking piece was destroyed along with its target. */
-  readonly attackerDestroyed: boolean;
-  /** True when the same piece may now move again. */
-  readonly grantsExtraMove: boolean;
-  /** Ids removed from the board by this action. */
+  readonly effectiveness: number | null;
+  readonly verdict: Verdict;
+  /** HP left on attacker and defender after the Clash (0 = removed). */
+  readonly attackerHpAfter: number;
+  readonly defenderHpAfter: number;
+  readonly attackerMaxHp: number;
+  readonly defenderMaxHp: number | null;
+  /** The Clash roll that resolved it, for the UI to replay the drama. */
+  readonly crit: boolean;
+  readonly momentum: number;
+  readonly blowCount: number;
+  readonly grantsBonus: boolean;
+  /** Ids removed from the board. */
   readonly removed: readonly number[];
+  /** True when a king was among the removed — the game-ending event. */
+  readonly kingCaptured: boolean;
 }
 
 export type GameResult =
   | { readonly kind: 'playing' }
-  | { readonly kind: 'checkmate'; readonly winner: Side }
-  | { readonly kind: 'stalemate' }
-  | { readonly kind: 'draw'; readonly reason: 'fifty-move' | 'repetition' | 'insufficient-material' };
+  | { readonly kind: 'win'; readonly winner: Side; readonly by: 'king-capture' }
+  | { readonly kind: 'draw'; readonly reason: 'fifty-move' | 'repetition' | 'no-legal-move' };
 
 // ---------------------------------------------------------------------------
 // Rules configuration
@@ -164,28 +124,35 @@ export type GameResult =
 
 export interface VariantRules {
   /**
-   * How many extra moves one turn may chain.
+   * Extra moves one turn may chain, bounding termination.
    *
-   * `DIRECTION.md` requires a proven termination bound, and this is it. Without a cap, a side holding a
-   * type advantage could chain super-effective captures for as long as targets remain, and with the die
-   * able to grant an extra move on any capture the chain has no natural end. Two extra moves means a
-   * turn is at most three actions, and since every action in a chain must be a capture and each capture
-   * removes at least one piece, a chain is bounded by the enemy piece count regardless.
+   * Independently bounded anyway: every action in a chain must be a capture and every capture removes a
+   * piece, so a chain cannot outlive the enemy army. The cap is for feel, not for termination.
    */
   readonly maxExtraMovesPerTurn: number;
   /**
-   * Coins flipped after a plain capture; all heads grants a bonus move. Zero disables critical hits.
+   * Coins flipped for a critical hit; all heads is a ×1.5-damage crit on the attacker's first swing.
    *
-   * Four coins is 1/16. That figure is not arbitrary: `recon-variants.md` derived a target critical rate
-   * band of [1/18, 1/12] from a variance budget, and `recon-tcg.md` found four-coin effects printed on real
-   * cards, so 1/16 is the only power of one half inside the band.
+   * Four coins is 1/16, the rate the variance budget asked for and a real TCG four-coin effect. A crit
+   * is a damage bonus, not an automatic bonus move — the bonus move comes only from a super-effective
+   * knockout (ADVANTAGE), which is the video's actual rule.
    */
   readonly critCoins: number;
+  /**
+   * Guarded mode: hide actions that leave your own king capturable at representative luck.
+   *
+   * The casual and tutorial default. It is a filter over the legal actions, never a second generator, so
+   * the same predicate serves the AI; and it never empties the list — if every action is risky it shows
+   * them all with the warning standing, because a UI that offers nothing reads as a crash. Off in rated
+   * play, where check is advice (R8) and the banner does the warning instead.
+   */
+  readonly guarded: boolean;
 }
 
 export const DEFAULT_RULES: VariantRules = {
   maxExtraMovesPerTurn: 2,
   critCoins: 4,
+  guarded: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -198,35 +165,44 @@ interface PendingExtraMove {
   readonly used: number;
 }
 
-/**
- * A game of Pokémon Chess.
- *
- * Immutable-by-convention: {@link PokemonChess.play} returns a new game rather than mutating, so the
- * whole history is retained for replay, undo and network transmission. Positions are cloned per action,
- * which is cheap at the scale of a played game; AI search will use the mutable
- * `makeMove`/`unmakeMove` path on `Position` directly instead.
- */
+const MELEE_BASE_POWER = 80;
+
 export class PokemonChess {
   private constructor(
     readonly position: Position,
     readonly loadout: Loadout,
     readonly rules: VariantRules,
+    /** Battle stats per piece id, computed once — pieces do not change species mid-game (yet). */
+    private readonly stats: ReadonlyMap<number, PieceStats>,
+    /** Live HP per piece id. Absent means full HP (never damaged), so a fresh game stores nothing. */
+    private readonly live: ReadonlyMap<number, LiveState>,
     private readonly rngState: RngState,
     private readonly pending: PendingExtraMove | null,
     readonly history: readonly ResolvedMove[],
   ) {}
 
   static create(options: {
+    dex: Dex;
     position?: Position;
     loadout: Loadout;
     seed: string | number;
     rules?: VariantRules;
   }): PokemonChess {
     const position = options.position ?? Position.fromStartingPosition();
+    const stats = new Map<number, PieceStats>();
+    for (const { piece } of position.allPieces()) {
+      const entry = options.loadout.get(piece.id);
+      if (!entry) throw new Error(`no Pokémon assigned to piece ${piece.id}`);
+      const species = options.dex.getSpecies(entry.species);
+      if (!species) throw new Error(`unknown species ${entry.species}`);
+      stats.set(piece.id, computeStats(species));
+    }
     return new PokemonChess(
       position,
       options.loadout,
       options.rules ?? DEFAULT_RULES,
+      stats,
+      new Map(),
       new Rng(options.seed).state,
       null,
       [],
@@ -237,12 +213,10 @@ export class PokemonChess {
     return this.position.turn;
   }
 
-  /** The piece obliged to move again, if a capture just granted an extra move. */
   get extraMovePieceId(): number | null {
     return this.pending?.pieceId ?? null;
   }
 
-  /** How many extra moves the current turn has already consumed. */
   get extraMovesUsed(): number {
     return this.pending?.used ?? 0;
   }
@@ -253,75 +227,105 @@ export class PokemonChess {
     return entry;
   }
 
+  statsOf(pieceId: number): PieceStats {
+    const s = this.stats.get(pieceId);
+    if (!s) throw new Error(`no stats for piece ${pieceId}`);
+    return s;
+  }
+
+  /** Live HP state for a piece, defaulting to full HP for one never yet damaged. */
+  liveOf(pieceId: number): LiveState {
+    const existing = this.live.get(pieceId);
+    if (existing) return existing;
+    const stats = this.statsOf(pieceId);
+    return { hp: stats.maxHp, maxHp: stats.maxHp, pristine: true };
+  }
+
+  // -------------------------------------------------------------------------
+  // Effectiveness, with the king rule
+  // -------------------------------------------------------------------------
+
+  /**
+   * The attacker's type multiplier against a defender, with R6 applied.
+   *
+   * A king is never immune as a defender: a 0× reads as exactly 1×, so a king can always be attacked.
+   * That closes the untouchable-king exploit (a Ghost king a Normal army could never threaten).
+   */
+  private multiplierAgainst(attackerType: BattleType, defenderId: number): number {
+    const defender = this.loadoutOf(defenderId);
+    const raw = effectiveness(attackerType, defender.type);
+    const piece = this.pieceById(defenderId);
+    if (piece?.cls === 'king' && raw === 0) return 1;
+    return raw;
+  }
+
+  private pieceById(id: number): Piece | null {
+    for (const { piece } of this.position.allPieces()) {
+      if (piece.id === id) return piece;
+    }
+    return null;
+  }
+
   // -------------------------------------------------------------------------
   // Legality
   // -------------------------------------------------------------------------
 
   /**
-   * Every action the side to move may take.
+   * Every action the side to move may take, each with a capture forecast.
    *
-   * Starts from chess legality and then removes what the type chart forbids. Two filters matter:
-   *
-   * 1. **A 0× capture is not offered at all.** Ground genuinely cannot take Flying, so the target is
-   *    untouchable by that piece — this is the rule that makes type knowledge positional rather than
-   *    merely tactical.
-   * 2. **A resisted capture that would expose your own king is not offered.** A not-very-effective capture
-   *    destroys the attacker as well, so trading away one of your own defenders can leave your king in
-   *    check — see {@link captureIsSafe}.
+   * Chess legality first, then two filters. A 0× capture is `blocked` and never offered (except against a
+   * king, per R6). In guarded mode, an action that leaves your own king capturable at representative luck
+   * is hidden — unless hiding it would empty the list, in which case everything is shown and the banner
+   * warns instead.
    */
   legalMoves(): VariantMove[] {
+    const all = this.rawMoves();
+    if (!this.rules.guarded) return all;
+
+    const safe = all.filter((m) => !this.leavesOwnKingCapturable(m.move));
+    // Never offer nothing: a filtered-empty list degrades to the full list with the banner standing.
+    return safe.length > 0 ? safe : all;
+  }
+
+  /** Legal actions before the guarded-mode filter. The AI and the banner share this. */
+  rawMoves(): VariantMove[] {
+    // A captured king ends the game, so a kingless board offers nothing.
+    if (this.kingRemoved('white') || this.kingRemoved('black')) return [];
     const pending = this.pending;
     const out: VariantMove[] = [];
 
     for (const move of this.position.generateMoves()) {
-      // An extra move belongs to the piece that earned it, so no other piece may act.
+      // An extra move belongs to the piece that earned it.
       if (pending) {
         const mover = this.position.pieceAt(move.from);
         if (!mover || mover.id !== pending.pieceId) continue;
       }
 
-      // A king may never be captured.
-      //
-      // Ordinary chess never has to say this: you cannot be on move while the enemy king stands
-      // attacked, because that position is unreachable. The extra move breaks that guarantee — the
-      // capturing side moves twice, so after the first move the opponent's king may be in check with no
-      // chance to answer, and the second move could simply take it. That is precisely the incoherence the
-      // source video fell into when a player took a king outright on a critical hit.
-      //
-      // Forbidding the capture keeps checkmate as the single win condition: a check delivered mid-chain
-      // is a check the opponent must still answer, merely one that arrived with extra tempo behind it.
-      if (move.captured?.cls === 'king') continue;
-
-      const attacker = this.loadoutOf(this.pieceIdAt(move.from));
+      const moverPiece = this.position.pieceAt(move.from)!;
+      const attacker = this.loadoutOf(moverPiece.id);
 
       if (!move.captured) {
         out.push({
           move,
           attacker,
           defender: null,
-          multiplier: null,
-          outcome: null,
+          effectiveness: null,
+          forecast: 'quiet',
           isExtraMove: pending !== null,
         });
         continue;
       }
 
-      const defender = this.loadoutOf(move.captured.id);
-      const multiplier = effectiveness(attacker.type, defender.type);
-      const outcome = captureOutcome(attacker.type, defender.type);
-
-      // Rule 1: the type chart forbids this capture outright.
-      if (outcome === 'immune') continue;
-
-      // Rule 2: never offer a capture that a bad resolution could turn into losing your own king.
-      if (!this.captureIsSafe(move, outcome)) continue;
+      const defenderId = move.captured.id;
+      const mult = this.multiplierAgainst(attacker.type, defenderId);
+      if (mult === 0) continue; // BLOCKED — never offered (never reached for a king, per R6).
 
       out.push({
         move,
         attacker,
-        defender,
-        multiplier,
-        outcome,
+        defender: this.loadoutOf(defenderId),
+        effectiveness: mult,
+        forecast: this.forecastVerdict(move),
         isExtraMove: pending !== null,
       });
     }
@@ -329,185 +333,273 @@ export class PokemonChess {
     return out;
   }
 
-  /**
-   * Whether a capture is safe under every resolution it could have.
-   *
-   * The source video hit this bug on camera: a player's piece died capturing while their own king was in
-   * check, and the turn ended with the king still in check. Mutual destruction can remove one of your own
-   * defenders, so a capture can expose your king even where chess calls the move legal.
-   *
-   * Making the capture outcome deterministic is what lets this be answered cleanly. Mutual destruction now
-   * happens exactly when the matchup is resisted, and the player can see that before committing, so
-   * legality is a fact about the position rather than a bet on a roll that has not happened. A resisted
-   * capture is legal only if the mover's king is safe once the attacker is gone; every other capture is
-   * already settled by chess legality.
-   *
-   * Under the video's die, where any capture could kill the attacker, this filter had to apply to *every*
-   * capture — which also meant a king could never capture anything at all. That ugly consequence
-   * disappears along with the die.
-   */
-  private captureIsSafe(move: Move, outcome: CaptureOutcome): boolean {
+  /** Whether making this move leaves the mover's king capturable by the opponent at representative luck. */
+  private leavesOwnKingCapturable(move: Move): boolean {
     const mover = this.position.pieceAt(move.from);
     if (!mover) return false;
+    const side = mover.side;
 
-    // Only a resisted matchup destroys the attacker, so nothing else can expose the king.
-    if (outcome !== 'resisted') return true;
+    // Resolve the move on a scratch game at representative luck, then ask whether the opponent has a
+    // capture of our king that would succeed.
+    const after = this.applyResolved(move, { hits: true, crit: false, momentum: 100 }).game;
+    if (after.kingRemoved(side)) return true; // our own move removed our king → certainly bad
 
-    // A king that trades itself away has simply lost, so it may never enter a trade it loses.
-    if (mover.cls === 'king') return false;
-
-    // The capture-succeeds branch is guaranteed safe already: chess legality established it. The
-    // mutual-destruction branch is the same position with the attacker gone from the square it just
-    // moved to, which is exactly what `isAttackedIgnoring` describes.
-    const after = this.position.withMove(move);
-    const king = after.kingSquare(mover.side);
-    const enemy: Side = mover.side === 'white' ? 'black' : 'white';
-    return !after.isAttackedIgnoring(king, enemy, move.to);
+    const enemy: Side = side === 'white' ? 'black' : 'white';
+    if (after.turn !== enemy) {
+      // We still have the move (a bonus). A king exposed to ourselves is not the enemy's to take.
+      return false;
+    }
+    return after.rawMoves().some((m) => {
+      if (!m.move.captured) return false;
+      const target = m.move.captured;
+      if (target.cls !== 'king' || target.side !== side) return false;
+      const v = after.forecastVerdict(m.move);
+      return v === 'advantage' || v === 'capture' || v === 'mutual';
+    });
   }
 
-  private pieceIdAt(square: Square): number {
-    const piece = this.position.pieceAt(square);
-    if (!piece) throw new Error(`no piece on ${square}`);
-    return piece.id;
+  private kingRemoved(side: Side): boolean {
+    return this.position.allPieces().every(({ piece }) => !(piece.side === side && piece.cls === 'king'));
   }
 
   // -------------------------------------------------------------------------
-  // Resolution
+  // Clash setup and resolution
   // -------------------------------------------------------------------------
 
   /**
-   * Plays an action, rolling the die if it is a capture, and returns the resulting game.
+   * Builds the two damage inputs for a Clash.
    *
-   * The die is rolled from the game's own serialised RNG state, so the same seed and action list always
-   * produce the same game — the property the server needs to validate a client's claims and the AI
-   * needs to search reproducibly.
+   * The attacker strikes with its declared type (slot 0, the melee slot); the defender counters with its
+   * own declared type. STAB always applies on slot 0, because attacking with your own type is the melee.
    */
-  play(move: Move): { game: PokemonChess; resolved: ResolvedMove } {
-    const mover = this.position.pieceAt(move.from);
-    if (!mover) throw new Error(`no piece on ${move.from}`);
+  private clashInputs(attackerId: number, defenderId: number): { atk: DamageInput; def: DamageInput } {
+    const a = this.loadoutOf(attackerId);
+    const d = this.loadoutOf(defenderId);
+    const aStats = this.statsOf(attackerId);
+    const dStats = this.statsOf(defenderId);
 
-    const side = mover.side;
-    const attacker = this.loadoutOf(mover.id);
+    // Slot 0 is a physical/special melee of the piece's declared type; use whichever offensive stat is
+    // higher, matching the Assault spread's investment.
+    const aPhysical = aStats.atk >= aStats.spa;
+    const dPhysical = dStats.atk >= dStats.spa;
+
+    const atk: DamageInput = {
+      attackerType: a.type,
+      moveType: a.type,
+      defenderType: d.type,
+      category: aPhysical ? 'Physical' : 'Special',
+      basePower: MELEE_BASE_POWER,
+      offensiveStat: aPhysical ? aStats.atk : aStats.spa,
+      defensiveStat: aPhysical ? dStats.def : dStats.spd,
+      stab: true,
+    };
+    const def: DamageInput = {
+      attackerType: d.type,
+      moveType: d.type,
+      defenderType: a.type,
+      category: dPhysical ? 'Physical' : 'Special',
+      basePower: MELEE_BASE_POWER,
+      offensiveStat: dPhysical ? dStats.atk : dStats.spa,
+      defensiveStat: dPhysical ? aStats.def : aStats.spd,
+      stab: true,
+    };
+    return { atk, def };
+  }
+
+  /**
+   * The forecast verdict of a capture at the given luck (default representative).
+   *
+   * Runs the real Clash on scratch combatants, so the preview cannot disagree with the outcome under the
+   * same luck — the promise the deterministic model makes to the player.
+   */
+  forecastVerdict(move: Move, roll: ClashRoll = { hits: true, crit: false, momentum: 100 }): Verdict {
+    if (!move.captured) return 'quiet';
+    const moverPiece = this.position.pieceAt(move.from)!;
+    const attackerId = moverPiece.id;
+    const defenderId = move.captured.id;
+
+    const attacker = this.loadoutOf(attackerId);
+    const mult = this.multiplierAgainst(attacker.type, defenderId);
+    if (mult === 0) return 'blocked';
+
+    const { atk, def } = this.clashInputs(attackerId, defenderId);
+    const aLive = this.liveOf(attackerId);
+    const dLive = this.liveOf(defenderId);
+    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.statsOf(attackerId).spe, pristine: aLive.pristine };
+    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: this.statsOf(defenderId).spe, pristine: dLive.pristine };
+    const result = resolveClash(
+      {
+        attacker: aC,
+        defender: dC,
+        // A king defender reads 0× as 1×, so patch the counter's effectiveness by using the king's real
+        // type but never letting the attacker be immune — handled by multiplierAgainst on offer, and the
+        // damage floor of 1 here.
+        attackerBlow: atk,
+        defenderBlow: def,
+        attackerSuperEffective: mult > 1,
+      },
+      roll,
+    );
+    return result.verdict;
+  }
+
+  // -------------------------------------------------------------------------
+  // Playing a move
+  // -------------------------------------------------------------------------
+
+  /** Plays an action, drawing the Clash luck from the game's own RNG, and returns the resulting game. */
+  play(move: Move): { game: PokemonChess; resolved: ResolvedMove } {
     const rng = new Rng(this.rngState);
+    let roll: ClashRoll = { hits: true, crit: false, momentum: 100 };
+    if (move.captured) {
+      const momentum = 85 + rng.below(16); // uniform 85..100
+      let crit = this.rules.critCoins > 0;
+      for (let i = 0; i < this.rules.critCoins; i++) crit = crit && rng.chance(50);
+      roll = { hits: true, crit, momentum };
+    }
+    const { game, resolved } = this.applyResolved(move, roll, rng.state);
+    return { game, resolved };
+  }
+
+  /**
+   * The pure core of {@link play}: applies a move with an already-drawn roll.
+   *
+   * Also used by the guarded-mode filter to look one move ahead, which is why the roll is a parameter and
+   * the RNG state is optional — a forecast does not advance the real stream.
+   */
+  private applyResolved(
+    move: Move,
+    roll: ClashRoll,
+    nextRngState: RngState = this.rngState,
+  ): { game: PokemonChess; resolved: ResolvedMove } {
+    const moverPiece = this.position.pieceAt(move.from)!;
+    const side = moverPiece.side;
+    const attackerId = moverPiece.id;
+    const attacker = this.loadoutOf(attackerId);
 
     if (!move.captured) {
+      const nextPos = this.position.withMove(move);
       const resolved: ResolvedMove = {
-        move,
-        side,
-        attacker,
-        defender: null,
-        multiplier: null,
-        typeOutcome: null,
-        crit: null,
-        resolution: 'quiet',
-        cause: null,
-        attackerDestroyed: false,
-        grantsExtraMove: false,
-        removed: [],
+        move, side, attacker, defender: null, effectiveness: null,
+        verdict: 'quiet',
+        attackerHpAfter: this.liveOf(attackerId).hp,
+        defenderHpAfter: 0,
+        attackerMaxHp: this.liveOf(attackerId).maxHp,
+        defenderMaxHp: null,
+        crit: false, momentum: roll.momentum, blowCount: 0,
+        grantsBonus: false, removed: [], kingCaptured: false,
       };
       return {
-        game: new PokemonChess(
-          this.position.withMove(move),
-          this.loadout,
-          this.rules,
-          rng.state,
-          null,
-          [...this.history, resolved],
-        ),
+        game: this.next(nextPos, this.live, nextRngState, null, resolved),
         resolved,
       };
     }
 
-    const defenderPiece: Piece = move.captured;
-    const defender = this.loadoutOf(defenderPiece.id);
-    const multiplier = effectiveness(attacker.type, defender.type);
-    const typeOutcome = captureOutcome(attacker.type, defender.type);
+    const defenderPiece = move.captured;
+    const defenderId = defenderPiece.id;
+    const defender = this.loadoutOf(defenderId);
+    const mult = this.multiplierAgainst(attacker.type, defenderId);
 
-    if (typeOutcome === 'immune') {
-      throw new Error(
-        `${attacker.type} cannot capture ${defender.type}: the type chart forbids it outright`,
-      );
+    const aLive = this.liveOf(attackerId);
+    const dLive = this.liveOf(defenderId);
+    const aStats = this.statsOf(attackerId);
+    const dStats = this.statsOf(defenderId);
+    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: aStats.spe, pristine: aLive.pristine };
+    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: dStats.spe, pristine: dLive.pristine };
+    const { atk, def } = this.clashInputs(attackerId, defenderId);
+
+    const result = resolveClash(
+      { attacker: aC, defender: dC, attackerBlow: atk, defenderBlow: def, attackerSuperEffective: mult > 1 },
+      roll,
+    );
+
+    // Apply the verdict to the board and to live HP.
+    const nextLive = new Map(this.live);
+    const removed: number[] = [];
+    let nextPos = this.position;
+
+    const setLive = (id: number, c: Combatant) =>
+      nextLive.set(id, { hp: c.hp, maxHp: c.maxHp, pristine: c.pristine });
+
+    switch (result.verdict) {
+      case 'advantage':
+      case 'capture':
+        // Defender removed; attacker takes the square, carrying its (possibly reduced) HP.
+        nextPos = this.position.withMove(move);
+        nextLive.delete(defenderId);
+        removed.push(defenderId);
+        setLive(attackerId, aC);
+        break;
+      case 'mutual':
+        // Defender removed then attacker removed; the square is left empty. Either may be a king — a
+        // king capture is the win — so removal is king-permitting.
+        nextPos = this.position.withMove(move).withPieceRemoved(move.to, true);
+        nextLive.delete(defenderId);
+        nextLive.delete(attackerId);
+        removed.push(defenderId, attackerId);
+        break;
+      case 'rout':
+        // Attacker removed; defender holds its square, wounded. A king that attacks and dies has lost.
+        nextPos = this.position.withPieceRemoved(move.from, true);
+        nextLive.delete(attackerId);
+        removed.push(attackerId);
+        setLive(defenderId, dC);
+        break;
+      case 'repel':
+        // No one moves; both keep their damage.
+        setLive(attackerId, aC);
+        setLive(defenderId, dC);
+        break;
     }
 
-    // The die is rolled before the type chart is consulted, because a 1 or a 6 overrides it.
-    // The type chart alone decides the outcome, so the player already knew this before committing.
-    let resolution: Resolution =
-      typeOutcome === 'resisted'
-        ? 'mutual-destruction'
-        : typeOutcome === 'super'
-          ? 'capture-and-continue'
-          : 'capture';
-    let cause: ResolutionCause = 'type';
+    const kingCaptured = removed.some((id) => this.pieceById(id)?.cls === 'king');
 
-    // Only a plain capture flips for a critical hit: a super-effective capture is already continuing, and
-    // a crit has nothing to offer a capture that destroyed the attacker. The stake is tempo, never a
-    // piece, which is the whole reason this flip is allowed to happen after the player has committed.
-    let crit: CritFlip | null = null;
-    if (resolution === 'capture' && this.rules.critCoins > 0) {
-      const coins: boolean[] = [];
-      for (let i = 0; i < this.rules.critCoins; i++) coins.push(rng.chance(50));
-      const isCrit = coins.every((head) => head);
-      crit = { coins, isCrit };
-      if (isCrit) {
-        resolution = 'capture-and-continue';
-        cause = 'critical-hit';
-      }
-    }
-
+    // A bonus move is granted only by ADVANTAGE, only while the cap is unspent, and only if the piece can
+    // actually continue — otherwise the turn passes.
     const used = this.pending?.used ?? 0;
-    // A chain that has run out of allowance still captures; it simply stops there.
-    if (resolution === 'capture-and-continue' && used >= this.rules.maxExtraMovesPerTurn) {
-      resolution = 'capture';
-    }
-
-    const attackerDestroyed = resolution === 'mutual-destruction';
-    const removed = attackerDestroyed
-      ? [defenderPiece.id, mover.id]
-      : [defenderPiece.id];
-
-    let next = this.position.withMove(move);
-    if (attackerDestroyed) {
-      next = next.withPieceRemoved(move.to);
-    }
-
     let pending: PendingExtraMove | null = null;
-    if (resolution === 'capture-and-continue') {
-      const continued = next.withTurnReturned();
-      // Grant the extra move only if the piece can actually use it, so a turn never stalls waiting for
-      // a move that does not exist.
-      const canContinue = continued
-        .generateMoves()
-        .some((m) => continued.pieceAt(m.from)?.id === mover.id);
+    let posForNext = nextPos;
+    if (result.verdict === 'advantage' && used < this.rules.maxExtraMovesPerTurn && !kingCaptured) {
+      const continued = nextPos.withTurnReturned();
+      const canContinue = continued.generateMoves().some((m) => continued.pieceAt(m.from)?.id === attackerId);
       if (canContinue) {
-        next = continued;
-        pending = { side, pieceId: mover.id, used: used + 1 };
-      } else {
-        resolution = 'capture';
+        posForNext = continued;
+        pending = { side, pieceId: attackerId, used: used + 1 };
       }
     }
 
     const resolved: ResolvedMove = {
-      move,
-      side,
-      attacker,
-      defender,
-      multiplier,
-      typeOutcome,
-      crit,
-      resolution,
-      cause,
-      attackerDestroyed,
-      grantsExtraMove: pending !== null,
+      move, side, attacker, defender, effectiveness: mult,
+      verdict: result.verdict,
+      attackerHpAfter: result.attackerHpAfter,
+      defenderHpAfter: result.defenderHpAfter,
+      attackerMaxHp: aC.maxHp,
+      defenderMaxHp: dC.maxHp,
+      crit: roll.crit,
+      momentum: roll.momentum,
+      blowCount: result.blows.length,
+      grantsBonus: pending !== null,
       removed,
+      kingCaptured,
     };
 
     return {
-      game: new PokemonChess(next, this.loadout, this.rules, rng.state, pending, [
-        ...this.history,
-        resolved,
-      ]),
+      game: this.next(posForNext, nextLive, nextRngState, pending, resolved),
       resolved,
     };
+  }
+
+  private next(
+    position: Position,
+    live: ReadonlyMap<number, LiveState>,
+    rngState: RngState,
+    pending: PendingExtraMove | null,
+    resolved: ResolvedMove,
+  ): PokemonChess {
+    return new PokemonChess(
+      position, this.loadout, this.rules, this.stats, live, rngState, pending,
+      [...this.history, resolved],
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -515,44 +607,60 @@ export class PokemonChess {
   // -------------------------------------------------------------------------
 
   /**
-   * The game's status.
+   * The game's status, under the Regicide rule.
    *
-   * PROVISIONAL on one point. The video ended a game by taking a king outright on a critical hit, which
-   * contradicts checkmate. Here checkmate stands, and king capture is unreachable by construction:
-   * chess legality already forbids moving into check, and {@link captureIsSafe} forbids a king from
-   * trading itself away. So the winner is decided the way chess decides it.
+   * A missing king ends the game: the side whose king remains wins. There is no checkmate — a mate-like
+   * position where the king cannot escape is still `playing` and is only labelled by the UI. Draws are the
+   * chess draws that survive: fifty-move, repetition, and a side with no legal action.
    */
   result(): GameResult {
-    if (this.legalMoves().length > 0) {
-      if (this.position.isFiftyMoveDraw()) return { kind: 'draw', reason: 'fifty-move' };
-      if (this.position.isThreefoldRepetition()) return { kind: 'draw', reason: 'repetition' };
-      if (this.position.isInsufficientMaterial()) {
-        return { kind: 'draw', reason: 'insufficient-material' };
-      }
-      return { kind: 'playing' };
-    }
+    const whiteKing = !this.kingRemoved('white');
+    const blackKing = !this.kingRemoved('black');
+    if (whiteKing && !blackKing) return { kind: 'win', winner: 'white', by: 'king-capture' };
+    if (blackKing && !whiteKing) return { kind: 'win', winner: 'black', by: 'king-capture' };
 
-    // No legal action. In standard chess that is mate or stalemate by whether the king is attacked;
-    // here it can additionally arise because every capture available was type-forbidden, which is a
-    // genuine positional bind rather than a bug.
-    if (this.position.isInCheck()) {
-      return { kind: 'checkmate', winner: this.turn === 'white' ? 'black' : 'white' };
-    }
-    return { kind: 'stalemate' };
+    if (this.rawMoves().length === 0) return { kind: 'draw', reason: 'no-legal-move' };
+    if (this.position.isFiftyMoveDraw()) return { kind: 'draw', reason: 'fifty-move' };
+    if (this.position.isThreefoldRepetition()) return { kind: 'draw', reason: 'repetition' };
+    return { kind: 'playing' };
   }
 
-  /** True when no further action is possible. */
   isOver(): boolean {
     return this.result().kind !== 'playing';
   }
 
-  /** Piece classes with their Pokémon, for rendering. */
-  pieces(): { square: Square; piece: Piece; pokemon: PokemonLoadout; cls: PieceClass }[] {
+  /**
+   * Whether `side`'s king is capturable by the opponent's current actions at representative luck — R8's
+   * advice, which the UI shows as the "your king can be taken" banner. Only meaningful when it is the
+   * opponent's turn to move.
+   */
+  kingInDanger(side: Side): boolean {
+    const enemy: Side = side === 'white' ? 'black' : 'white';
+    if (this.turn !== enemy) return false;
+    return this.rawMoves().some((m) => {
+      const t = m.move.captured;
+      if (!t || t.cls !== 'king' || t.side !== side) return false;
+      return m.forecast === 'advantage' || m.forecast === 'capture' || m.forecast === 'mutual';
+    });
+  }
+
+  /** Every piece with its Pokémon, stats and live HP, for rendering. */
+  pieces(): {
+    square: Square;
+    piece: Piece;
+    cls: PieceClass;
+    pokemon: PokemonLoadout;
+    live: LiveState;
+  }[] {
     return this.position.allPieces().map(({ square, piece }) => ({
       square,
       piece,
       cls: piece.cls,
       pokemon: this.loadoutOf(piece.id),
+      live: this.liveOf(piece.id),
     }));
   }
 }
+
+// Re-exported so the UI keeps importing species-typed helpers from one place.
+export type { SpeciesEntry };

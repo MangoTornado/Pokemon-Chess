@@ -1,17 +1,18 @@
 /**
  * The playable board.
  *
- * Three things here are load-bearing rather than decorative:
+ * Four things here are load-bearing rather than decorative:
  *
- * 1. **Outcomes are previewed, not discovered.** Selecting a piece colours every capture it could make by
- *    what that capture would do. The premise of the game is that type knowledge is your edge, and an edge
- *    you cannot see before committing is not an edge.
- * 2. **Refusals are explained in place.** An enemy piece this attacker cannot touch is marked as such
- *    while it is selected. "Why can't I take that?" is the question that makes people quit, and the game
- *    always knows the precise answer.
- * 3. **Every resolution animates distinctly.** The four outcomes must be separable without reading, and
- *    the free extra move — the most consequential thing that happens in this game — must be impossible to
- *    miss.
+ * 1. **Outcomes are previewed, not discovered.** Selecting a piece forecasts every capture it could make
+ *    — the verdict it would reach at representative luck — and colours the board by it. Type knowledge is
+ *    the player's edge, and an edge you cannot see before committing is not an edge.
+ * 2. **Refusals are explained in place.** An enemy piece the selected attacker cannot touch is marked and
+ *    captioned. "Why can't I take that?" is the question that makes people quit, and the game always knows
+ *    the answer.
+ * 3. **HP is visible.** Every piece carries a hit-point bar, because a capture is now an exchange of blows
+ *    a piece can survive, and a wounded piece is a real state the player must read.
+ * 4. **Each verdict animates distinctly**, by motion and not by hue alone, and the bonus move a
+ *    super-effective knockout grants — the most consequential event in the game — is impossible to miss.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -21,57 +22,64 @@ import { ALL_SQUARES, rankOf, squareColor, squareName } from '../engine/board.ts
 import type { Square } from '../engine/board.ts';
 import { effectiveness } from '../engine/typechart.ts';
 import { PokemonChess } from '../engine/variant.ts';
-import type { ResolvedMove, VariantMove } from '../engine/variant.ts';
+import type { ResolvedMove, Verdict, VariantMove } from '../engine/variant.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
 import { BoardPiece } from './BoardPiece.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
-import { OUTCOME_PRESENTATION, RESOLUTION_PRESENTATION, causeLabel, coinString } from './outcomes.ts';
+import { TIER_PRESENTATION, VERDICT_PRESENTATION, tierOf, verdictCause } from './outcomes.ts';
 import { ROLE_GLYPH, ROLE_LABEL } from './pieceRoles.ts';
 import { TYPE_COLORS, textColorOn } from './typeColors.ts';
 
 /** How long a resolution animation holds the board before it settles. */
-const EFFECT_MS = 720;
+const EFFECT_MS = 760;
 
-type EffectKind = 'super' | 'neutral' | 'mutual' | 'denied';
+type EffectKind = 'advantage' | 'capture' | 'mutual' | 'rout' | 'repel' | 'denied';
 
 interface SquareEffect {
   readonly square: Square;
   readonly kind: EffectKind;
-  /** Distinguishes consecutive effects on the same square so React restarts the animation. */
   readonly nonce: number;
+}
+
+/** The board-effect class for a resolved verdict; the CSS animations are keyed on it. */
+function effectOf(verdict: Verdict): EffectKind {
+  switch (verdict) {
+    case 'advantage':
+      return 'advantage';
+    case 'mutual':
+      return 'mutual';
+    case 'rout':
+      return 'rout';
+    case 'repel':
+      return 'repel';
+    default:
+      return 'capture';
+  }
 }
 
 export interface GameBoardProps {
   dex: Dex;
   seed: string;
-  /**
-   * The starting position and Pokémon loadout for the match.
-   *
-   * Passed in rather than drafted here, so the same board serves the sandbox (armies auto-drafted from
-   * the full dex), the draft screen (armies chosen by the player), and later the ranked and tutorial
-   * flows. The board itself has no opinion on how the pieces got there.
-   */
   setup: { position: Position; loadout: Loadout };
   onLeave: () => void;
 }
 
 export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
   const [game, setGame] = useState(() =>
-    PokemonChess.create({ position: setup.position, loadout: setup.loadout, seed }),
+    PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }),
   );
   const [selected, setSelected] = useState<Square | null>(null);
   const [effects, setEffects] = useState<readonly SquareEffect[]>([]);
   const [last, setLast] = useState<ResolvedMove | null>(null);
   const nonce = useRef(0);
 
-  // A new seed means a new game, not a new board on an old game.
   useEffect(() => {
-    setGame(PokemonChess.create({ position: setup.position, loadout: setup.loadout, seed }));
+    setGame(PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }));
     setSelected(null);
     setEffects([]);
     setLast(null);
-  }, [setup, seed]);
+  }, [dex, setup, seed]);
 
   useEffect(() => {
     if (effects.length === 0) return;
@@ -83,7 +91,6 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
   const result = useMemo(() => game.result(), [game]);
   const over = result.kind !== 'playing';
 
-  /** Legal actions for the currently selected piece, keyed by destination. */
   const options = useMemo(() => {
     const map = new Map<Square, VariantMove>();
     if (selected === null) return map;
@@ -93,7 +100,6 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
     return map;
   }, [legal, selected]);
 
-  /** Squares whose occupant the selected piece is forbidden to capture, and why. */
   const denied = useMemo(() => {
     const out = new Map<Square, string>();
     if (selected === null) return out;
@@ -103,6 +109,8 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
 
     for (const { square, piece } of game.position.allPieces()) {
       if (piece.side === attackerPiece.side) continue;
+      // A king is never immune (R6), so it is never marked as untouchable even on a 0× matchup.
+      if (piece.cls === 'king') continue;
       const defender = game.loadoutOf(piece.id);
       if (effectiveness(attacker.type, defender.type) === 0) {
         out.set(square, `${attacker.type} cannot touch ${defender.type}`);
@@ -118,25 +126,19 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
       const { game: next, resolved } = game.play(option.move);
       nonce.current += 1;
 
-      const kind: EffectKind =
-        resolved.resolution === 'mutual-destruction'
-          ? 'mutual'
-          : resolved.resolution === 'capture-and-continue'
-            ? 'super'
-            : 'neutral';
-
-      const marks: SquareEffect[] = [
-        { square: resolved.move.to, kind, nonce: nonce.current },
-      ];
-      if (resolved.attackerDestroyed) {
-        marks.push({ square: resolved.move.from, kind: 'mutual', nonce: nonce.current });
+      const marks: SquareEffect[] = [];
+      if (resolved.defender) {
+        marks.push({ square: resolved.move.to, kind: effectOf(resolved.verdict), nonce: nonce.current });
+        // Mutual and rout also destroy the attacker's origin/target square; mark the vacated square.
+        if (resolved.verdict === 'mutual') {
+          marks.push({ square: resolved.move.from, kind: 'mutual', nonce: nonce.current });
+        }
       }
 
-      setEffects(resolved.defender ? marks : []);
+      setEffects(marks);
       setLast(resolved);
       setGame(next);
-      // Keep the piece selected when it has earned another move, so the chain flows without a re-click.
-      setSelected(resolved.grantsExtraMove ? resolved.move.to : null);
+      setSelected(resolved.grantsBonus ? resolved.move.to : null);
     },
     [game],
   );
@@ -152,7 +154,6 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
       }
 
       if (denied.has(square)) {
-        // Say why, rather than ignoring the click as though nothing were there.
         nonce.current += 1;
         setEffects([{ square, kind: 'denied', nonce: nonce.current }]);
         return;
@@ -174,18 +175,15 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
   }, [effects]);
 
   const pendingExtra = game.extraMovePieceId !== null;
+  // R8: warn when the side to move's king can be taken right now.
+  const kingInDanger = useMemo(() => game.kingInDanger(game.turn), [game]);
   const rows = [7, 6, 5, 4, 3, 2, 1, 0];
 
   return (
     <div style={{ display: 'grid', gap: '1rem' }}>
-      <StatusBar
-        game={game}
-        result={result}
-        pendingExtra={pendingExtra}
-        onLeave={onLeave}
-      />
+      <StatusBar game={game} result={result} pendingExtra={pendingExtra} kingInDanger={kingInDanger} onLeave={onLeave} />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 260px', gap: '1rem', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 268px', gap: '1rem', alignItems: 'start' }}>
         <div
           role="grid"
           aria-label="Pokémon Chess board"
@@ -197,23 +195,24 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
             overflow: 'hidden',
             aspectRatio: '1 / 1',
             maxWidth: 620,
-            opacity: over ? 0.75 : 1,
+            opacity: over ? 0.8 : 1,
           }}
         >
           {rows.flatMap((rank) =>
             ALL_SQUARES.filter((sq) => rankOf(sq) === rank).map((square) => {
               const piece = game.position.pieceAt(square);
               const pokemon = piece ? game.loadoutOf(piece.id) : null;
+              const live = piece ? game.liveOf(piece.id) : null;
               const option = options.get(square);
               const isSelected = square === selected;
               const denial = denied.get(square);
               const effect = effectBySquare.get(square);
               const canMoveHere = option !== undefined;
-              const outcome = option?.outcome ?? null;
+              const tier = option?.effectiveness != null ? tierOf(option.effectiveness) : null;
 
-              const label = piece
-                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(pokemon!.species)?.name ?? pokemon!.species}, ${pokemon!.type} type${
-                    outcome ? `. Capture: ${OUTCOME_PRESENTATION[outcome].label}` : ''
+              const label = piece && pokemon && live
+                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(pokemon.species)?.name ?? pokemon.species}, ${pokemon.type} type, ${live.hp} of ${live.maxHp} HP${
+                    tier ? `. Capture forecast: ${TIER_PRESENTATION[tier].label}` : ''
                   }${denial ? `. Cannot be captured: ${denial}` : ''}`
                 : `${squareName(square)}: empty${canMoveHere ? '. Legal move' : ''}`;
 
@@ -231,24 +230,24 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
                     padding: 0,
                     containerType: 'size',
                     cursor: canMoveHere || movablePieceSquares.has(square) ? 'pointer' : 'default',
-                    background:
-                      squareColor(square) === 'light' ? 'var(--square-light)' : 'var(--square-dark)',
+                    background: squareColor(square) === 'light' ? 'var(--square-light)' : 'var(--square-dark)',
                     display: 'grid',
                     placeItems: 'center',
                     outline: isSelected ? '3px solid #58a6ff' : 'none',
                     outlineOffset: -3,
                   }}
                 >
-                  {piece && pokemon && (
+                  {piece && pokemon && live && (
                     <BoardPiece
                       species={dex.requireSpecies(pokemon.species)}
                       type={pokemon.type}
                       cls={piece.cls}
                       side={piece.side}
+                      hp={live.hp}
+                      maxHp={live.maxHp}
                     />
                   )}
 
-                  {/* A quiet destination reads as a dot; a capture reads as a ring in its outcome colour. */}
                   {canMoveHere && !piece && (
                     <span
                       aria-hidden
@@ -262,20 +261,19 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
                       }}
                     />
                   )}
-                  {canMoveHere && piece && outcome && (
+                  {canMoveHere && piece && tier && (
                     <span
                       aria-hidden
                       style={{
                         position: 'absolute',
                         inset: '2%',
                         borderRadius: 4,
-                        boxShadow: `inset 0 0 0 4cqmin ${OUTCOME_PRESENTATION[outcome].color}`,
+                        boxShadow: `inset 0 0 0 4cqmin ${TIER_PRESENTATION[tier].color}`,
                         zIndex: 3,
                       }}
                     />
                   )}
 
-                  {/* The refusal marker: this is the answer to "why can't I take that?". */}
                   {denial && (
                     <span
                       aria-hidden
@@ -284,7 +282,7 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
                         position: 'absolute',
                         inset: '2%',
                         borderRadius: 4,
-                        boxShadow: `inset 0 0 0 4cqmin ${OUTCOME_PRESENTATION.immune.color}`,
+                        boxShadow: `inset 0 0 0 4cqmin ${TIER_PRESENTATION.immune.color}`,
                         display: 'grid',
                         placeItems: 'center',
                         zIndex: 3,
@@ -294,7 +292,7 @@ export function GameBoard({ dex, seed, setup, onLeave }: GameBoardProps) {
                         style={{
                           fontSize: '34cqmin',
                           lineHeight: 1,
-                          color: OUTCOME_PRESENTATION.immune.color,
+                          color: TIER_PRESENTATION.immune.color,
                           textShadow: '0 1px 3px rgba(0,0,0,0.8)',
                           fontWeight: 700,
                         }}
@@ -321,11 +319,13 @@ function StatusBar({
   game,
   result,
   pendingExtra,
+  kingInDanger,
   onLeave,
 }: {
   game: PokemonChess;
   result: ReturnType<PokemonChess['result']>;
   pendingExtra: boolean;
+  kingInDanger: boolean;
   onLeave: () => void;
 }) {
   const turnColor = game.turn === 'white' ? '#f6f4ef' : '#15171c';
@@ -346,19 +346,13 @@ function StatusBar({
         <>
           <span
             aria-hidden
-            style={{
-              width: 16,
-              height: 16,
-              borderRadius: '50%',
-              background: turnColor,
-              border: '1.5px solid #6b7280',
-            }}
+            style={{ width: 16, height: 16, borderRadius: '50%', background: turnColor, border: '1.5px solid #6b7280' }}
           />
           <strong>{game.turn === 'white' ? 'White' : 'Black'} to move</strong>
           {pendingExtra && (
             <span
               style={{
-                background: OUTCOME_PRESENTATION.super.color,
+                background: VERDICT_PRESENTATION.advantage.color,
                 color: '#08210e',
                 fontWeight: 750,
                 padding: '0.15rem 0.55rem',
@@ -369,20 +363,30 @@ function StatusBar({
               ↻ Super effective — move again
             </span>
           )}
+          {kingInDanger && (
+            <span
+              style={{
+                background: TIER_PRESENTATION.immune.color,
+                color: '#2a0606',
+                fontWeight: 800,
+                padding: '0.15rem 0.55rem',
+                borderRadius: 999,
+                fontSize: '0.8rem',
+              }}
+            >
+              ⚠ Your king can be taken
+            </span>
+          )}
         </>
       ) : (
         <strong style={{ color: 'var(--accent)' }}>
-          {result.kind === 'checkmate'
-            ? `Checkmate — ${result.winner === 'white' ? 'White' : 'Black'} wins`
-            : result.kind === 'stalemate'
-              ? 'Stalemate — draw'
-              : `Draw by ${result.reason.replace('-', ' ')}`}
+          {result.kind === 'win'
+            ? `${result.winner === 'white' ? 'White' : 'Black'} wins — king captured`
+            : `Draw by ${result.reason.replace(/-/g, ' ')}`}
         </strong>
       )}
-      <span style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
-        <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem', alignSelf: 'center' }}>
-          move {game.position.fullmoveNumber}
-        </span>
+      <span style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem' }}>move {game.position.fullmoveNumber}</span>
         <button
           type="button"
           onClick={onLeave}
@@ -420,15 +424,15 @@ function SidePanel({
 }) {
   const selectedPiece = selected === null ? null : game.position.pieceAt(selected);
   const selectedPokemon = selectedPiece ? game.loadoutOf(selectedPiece.id) : null;
-
-  const captureOptions = [...options.values()].filter((o) => o.outcome !== null);
+  const selectedLive = selectedPiece ? game.liveOf(selectedPiece.id) : null;
+  const captureOptions = [...options.values()].filter((o) => o.effectiveness !== null);
 
   return (
     <aside style={{ display: 'grid', gap: '0.75rem' }}>
       {last && <ResolutionCard dex={dex} resolved={last} />}
 
       <Panel title={selectedPokemon ? 'Selected' : 'Select a piece'}>
-        {selectedPiece && selectedPokemon ? (
+        {selectedPiece && selectedPokemon && selectedLive ? (
           <div style={{ display: 'grid', gap: '0.5rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <PokemonIcon species={dex.requireSpecies(selectedPokemon.species)} />
@@ -437,31 +441,23 @@ function SidePanel({
                   {dex.getSpecies(selectedPokemon.species)?.name ?? selectedPokemon.species}
                 </strong>
                 <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
-                  {ROLE_GLYPH[selectedPiece.cls]} {ROLE_LABEL[selectedPiece.cls]}
+                  {ROLE_GLYPH[selectedPiece.cls]} {ROLE_LABEL[selectedPiece.cls]} · {selectedLive.hp}/
+                  {selectedLive.maxHp} HP
                 </span>
               </div>
               <TypePill type={selectedPokemon.type} />
             </div>
             {captureOptions.length > 0 && (
               <div style={{ display: 'grid', gap: '0.25rem' }}>
-                <span style={{ color: 'var(--text-dim)', fontSize: '0.75rem' }}>
-                  Captures available
-                </span>
+                <span style={{ color: 'var(--text-dim)', fontSize: '0.75rem' }}>Captures available</span>
                 {captureOptions.map((o) => {
-                  const p = OUTCOME_PRESENTATION[o.outcome!];
+                  const p = TIER_PRESENTATION[tierOf(o.effectiveness!)];
+                  const v = VERDICT_PRESENTATION[o.forecast];
                   return (
-                    <div
-                      key={o.move.to}
-                      style={{
-                        display: 'flex',
-                        gap: '0.4rem',
-                        alignItems: 'center',
-                        fontSize: '0.78rem',
-                      }}
-                    >
-                      <span style={{ color: p.color, fontWeight: 700, minWidth: 26 }}>{p.glyph}</span>
-                      <span style={{ color: 'var(--text-dim)' }}>{squareName(o.move.to)}</span>
-                      <span style={{ color: p.color }}>{p.label}</span>
+                    <div key={o.move.to} style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', fontSize: '0.76rem' }}>
+                      <span style={{ color: p.color, fontWeight: 700, minWidth: 24 }}>{p.glyph}</span>
+                      <span style={{ color: 'var(--text-dim)', minWidth: 24 }}>{squareName(o.move.to)}</span>
+                      <span style={{ color: v.color }}>{v.label}</span>
                     </div>
                   );
                 })}
@@ -482,21 +478,14 @@ function SidePanel({
         ) : (
           <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: '0.2rem' }}>
             {game.history.slice(-7).reverse().map((h, i) => {
-              const p = RESOLUTION_PRESENTATION[h.resolution];
+              const p = VERDICT_PRESENTATION[h.verdict];
               return (
-                <li
-                  key={game.history.length - i}
-                  style={{ fontSize: '0.76rem', display: 'flex', gap: '0.35rem' }}
-                >
+                <li key={game.history.length - i} style={{ fontSize: '0.76rem', display: 'flex', gap: '0.35rem' }}>
                   <span style={{ color: 'var(--text-dim)', minWidth: 62 }}>
                     {squareName(h.move.from)}→{squareName(h.move.to)}
                   </span>
                   <span style={{ color: p.color }}>{p.label}</span>
-                  {h.crit?.isCrit && (
-                    <span style={{ color: OUTCOME_PRESENTATION.super.color }} title="critical hit">
-                      crit
-                    </span>
-                  )}
+                  {h.crit && <span style={{ color: VERDICT_PRESENTATION.advantage.color }}>crit</span>}
                 </li>
               );
             })}
@@ -508,8 +497,8 @@ function SidePanel({
 }
 
 function ResolutionCard({ dex, resolved }: { dex: Dex; resolved: ResolvedMove }) {
-  const p = RESOLUTION_PRESENTATION[resolved.resolution];
-  const cause = causeLabel(resolved.cause, resolved.crit);
+  const p = VERDICT_PRESENTATION[resolved.verdict];
+  const cause = verdictCause(resolved.verdict, resolved.crit, resolved.momentum);
   return (
     <div
       style={{
@@ -525,33 +514,22 @@ function ResolutionCard({ dex, resolved }: { dex: Dex; resolved: ResolvedMove })
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
         <span style={{ color: p.color, fontWeight: 800 }}>{p.glyph}</span>
         <strong style={{ color: p.color, fontSize: '0.88rem' }}>{p.label}</strong>
-        {resolved.crit && (
-          <span
-            aria-label={`coins: ${resolved.crit.coins.filter(Boolean).length} heads of ${resolved.crit.coins.length}`}
-            title="A critical hit needs every coin to come up heads"
-            style={{
-              marginLeft: 'auto',
-              display: 'inline-flex',
-              gap: '0.15rem',
-              letterSpacing: '0.05em',
-              color: resolved.crit.isCrit ? OUTCOME_PRESENTATION.super.color : 'var(--text-dim)',
-            }}
-          >
-            {coinString(resolved.crit)}
+        {resolved.kingCaptured && (
+          <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontWeight: 800, fontSize: '0.78rem' }}>
+            king taken
           </span>
         )}
       </div>
-      <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
-        {resolved.attacker && resolved.defender ? (
-          <>
-            {dex.getSpecies(resolved.attacker.species)?.name} ({resolved.attacker.type}) vs{' '}
-            {dex.getSpecies(resolved.defender.species)?.name} ({resolved.defender.type})
-            {resolved.multiplier !== null && ` · ${resolved.multiplier}×`}
-          </>
-        ) : (
-          p.detail
-        )}
-      </div>
+      {resolved.defender && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
+          {dex.getSpecies(resolved.attacker.species)?.name} ({resolved.attacker.type}
+          {resolved.attackerHpAfter > 0 ? `, ${resolved.attackerHpAfter}/${resolved.attackerMaxHp} HP` : ', fainted'})
+          {' vs '}
+          {dex.getSpecies(resolved.defender.species)?.name} ({resolved.defender.type}
+          {resolved.defenderHpAfter > 0 ? `, ${resolved.defenderHpAfter}/${resolved.defenderMaxHp} HP` : ', fainted'})
+          {resolved.effectiveness !== null && ` · ${resolved.effectiveness}×`}
+        </div>
+      )}
       {cause && <div style={{ fontSize: '0.74rem', color: 'var(--text-dim)' }}>{cause}</div>}
     </div>
   );

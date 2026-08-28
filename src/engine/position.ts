@@ -479,7 +479,7 @@ export class Position {
    * The undo stack is reset, because the result is not reachable from the previous position by a chess
    * move and `unmakeMove` would restore the removed piece.
    */
-  withPieceRemoved(square: Square): Position {
+  withPieceRemoved(square: Square, allowKing = false): Position {
     const next = this.clone();
     const piece = next.board[square];
     if (piece === undefined || piece === 0) {
@@ -487,15 +487,22 @@ export class Position {
     }
     const side = piece >> 3;
     const cls = (piece & 7) - 1;
+    // A king may be removed only when the caller opts in, because it is normally a bug. Under the
+    // variant's king-capture rule a Clash genuinely removes a king (the game-ending event), so the
+    // Pokémon layer passes `allowKing`. The king square index is then cleared, and move generation
+    // treats the kingless side as having no moves.
     if (cls === KING) {
-      throw new Error(`refusing to remove the ${SIDES[side]} king on ${squareName(square)}`);
+      if (!allowKing) {
+        throw new Error(`refusing to remove the ${SIDES[side]} king on ${squareName(square)}`);
+      }
+      next.kings[side] = -1;
     }
 
     next.xorPiece(side, cls, square);
     next.board[square] = 0;
     next.pieceIds[square] = -1;
     next.ply = 0;
-    next.computeCheckInfo();
+    if (next.kings[next.stm] !== -1) next.computeCheckInfo();
     return next;
   }
 
@@ -775,6 +782,10 @@ export class Position {
    * the parent's list.
    */
   generateMovesInto(out: Int32Array, offset = 0): number {
+    // A side with no king has already lost — the Pokémon layer's king-capture win ends the game the
+    // moment a king leaves the board. Standard chess never reaches this, but the variant can remove a
+    // king in a Clash, so generation must not crash on a kingless side; it simply has no legal moves.
+    if (this.kings[this.stm] === -1) return offset;
     const end = this.generatePseudoLegalMovesInto(out, offset);
     this.computeCheckInfo();
 

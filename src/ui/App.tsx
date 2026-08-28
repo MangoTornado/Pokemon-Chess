@@ -18,7 +18,7 @@ import type { Loadout } from '../engine/variant.ts';
 import { autodraft } from '../game/autodraft.ts';
 import { DraftScreen } from './DraftScreen.tsx';
 import { GameBoard } from './GameBoard.tsx';
-import { OUTCOME_PRESENTATION } from './outcomes.ts';
+import { TIER_PRESENTATION } from './outcomes.ts';
 import { PIECE_CLASSES } from '../engine/board.ts';
 import { ROLE_GLYPH, ROLE_LABEL, GLYPH_FONT_STACK } from './pieceRoles.ts';
 
@@ -45,7 +45,7 @@ export function App() {
     return (
       <main style={{ maxWidth: 640, margin: '0 auto' }}>
         <Header />
-        <p style={{ color: OUTCOME_PRESENTATION.immune.color }}>Failed to load the dex: {error}</p>
+        <p style={{ color: TIER_PRESENTATION.immune.color }}>Failed to load the dex: {error}</p>
       </main>
     );
   }
@@ -197,10 +197,10 @@ function BigButton({
  */
 function RulesSummary() {
   const rows = [
-    ['super', 'Capture succeeds, and your piece moves again.'],
-    ['neutral', 'An ordinary chess capture.'],
-    ['resisted', 'Both pieces are destroyed.'],
-    ['immune', 'The capture is impossible. That piece cannot be touched.'],
+    ['super', 'Hit hard. A knockout lets your piece move again.'],
+    ['neutral', 'An even trade of blows.'],
+    ['resisted', 'You hit weakly and it hits back — you may lose the exchange.'],
+    ['immune', 'Impossible. That type cannot be touched by yours.'],
   ] as const;
 
   return (
@@ -216,7 +216,7 @@ function RulesSummary() {
     >
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'baseline' }}>
         {rows.map(([key, text]) => {
-          const p = OUTCOME_PRESENTATION[key];
+          const p = TIER_PRESENTATION[key];
           return (
             <span
               key={key}
@@ -232,9 +232,9 @@ function RulesSummary() {
         })}
       </div>
       <div style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
-        The matchup decides the outcome, so you always know it before you commit. After an ordinary
-        capture, four coins are flipped — <strong>all heads</strong> is a critical hit and your piece moves
-        again anyway. A coin can win you tempo; it can never take your piece.
+        Every piece has HP, and a capture is a short exchange of blows: the faster piece can strike first,
+        and a piece can survive wounded or lose the exchange outright. The forecast on the board tells you
+        how a capture will resolve before you commit. Win by capturing the enemy king.
       </div>
     </section>
   );
