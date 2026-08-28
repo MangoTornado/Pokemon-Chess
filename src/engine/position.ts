@@ -465,6 +465,67 @@ export class Position {
     return next;
   }
 
+  /**
+   * A clone with the piece on `square` removed from the board.
+   *
+   * Exists for the Pokémon rules layer's mutual destruction: a not-very-effective capture destroys the
+   * capturing piece as well as its target, which is not something any chess move can express, so it is
+   * applied as a second step after the capture itself.
+   *
+   * Refuses to remove a king. A king is tracked incrementally for legality, and a board without one is
+   * not a position this class can answer questions about — the rules layer is responsible for never
+   * allowing a king into a trade in the first place.
+   *
+   * The undo stack is reset, because the result is not reachable from the previous position by a chess
+   * move and `unmakeMove` would restore the removed piece.
+   */
+  withPieceRemoved(square: Square): Position {
+    const next = this.clone();
+    const piece = next.board[square];
+    if (piece === undefined || piece === 0) {
+      throw new Error(`no piece to remove on ${squareName(square)}`);
+    }
+    const side = piece >> 3;
+    const cls = (piece & 7) - 1;
+    if (cls === KING) {
+      throw new Error(`refusing to remove the ${SIDES[side]} king on ${squareName(square)}`);
+    }
+
+    next.xorPiece(side, cls, square);
+    next.board[square] = 0;
+    next.pieceIds[square] = -1;
+    next.ply = 0;
+    next.computeCheckInfo();
+    return next;
+  }
+
+  /**
+   * A clone in which the side to move is handed back to the side that just moved.
+   *
+   * Exists for the Pokémon rules layer, where a super-effective capture grants the capturing side an
+   * immediate second move. `makeMove` has already passed the turn by then, so this hands it back.
+   *
+   * Safe with respect to en passant despite appearances: an extra move is only ever granted by a
+   * capture, and a capture never sets an en passant square, so there is never a live target to lose
+   * here. It is cleared regardless, because a target that survived would be offered to the wrong side.
+   *
+   * The undo stack is reset, because the resulting position is not reachable from the previous one by a
+   * chess move and `unmakeMove` would restore the wrong side to move. Callers wanting history should
+   * keep the positions themselves, which is what the variant layer does.
+   */
+  withTurnReturned(): Position {
+    const next = this.clone();
+    next.stm = 1 - next.stm;
+    next.xorSide();
+    if (next.ep !== -1) {
+      next.xorEp(next.ep);
+      next.ep = -1;
+    }
+    next.ply = 0;
+    next.computeCheckInfo();
+    return next;
+  }
+
   // -------------------------------------------------------------------------
   // Inspection
   // -------------------------------------------------------------------------
@@ -596,6 +657,19 @@ export class Position {
   /** Whether `bySide` attacks `square`, counting attacks through nothing and blocked by everything. */
   isAttacked(square: Square, bySide: Side): boolean {
     return this.attackedBy(square, SIDE_INDEX[bySide], -1);
+  }
+
+  /**
+   * Whether `square` is attacked by `bySide`, treating `ignore` as though it were empty.
+   *
+   * Exposed for the Pokémon rules layer, where a not-very-effective capture destroys the *capturing*
+   * piece as well as its target. Deciding whether such a capture is legal means asking whether the
+   * mover's king would be safe once the attacker is gone from the square it just moved to — which is
+   * this question, with `ignore` set to that square. Treating the square as empty is what correctly
+   * opens any line the departing piece was blocking.
+   */
+  isAttackedIgnoring(square: Square, bySide: Side, ignore: Square): boolean {
+    return this.attackedBy(square, SIDE_INDEX[bySide], ignore);
   }
 
   /** Every square holding a piece of `bySide` that attacks `square`. */
