@@ -254,6 +254,9 @@ RIGHTS_LOST_AT[63] = CASTLE_BLACK_KING;
 
 const PROMOTION_CHOICES = [QUEEN, ROOK, BISHOP, KNIGHT] as const;
 
+const castleMove = (kingHome: Square, to: Square, flag: number): EncodedMove =>
+  kingHome | (to << 6) | (KING << 12) | (NO_CLASS << 15) | (NO_CLASS << 18) | flag;
+
 const UNDO_STRIDE = 8;
 const UNDO_MOVE = 0;
 const UNDO_CAPTURED_ID = 1;
@@ -824,48 +827,38 @@ export class Position {
 
     const kingSide = us === WHITE ? CASTLE_WHITE_KING : CASTLE_BLACK_KING;
     const queenSide = us === WHITE ? CASTLE_WHITE_QUEEN : CASTLE_BLACK_QUEEN;
+
+    const kingSideClear =
+      (rights & kingSide) !== 0 &&
+      board[kingHome + 3] === rookCode &&
+      board[kingHome + 1] === 0 &&
+      board[kingHome + 2] === 0;
+    // b1 and b8 must be empty for the rook to pass even though the king never stands there.
+    const queenSideClear =
+      (rights & queenSide) !== 0 &&
+      board[kingHome - 4] === rookCode &&
+      board[kingHome - 1] === 0 &&
+      board[kingHome - 2] === 0 &&
+      board[kingHome - 3] === 0;
+
+    if (!kingSideClear && !queenSideClear) return offset;
+    if (this.attackedBy(kingHome, them, -1)) return offset;
+
     let n = offset;
-    let kingSafe = -1;
-
-    if (rights & kingSide && board[kingHome + 3] === rookCode) {
-      if (board[kingHome + 1] === 0 && board[kingHome + 2] === 0) {
-        kingSafe = this.attackedBy(kingHome, them, -1) ? 0 : 1;
-        if (
-          kingSafe === 1 &&
-          !this.attackedBy(kingHome + 1, them, -1) &&
-          !this.attackedBy(kingHome + 2, them, -1)
-        ) {
-          out[n++] =
-            kingHome |
-            ((kingHome + 2) << 6) |
-            (KING << 12) |
-            (NO_CLASS << 15) |
-            (NO_CLASS << 18) |
-            MOVE_CASTLE_KING;
-        }
-      }
+    if (
+      kingSideClear &&
+      !this.attackedBy(kingHome + 1, them, -1) &&
+      !this.attackedBy(kingHome + 2, them, -1)
+    ) {
+      out[n++] = castleMove(kingHome, kingHome + 2, MOVE_CASTLE_KING);
     }
-
-    if (rights & queenSide && board[kingHome - 4] === rookCode) {
-      // b1/b8 must be empty for the rook to pass, though the king never stands on it.
-      if (board[kingHome - 1] === 0 && board[kingHome - 2] === 0 && board[kingHome - 3] === 0) {
-        if (kingSafe === -1) kingSafe = this.attackedBy(kingHome, them, -1) ? 0 : 1;
-        if (
-          kingSafe === 1 &&
-          !this.attackedBy(kingHome - 1, them, -1) &&
-          !this.attackedBy(kingHome - 2, them, -1)
-        ) {
-          out[n++] =
-            kingHome |
-            ((kingHome - 2) << 6) |
-            (KING << 12) |
-            (NO_CLASS << 15) |
-            (NO_CLASS << 18) |
-            MOVE_CASTLE_QUEEN;
-        }
-      }
+    if (
+      queenSideClear &&
+      !this.attackedBy(kingHome - 1, them, -1) &&
+      !this.attackedBy(kingHome - 2, them, -1)
+    ) {
+      out[n++] = castleMove(kingHome, kingHome - 2, MOVE_CASTLE_QUEEN);
     }
-
     return n;
   }
 
