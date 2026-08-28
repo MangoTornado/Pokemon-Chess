@@ -19,6 +19,35 @@ quietly resolve against it.
    > captures or different moves, etc, I want it to look like a good and fully fleshed out game, with
    > nice visuals"
 
+4. > "What I also want is a sandbox environment to do playtests and trial runs, and also a way to have
+   > accounts and to actually collect / catch new pokemon somehow, whether you get to choose your starting
+   > set and then every win you get a choice between a few random pokemon, or some sort of evolution
+   > method, or trading with other people, want to have a way to increase your pokedex and collection
+   > making it a challenge but not too difficult"
+
+5. > "In accordance with that new layer, this is what i mean by a fully fledged and fleshed out game, it
+   > should be very well designed and thought out with many cool mechanics"
+
+## What "fully fledged" means, definitively
+
+Directive 5 is the interpretive key to all the others. The target is **a complete game**, not a clever
+chess variant with a Pokémon theme and not a tech demo of the type chart.
+
+Concretely, the finished thing has all of these, each designed rather than bolted on:
+
+| Layer | What it means |
+|---|---|
+| **The match** | Deep, faithful rules where typing, moves, abilities and items all matter and interact. |
+| **The meta-game** | Accounts, a collection you grow, evolution, trading, a Pokédex worth completing. |
+| **The sandbox** | Free play and playtesting, plus batch simulation that *tests* the balance claims. |
+| **The presentation** | Distinct animations per outcome, coherent art direction, effects with real identity. |
+| **The opponent** | An AI that plays the variant properly and misjudges *types* at lower difficulties. |
+| **The onboarding** | A chess player and a Pokémon player can each learn this without a manual. |
+
+"Many cool mechanics" is an explicit instruction to be generous with depth. When in doubt, add the
+mechanic and make it legible — do not trim it for tidiness. The bar to clear is not "is this defensible?"
+but "is this a game someone would choose to keep playing?"
+
 ## What this settles
 
 ### Maximalism is the brief, not a risk to be managed
@@ -128,6 +157,97 @@ test that walks the entire content set, not by assertion in prose. See
 [`recon-data-substrate.md`](./recon-data-substrate.md) §7 for the `signalClass` mechanism that makes
 this auditable, and note that the same document measures the real curation floor: roughly a third of
 moves have code-implemented behaviour that no field-derivation can recover.
+
+### There is a meta-game: sandbox, accounts, and a collection you grow
+
+Directive 4 adds a whole layer above the match. It is in scope.
+
+#### The load-bearing architectural consequence — read this even if you skip the rest
+
+**The draft must be parameterised by a *pool source*, and the match rules must not know which one is in
+play.** Two sources exist:
+
+- `full-dex` — all 1025 Pokémon. Used by the sandbox, playtesting, and casual play.
+- `collection` — only the Pokémon this account actually owns. Used by progression and ranked play.
+
+This is a hard architectural seam. Get it wrong and the ruleset and the meta-game become impossible to
+evolve independently. Any design that hard-codes "draft from the full dex" is incomplete, and any design
+that lets collection state leak into capture resolution is wrong.
+
+#### A constraint that is easy to miss
+
+**A legal army is 16 pieces.** So a player must be able to field 16 from their collection on day one, or
+they cannot play at all. This bounds the early progression curve hard, and it forces an explicit decision
+about what ownership means:
+
+- Own **species** (one Pikachu entry, fieldable in one slot) ⇒ you need 16+ distinct species before your
+  first game, and duplicate rewards are worthless.
+- Own **individuals** (three separate Pikachu, each fieldable) ⇒ duplicates are immediately useful, the
+  16-piece floor is easy to clear, and it matches how Pokémon actually works, where you catch many of the
+  same species.
+
+**Recommendation: own individuals.** It solves duplicate-handling and the 16-piece floor with one decision
+and is the more faithful model. Not mandated — but a design choosing species-ownership must say how it
+clears the 16-piece floor and what a duplicate reward does.
+
+#### Sandbox
+
+A first-class environment for playtests and trial runs, not a debug menu.
+
+- Full dex, no progression, **no account required**. This is the default entry point: the game must be
+  playable within seconds of loading, before any sign-up.
+- Deterministic seeds, so a surprising game can be reproduced and shared. The engine is already seeded and
+  serialisable for exactly this.
+- Free choice of both armies, AI-versus-AI, and adjustable AI strength.
+- **Headless batch simulation.** Run thousands of AI-versus-AI games and report outcome distributions, game
+  length, capture-outcome frequencies, per-type win rates, and first-player advantage. This is how the
+  balance claims in the spec get *tested* rather than asserted, and it is the single most valuable tool for
+  tuning the RNG and the extra-move rules. It doubles as a player-facing curiosity.
+- Ideally a position editor for constructing a specific situation.
+
+#### Accounts
+
+- **Local-first.** A profile persists on-device with no server, and the whole game — sandbox, single-player,
+  progression, collection — works offline. Never gate core play behind an account.
+- Trading and any ladder inherently need a server. Design the data model so a local profile can later sync
+  to an account without migration pain, but stage the backend rather than blocking the game on it.
+- Treat a collection as data worth not losing: export/import, and be explicit about what happens on clear.
+
+#### Growing the collection
+
+The owner named four candidate mechanisms. They are complementary rather than alternatives, and a good
+design uses several:
+
+1. **Starter selection.** Choose a starting set. Authentic — you pick a starter — and it must be large
+   enough to field a legal army immediately.
+2. **Post-match rewards.** Choose one of a few offered Pokémon. Authentic to encounters. A **win** should
+   offer more and rarer choices; a **loss** should still offer something modest, because "challenging but
+   not too difficult" means losing must not stall progress.
+3. **Evolution.** The richest axis and the most faithful: you acquire base-stage Pokémon and evolve them
+   *through play* rather than catching the final stage. Your Charmander becomes a Charizard because you
+   used it. The dataset fully supports this — `prevo`, `evos`, `evoType`, `evoLevel`, `evoItem`, `evoMove`,
+   `evoCondition` are all baked into `species.json`, and branching lines like Eevee's nine evolutions are
+   already traversable via `Dex.evolutionLineOf`.
+4. **Trading.** Player-to-player. Note that **trade evolutions are real** — Machoke becomes Machamp only by
+   being traded — so trading has an authentic mechanical role beyond swapping duplicates, and it is a
+   genuinely lovely thing to implement faithfully.
+
+**Rarity should be grounded in real data, not invented.** `species.json` already carries the signals:
+`tags` (80 Sub-Legendary, 49 Restricted Legendary, 55 Mythical, 11 Ultra Beast, 16 Paradox), `bst`
+(175–1125), `tier`, and `nfe`. Derive rarity tiers from these so that a Mythical genuinely feels
+unobtainable and a Bidoof genuinely does not.
+
+#### Calibrating "a challenge but not too difficult"
+
+State a target curve in numbers so it can be tuned against the batch simulator rather than argued about:
+
+- A brand-new player fields a legal, viable army **immediately**.
+- Progress is visible **every match**, win or lose.
+- Meaningful collection growth within the first handful of matches.
+- The long tail — completing the Pokédex, acquiring Legendaries and Mythicals — stays a long-term pursuit.
+- **Collection size must not become the dominant source of competitive advantage.** If a large collection
+  simply wins, the game is pay-to-win by grinding. Say explicitly how a small collection stays competitive;
+  format restrictions, point-buy budgets, and mirror-pool modes are the usual answers.
 
 ## The two hard constraints that still bind
 
