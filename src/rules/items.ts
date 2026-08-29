@@ -49,6 +49,17 @@ export const CHECKUP_HEAL_ITEMS: Readonly<Record<string, number>> = {
   blacksludge: 1 / 16, // (Poison-type only in the games; treated as plain healing here)
 };
 
+/**
+ * Items whose holder pays a fraction of its max HP for attacking (Life Orb's tenth).
+ *
+ * The cost is what makes Life Orb a decision rather than a free 30%: it is the strongest damage item in the
+ * game and it kills you slowly.
+ */
+export const ATTACK_COST_ITEMS: Readonly<Record<string, number>> = { lifeorb: 1 / 10 };
+
+/** Items that punish an attacker for making contact, as a fraction of the *attacker's* max HP. */
+export const CONTACT_PUNISH_ITEMS: Readonly<Record<string, number>> = { rockyhelmet: 1 / 6 };
+
 /** Items that let their holder survive one otherwise-fatal blow at 1 HP, while undamaged. */
 export const SURVIVE_ONCE_ITEMS: ReadonlySet<string> = new Set(['focussash', 'focusband']);
 
@@ -117,8 +128,8 @@ export function defensiveItemMod(
     case 'eviolite':
       return nfe ? 2 / 3 : 1;
     default:
-      // Anything else is not a damage reduction (Rocky Helmet is contact recoil, for instance, which waits
-      // on the recoil hook), so it leaves the blow unchanged.
+      // Anything else is not a damage reduction — Rocky Helmet, for instance, punishes contact instead
+      // (see contactPunishFraction) — so it leaves the blow unchanged.
       return 1;
   }
 }
@@ -126,6 +137,16 @@ export function defensiveItemMod(
 /** Whether an item grants its holder a survive-once clamp (checked together with `pristine`). */
 export function grantsSurviveOnce(item: string | undefined): boolean {
   return item !== undefined && SURVIVE_ONCE_ITEMS.has(item);
+}
+
+/** What attacking costs the holder of this item, as a fraction of its max HP (0 for none). */
+export function attackCostFraction(item: string | undefined): number {
+  return item === undefined ? 0 : ATTACK_COST_ITEMS[item] ?? 0;
+}
+
+/** What this item exacts from an attacker that makes contact, as a fraction of the attacker's max HP. */
+export function contactPunishFraction(item: string | undefined): number {
+  return item === undefined ? 0 : CONTACT_PUNISH_ITEMS[item] ?? 0;
 }
 
 /** The fraction of max HP an item restores at each Checkup, or 0. */
@@ -144,5 +165,5 @@ export const IMPLEMENTED_ITEMS: readonly string[] = [
   ...Object.keys(CHECKUP_HEAL_ITEMS),
   ...SURVIVE_ONCE_ITEMS,
   'lifeorb', 'choiceband', 'choicespecs', 'expertbelt', 'muscleband', 'wiseglasses',
-  'assaultvest', 'eviolite',
+  'assaultvest', 'eviolite', 'rockyhelmet',
 ];

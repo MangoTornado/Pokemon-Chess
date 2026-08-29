@@ -11,7 +11,8 @@ import { computeDamage } from './damage.ts';
 import { resolveClash } from './clash.ts';
 import {
   CHECKUP_HEAL_ITEMS, IMPLEMENTED_ITEMS, SURVIVE_ONCE_ITEMS, TYPE_BOOST_ITEMS,
-  checkupHealFraction, defensiveItemMod, grantsSurviveOnce, offensiveItemMods,
+  attackCostFraction, checkupHealFraction, contactPunishFraction, defensiveItemMod, grantsSurviveOnce,
+  offensiveItemMods,
 } from './items.ts';
 
 const dex = await Dex.load();
@@ -58,7 +59,8 @@ describe('item multiplier table', () => {
     const TYPES: BattleType[] = ['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Fighting', 'Flying', 'Rock',
       'Ghost', 'Poison', 'Ground', 'Ice', 'Psychic', 'Bug', 'Dragon', 'Dark', 'Steel', 'Fairy'];
     for (const id of IMPLEMENTED_ITEMS) {
-      let doesSomething = grantsSurviveOnce(id) || checkupHealFraction(id) > 0;
+      let doesSomething = grantsSurviveOnce(id) || checkupHealFraction(id) > 0
+        || attackCostFraction(id) > 0 || contactPunishFraction(id) > 0;
       for (const category of ['Physical', 'Special'] as const) {
         if (defensiveItemMod(id, category, true) !== 1) doesSomething = true;
         for (const type of TYPES) {
@@ -70,6 +72,14 @@ describe('item multiplier table', () => {
       }
       expect(doesSomething, `${id} should have a measurable effect somewhere`).toBe(true);
     }
+  });
+
+  it('Life Orb costs its holder HP to attack, and Rocky Helmet punishes contact', () => {
+    expect(attackCostFraction('lifeorb')).toBeCloseTo(1 / 10, 6);
+    expect(attackCostFraction('leftovers')).toBe(0);
+    expect(attackCostFraction(undefined)).toBe(0);
+    expect(contactPunishFraction('rockyhelmet')).toBeCloseTo(1 / 6, 6);
+    expect(contactPunishFraction('lifeorb')).toBe(0);
   });
 
   it('defensive items only ever reduce damage, as the pipeline requires', () => {
@@ -247,5 +257,98 @@ describe('items in a live game', () => {
     expect(Object.keys(CHECKUP_HEAL_ITEMS).length).toBeGreaterThan(0);
     expect(SURVIVE_ONCE_ITEMS.size).toBeGreaterThan(0);
     for (const id of SURVIVE_ONCE_ITEMS) expect(CHECKUP_HEAL_ITEMS[id]).toBeUndefined();
+  });
+});
+
+describe('recoil and contact in the Clash', () => {
+  const BIG = {
+    attackerType: 'Normal' as BattleType, defenderType: 'Normal' as BattleType, moveType: 'Normal' as BattleType,
+    category: 'Physical' as const, basePower: 100, offensiveStat: 250, defensiveStat: 150,
+  };
+  const SMALL = {
+    attackerType: 'Normal' as BattleType, defenderType: 'Normal' as BattleType, moveType: 'Normal' as BattleType,
+    category: 'Physical' as const, basePower: 10, offensiveStat: 50, defensiveStat: 400,
+  };
+
+  function clash(extra: Record<string, unknown>) {
+    const attacker = { hp: 300, maxHp: 300, speed: 300, pristine: true };
+    const defender = { hp: 400, maxHp: 400, speed: 1, pristine: true };
+    const result = resolveClash(
+      { attacker, defender, attackerBlow: BIG, defenderBlow: SMALL, attackerSuperEffective: false, ...extra },
+      { hits: true, crit: false, momentum: 100 },
+    );
+    return { result, attacker, defender };
+  }
+
+  it('a recoil move costs the attacker a share of the damage it dealt', () => {
+    const plain = clash({});
+    const recoiling = clash({ attackerRecoil: { ofDamage: 1 / 3 } });
+    expect(recoiling.result.recoilTaken).toBeGreaterThan(0);
+    expect(recoiling.result.attackerHpAfter).toBeLessThan(plain.result.attackerHpAfter);
+
+    // The cost is exactly a third of each blow it landed — derived from the blows rather than assumed, so
+    // the test does not depend on how many swings the exchange happened to take.
+    const own = recoiling.result.blows.filter((b) => b.by === 'attacker');
+    const expected = own.reduce((sum, b) => sum + Math.max(1, Math.floor(b.damage / 3)), 0);
+    expect(recoiling.result.recoilTaken).toBe(expected);
+  });
+
+  it('Life Orb charges a flat tenth of max HP per blow', () => {
+    const orb = clash({ attackerRecoil: { ofMaxHp: 1 / 10 } });
+    const swings = orb.result.blows.filter((b) => b.by === 'attacker').length;
+    expect(swings).toBeGreaterThan(0);
+    expect(orb.result.recoilTaken).toBe(swings * 30); // a tenth of 300, once per landed blow
+  });
+
+  it('Rocky Helmet only punishes a move that makes contact', () => {
+    const contact = clash({ defenderContact: { ofAttackerMaxHp: 1 / 6 }, attackerMakesContact: true });
+    const ranged = clash({ defenderContact: { ofAttackerMaxHp: 1 / 6 } });
+    expect(contact.result.recoilTaken).toBeGreaterThan(0);
+    expect(ranged.result.recoilTaken).toBe(0);
+    expect(contact.result.attackerHpAfter).toBeLessThan(ranged.result.attackerHpAfter);
+  });
+
+  it('recoil can fell the attacker, turning a knockout into a mutual destruction', () => {
+    const attacker = { hp: 20, maxHp: 300, speed: 300, pristine: true };
+    const defender = { hp: 30, maxHp: 400, speed: 1, pristine: true };
+    const result = resolveClash(
+      {
+        attacker, defender, attackerBlow: BIG, defenderBlow: SMALL, attackerSuperEffective: false,
+        attackerRecoil: { ofDamage: 1 / 3 },
+      },
+      { hits: true, crit: false, momentum: 100 },
+    );
+    expect(result.defenderHpAfter).toBe(0);
+    expect(result.attackerHpAfter).toBe(0);
+    expect(result.verdict).toBe('mutual');
+  });
+
+  it('a Focus Sash does not save the attacker from its own recoil', () => {
+    const attacker = { hp: 20, maxHp: 300, speed: 300, pristine: true, surviveOnce: true };
+    const defender = { hp: 30, maxHp: 400, speed: 1, pristine: true };
+    const result = resolveClash(
+      {
+        attacker, defender, attackerBlow: BIG, defenderBlow: SMALL, attackerSuperEffective: false,
+        attackerRecoil: { ofDamage: 1 / 3 },
+      },
+      { hits: true, crit: false, momentum: 100 },
+    );
+    expect(result.attackerHpAfter).toBe(0);
+  });
+
+  it('no recoil inputs means no self-damage at all', () => {
+    expect(clash({}).result.recoilTaken).toBe(0);
+  });
+});
+
+describe('recoil data comes from real moves', () => {
+  it('reads a recoil fraction and a contact flag off the dex', () => {
+    const doubleEdge = dex.requireMove('doubleedge');
+    expect(doubleEdge.recoil).toBeDefined();
+    expect(doubleEdge.recoil![0] / doubleEdge.recoil![1]).toBeCloseTo(0.33, 2);
+    expect(doubleEdge.flags).toContain('contact');
+    // A ranged special move makes no contact.
+    expect(dex.requireMove('thunderbolt').flags).not.toContain('contact');
+    expect(dex.requireMove('thunderbolt').recoil).toBeUndefined();
   });
 });

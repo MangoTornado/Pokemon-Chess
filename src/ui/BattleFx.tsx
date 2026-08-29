@@ -32,6 +32,7 @@ export type Fx =
   | { readonly id: string; readonly kind: 'status'; readonly square: Square; readonly mark: string }
   | { readonly id: string; readonly kind: 'stage'; readonly square: Square; readonly text: string; readonly drop: boolean }
   | { readonly id: string; readonly kind: 'heal'; readonly square: Square; readonly amount: number }
+  | { readonly id: string; readonly kind: 'recoil'; readonly square: Square; readonly amount: number }
   | { readonly id: string; readonly kind: 'callout'; readonly text: string; readonly color: string; readonly crit: boolean };
 
 /** Per-square motion the board applies to a piece while the exchange plays. */
@@ -109,6 +110,15 @@ export function buildTimeline(resolved: ResolvedMove): Step[] {
   });
 
   const afterBlows = FIRST_BLOW_MS + resolved.blows.length * BLOW_GAP_MS;
+
+  // Recoil is self-inflicted, so it floats over the attacker in its own colour — a player must be able to
+  // see that Life Orb or Double-Edge is what hurt them, not the defender.
+  if (resolved.recoilTaken > 0) {
+    steps.push({
+      at: afterBlows - 60,
+      fx: { id: 'recoil', kind: 'recoil', square: attackerSquare, amount: resolved.recoilTaken },
+    });
+  }
 
   if (resolved.statusInflicted) {
     steps.push({
@@ -283,6 +293,22 @@ export function FxLayer({ fx }: { fx: readonly Fx[] }) {
               }}
             >
               −{f.amount}
+            </span>
+          );
+        }
+
+        if (f.kind === 'recoil') {
+          return (
+            <span
+              key={f.id}
+              className="pc-dmg"
+              style={{
+                position: 'absolute', ...pos, fontWeight: 800, fontVariantNumeric: 'tabular-nums',
+                fontSize: 'clamp(0.62rem, 1.8cqw, 0.85rem)', color: '#d29922',
+                textShadow: '0 1px 2px rgba(0,0,0,0.95)',
+              }}
+            >
+              −{f.amount} recoil
             </span>
           );
         }

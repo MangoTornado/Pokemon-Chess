@@ -75,6 +75,8 @@ export interface BlowRecord {
 export interface ClashResult {
   readonly verdict: ClashVerdict;
   readonly blows: readonly BlowRecord[];
+  /** Damage the attacker did to itself (recoil, Life Orb) or took from a contact item. */
+  readonly recoilTaken: number;
   readonly attackerHpAfter: number;
   readonly defenderHpAfter: number;
   /** Only an `advantage` grants the bonus move. */
@@ -107,6 +109,23 @@ export interface ClashSetup {
   readonly defenderIncapacitated?: boolean;
   /** Whether the attacker's move was super-effective, which distinguishes `advantage` from `capture`. */
   readonly attackerSuperEffective: boolean;
+  /**
+   * What the attacker pays for its own blows.
+   *
+   * `ofDamage` is a recoil move's share of the damage it dealt (Double-Edge's third); `ofMaxHp` is a flat
+   * cost like Life Orb's tenth. Both are charged per landed blow, as in the games, and neither can reduce the
+   * attacker below 0.
+   */
+  readonly attackerRecoil?: { readonly ofDamage?: number; readonly ofMaxHp?: number };
+  /**
+   * What the defender's held item exacts from an attacker that made contact (Rocky Helmet's sixth).
+   *
+   * A fraction of the *attacker's* max HP, charged once per contact blow — so a two-swing exchange against a
+   * helmeted defender costs the attacker twice, exactly as a two-hit move would in the games.
+   */
+  readonly defenderContact?: { readonly ofAttackerMaxHp: number };
+  /** True when the attacker's move makes contact, which is what a contact-punishing item reacts to. */
+  readonly attackerMakesContact?: boolean;
 }
 
 const MAX_ATTACKER_SWINGS = 2;
@@ -126,6 +145,7 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
     return {
       verdict: 'repel',
       blows,
+      recoilTaken: 0,
       attackerHpAfter: attacker.hp,
       defenderHpAfter: defender.hp,
       grantsBonus: false,
@@ -138,6 +158,8 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
     ((setup.priority ?? 0) === 0 && attacker.speed >= defender.speed);
 
   let swings = 0;
+  /** Total self-inflicted damage, reported so the UI can show recoil as its own number. */
+  let recoilTaken = 0;
 
   /**
    * Whether a survive-once item (Focus Sash) protects each side, decided once from the state *entering*
@@ -160,13 +182,32 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
     target.pristine = false;
   };
 
+  /** Charges the attacker for a blow it just landed: its own recoil, then the defender's contact punish. */
+  const chargeAttacker = (damageDealt: number): void => {
+    let cost = 0;
+    const recoil = setup.attackerRecoil;
+    if (recoil?.ofDamage) cost += Math.max(1, Math.floor(damageDealt * recoil.ofDamage));
+    if (recoil?.ofMaxHp) cost += Math.max(1, Math.floor(attacker.maxHp * recoil.ofMaxHp));
+    if (setup.defenderContact && setup.attackerMakesContact) {
+      cost += Math.max(1, Math.floor(attacker.maxHp * setup.defenderContact.ofAttackerMaxHp));
+    }
+    if (cost <= 0) return;
+    // Recoil is self-inflicted, so a survive-once clamp does not save the attacker from it — the same as in
+    // the games, where a Sash does not prevent recoil KOs.
+    attacker.hp = Math.max(0, attacker.hp - cost);
+    attacker.pristine = false;
+    recoilTaken += cost;
+  };
+
   const attackerSwing = (): boolean => {
     swings += 1;
     const crit = roll.crit && swings === 1;
     const dmg = computeDamage({ ...setup.attackerBlow, crit, momentum: roll.momentum });
     land(defender, 'defender', dmg);
     blows.push({ by: 'attacker', damage: dmg, crit, targetHpAfter: defender.hp });
-    return defender.hp <= 0 || swings >= MAX_ATTACKER_SWINGS;
+    chargeAttacker(dmg);
+    // Recoil can fell the attacker on its own swing, which ends the exchange there.
+    return defender.hp <= 0 || attacker.hp <= 0 || swings >= MAX_ATTACKER_SWINGS;
   };
 
   const defenderSwing = (): boolean => {
@@ -208,6 +249,7 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
   return {
     verdict,
     blows,
+    recoilTaken,
     attackerHpAfter: attacker.hp,
     defenderHpAfter: defender.hp,
     grantsBonus: verdict === 'advantage',

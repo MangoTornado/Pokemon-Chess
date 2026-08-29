@@ -48,6 +48,10 @@ export interface MoveSlot {
   readonly targetBoosts?: MoveBoosts;
   /** Stage changes the move costs its own user (Close Combat's −1 Def/SpD, Leaf Storm's −2 SpA). */
   readonly selfBoosts?: Readonly<Record<string, number>>;
+  /** Recoil as a fraction of damage dealt (Double-Edge's third), if the move has any. */
+  readonly recoil?: number;
+  /** True when the move makes contact, which is what a contact-punishing item reacts to. */
+  readonly contact?: boolean;
 }
 
 /** Extracts the stage change a move lands on its target: a guaranteed `boosts`, or a boost secondary. */
@@ -95,6 +99,9 @@ function toSlot(move: MoveEntry): MoveSlot {
   const targetBoosts = targetBoostsOf(move);
   // `self.boosts` is what the move costs its user — a real trade-off the player should feel.
   const selfBoosts = move.self?.boosts && Object.keys(move.self.boosts).length > 0 ? move.self.boosts : undefined;
+  // `recoil: [33, 100]` is the games' own "a third of the damage dealt".
+  const recoil = move.recoil ? move.recoil[0] / move.recoil[1] : undefined;
+  const contact = move.flags.includes('contact') ? true : undefined;
   return {
     id: move.id,
     name: move.name,
@@ -106,6 +113,8 @@ function toSlot(move: MoveEntry): MoveSlot {
     ...(rider ? { rider } : {}),
     ...(targetBoosts ? { targetBoosts } : {}),
     ...(selfBoosts ? { selfBoosts } : {}),
+    ...(recoil !== undefined ? { recoil } : {}),
+    ...(contact ? { contact } : {}),
   };
 }
 

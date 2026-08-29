@@ -45,7 +45,10 @@ import type { DamageInput } from '../rules/damage.ts';
 import { computeStats, stageMultiplier } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
 import { WONDER_GUARD, abilityGrantsImmunity, abilityLabel } from '../rules/abilities.ts';
-import { checkupHealFraction, defensiveItemMod, grantsSurviveOnce, offensiveItemMods } from '../rules/items.ts';
+import {
+  attackCostFraction, checkupHealFraction, contactPunishFraction, defensiveItemMod, grantsSurviveOnce,
+  offensiveItemMods,
+} from '../rules/items.ts';
 import { buildMoveset } from '../game/moveset.ts';
 import type { Moveset } from '../game/moveset.ts';
 import {
@@ -164,6 +167,8 @@ export interface ResolvedMove {
   readonly statusInflicted: string | null;
   /** Stage changes this action landed on the surviving defender, e.g. `{ spe: -1 }` — null if none. */
   readonly boostsInflicted: Readonly<Record<string, number>> | null;
+  /** Damage the attacker did to itself (recoil, Life Orb) or took from a contact item. 0 for none. */
+  readonly recoilTaken: number;
   readonly grantsBonus: boolean;
   /** Ids removed from the board. */
   readonly removed: readonly number[];
@@ -664,6 +669,7 @@ export class PokemonChess {
         attackerBlow: atk,
         defenderBlow: def,
         attackerSuperEffective: mult > 1,
+        ...this.recoilInputs(attackerId, defenderId, best.slot),
       },
       roll,
     );
@@ -728,7 +734,7 @@ export class PokemonChess {
         attackerMaxHp: this.liveOf(attackerId).maxHp,
         defenderMaxHp: null,
         crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
-        moveName: art?.name ?? null, moveType: null, statusInflicted: null, boostsInflicted: null,
+        moveName: art?.name ?? null, moveType: null, statusInflicted: null, boostsInflicted: null, recoilTaken: 0,
         grantsBonus: false, removed: [], kingCaptured: false,
       };
       const nextPos = this.position.withTurnReturned();
@@ -752,7 +758,7 @@ export class PokemonChess {
         defenderMaxHp: null,
         crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
         moveName: null, moveType: null,
-        statusInflicted: arrival.status, boostsInflicted: arrival.boosts,
+        statusInflicted: arrival.status, boostsInflicted: arrival.boosts, recoilTaken: 0,
         grantsBonus: false, removed: arrival.removed, kingCaptured: false,
       };
       // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
@@ -778,7 +784,11 @@ export class PokemonChess {
     const { atk, def } = this.clashInputs(attackerId, defenderId, slot);
 
     const result = resolveClash(
-      { attacker: aC, defender: dC, attackerBlow: atk, defenderBlow: def, attackerSuperEffective: mult > 1 },
+      {
+        attacker: aC, defender: dC, attackerBlow: atk, defenderBlow: def,
+        attackerSuperEffective: mult > 1,
+        ...this.recoilInputs(attackerId, defenderId, slot),
+      },
       roll,
     );
 
@@ -889,6 +899,7 @@ export class PokemonChess {
       moveType: usedMove?.type ?? null,
       statusInflicted: inflicted,
       boostsInflicted: boostsApplied,
+      recoilTaken: result.recoilTaken,
       grantsBonus: pending !== null,
       removed,
       kingCaptured,
@@ -1008,6 +1019,34 @@ export class PokemonChess {
     return {
       position: pos, live: nlive, statuses: nstat, stages: nstages, removed,
       status: toll.status, boosts: toll.boosts,
+    };
+  }
+
+  /**
+   * What the attacker pays for its blows, and what the defender's item exacts for contact.
+   *
+   * Life Orb's tenth and a recoil move's share of the damage dealt both fall on the attacker; Rocky Helmet
+   * charges it for touching. Shared by the forecast and the real resolution so the preview cannot lie.
+   */
+  private recoilInputs(attackerId: number, defenderId: number, slot: number): {
+    attackerRecoil?: { ofDamage?: number; ofMaxHp?: number };
+    defenderContact?: { ofAttackerMaxHp: number };
+    attackerMakesContact?: boolean;
+  } {
+    const move = this.movesetOf(attackerId)[slot];
+    const ofDamage = move?.recoil;
+    const ofMaxHp = attackCostFraction(this.loadoutOf(attackerId).item);
+    const punish = contactPunishFraction(this.loadoutOf(defenderId).item);
+    const contact = move?.contact === true;
+
+    const recoil = ofDamage !== undefined || ofMaxHp > 0
+      ? { ...(ofDamage !== undefined ? { ofDamage } : {}), ...(ofMaxHp > 0 ? { ofMaxHp } : {}) }
+      : undefined;
+
+    return {
+      ...(recoil ? { attackerRecoil: recoil } : {}),
+      ...(punish > 0 ? { defenderContact: { ofAttackerMaxHp: punish } } : {}),
+      ...(contact ? { attackerMakesContact: true } : {}),
     };
   }
 
