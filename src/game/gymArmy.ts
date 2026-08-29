@@ -72,7 +72,8 @@ export function buildGymMatch(dex: Dex, leaderType: BattleType, seed: string | n
       const piece = base.position.pieceAt(square);
       if (!piece) continue;
       const species = pickTyped(dex, pool, cls, rng, taken);
-      loadout.set(piece.id, { species: species.id, type: leaderType });
+      const ability = species.abilities[0];
+      loadout.set(piece.id, ability ? { species: species.id, type: leaderType, ability } : { species: species.id, type: leaderType });
     }
   }
 

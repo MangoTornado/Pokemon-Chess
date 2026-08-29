@@ -85,7 +85,10 @@ export function autodraft(dex: Dex, seed: string | number): DraftResult {
         const type = rng.pick(species.types);
         const piece = position.pieceAt(square);
         if (!piece) throw new Error(`expected a ${side} ${cls} on square ${square}`);
-        loadout.set(piece.id, { species: species.id, type });
+        // Each piece fights with one of its species' real abilities (the first non-hidden slot), so
+        // ability effects — type immunities today — are grounded in the actual Pokémon.
+        const ability = species.abilities[0];
+        loadout.set(piece.id, ability ? { species: species.id, type, ability } : { species: species.id, type });
         drafted.push({ side, cls, square, species, type });
       }
     }

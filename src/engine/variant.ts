@@ -42,6 +42,7 @@ import type { ClashRoll, ClashVerdict, Combatant } from '../rules/clash.ts';
 import type { DamageInput } from '../rules/damage.ts';
 import { computeStats } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
+import { WONDER_GUARD, abilityGrantsImmunity, abilityLabel } from '../rules/abilities.ts';
 import { buildMoveset } from '../game/moveset.ts';
 import type { Moveset } from '../game/moveset.ts';
 import {
@@ -60,6 +61,8 @@ export interface PokemonLoadout {
   readonly type: BattleType;
   /** The four-slot moveset. Optional in a loadout — auto-picked from the learnset when absent. */
   readonly moves?: Moveset;
+  /** The ability the piece fights with (an id from the species' real abilities). Grants type immunities. */
+  readonly ability?: string;
 }
 
 /** Loadouts keyed by the chess piece's persistent id, which survives movement and promotion. */
@@ -823,11 +826,17 @@ export class PokemonChess {
     const moves = this.movesetOf(attackerId);
     const defender = this.loadoutOf(defenderId);
     const isKing = this.pieceById(defenderId)?.cls === 'king';
+    // A king is never immune (R6), so its ability grants no immunity as a defender either.
+    const ability = isKing ? undefined : defender.ability;
+    const wonderGuard = ability === WONDER_GUARD;
     let best: { slot: number; type: BattleType; multiplier: number } | null = null;
     for (let slot = 0; slot < moves.length; slot++) {
       const type = moves[slot]!.type;
       let mult = effectiveness(type, defender.type);
       if (mult === 0 && isKing) mult = 1; // R6: a king is never immune as a defender
+      // An ability can make the bearer immune to a whole type; Wonder Guard admits only super-effective hits.
+      if (abilityGrantsImmunity(ability, type)) mult = 0;
+      if (wonderGuard && mult <= 1) mult = 0;
       if (mult === 0) continue;
       const power = moves[slot]!.basePower;
       const score = mult * 1000 + power;
@@ -835,6 +844,30 @@ export class PokemonChess {
       if (!best || score > bestScore) best = { slot, type, multiplier: mult };
     }
     return best;
+  }
+
+  /**
+   * Why an attacker cannot capture a defender, for the board's refusal caption — naming the ability when
+   * an ability is the cause (Levitate, Volt Absorb…), otherwise the plain type reason. Returns null when
+   * the capture is in fact legal.
+   */
+  blockedReason(attackerId: number, defenderId: number): string | null {
+    if (this.bestSlotAgainst(attackerId, defenderId) !== null) return null;
+    const attacker = this.loadoutOf(attackerId);
+    const defender = this.loadoutOf(defenderId);
+    const ability = defender.ability;
+    if (ability === WONDER_GUARD) {
+      return `${defender.species}'s Wonder Guard blocks all but a super-effective hit`;
+    }
+    // If any of the attacker's slots is neutralised by the defender's ability, name it.
+    if (ability) {
+      for (const slot of this.movesetOf(attackerId)) {
+        if (abilityGrantsImmunity(ability, slot.type)) {
+          return `${abilityLabel(ability)} makes it immune to ${slot.type}`;
+        }
+      }
+    }
+    return `${attacker.type} and its coverage cannot touch ${defender.type}`;
   }
 
   // -------------------------------------------------------------------------

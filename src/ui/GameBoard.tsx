@@ -181,18 +181,16 @@ export function GameBoard({
     if (selected === null) return out;
     const attackerPiece = game.position.pieceAt(selected);
     if (!attackerPiece) return out;
-    const attacker = game.loadoutOf(attackerPiece.id);
 
     for (const { square, piece } of game.position.allPieces()) {
       if (piece.side === attackerPiece.side) continue;
       // A king is never immune (R6).
       if (piece.cls === 'king') continue;
       // Untouchable only if NO slot — melee or coverage — can hurt it. Coverage may reach what the
-      // declared type cannot, so this asks the engine rather than the declared type alone.
-      if (game.bestSlotAgainst(attackerPiece.id, piece.id) === null) {
-        const defender = game.loadoutOf(piece.id);
-        out.set(square, `${attacker.type} and its coverage cannot touch ${defender.type}`);
-      }
+      // declared type cannot, and an ability (Levitate, Volt Absorb…) can grant immunity too, so this asks
+      // the engine for the reason rather than reading the declared type alone.
+      const reason = game.blockedReason(attackerPiece.id, piece.id);
+      if (reason) out.set(square, reason);
     }
     return out;
   }, [game, selected]);
