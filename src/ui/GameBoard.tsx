@@ -414,8 +414,16 @@ export function GameBoard({
   const waitingForOpponent = controlled !== undefined && game.turn !== controlled.side && !over;
   const humanBlocked = (ai !== undefined && game.turn === ai.side && !over) || waitingForOpponent;
   const pendingExtra = game.extraMovePieceId !== null;
-  // R8: warn when the side to move's king can be taken right now.
-  const kingInDanger = useMemo(() => game.kingInDanger(game.turn), [game]);
+  // R8: check is advice, not law — so warn instead of forbidding.
+  //
+  // The side asked about is the one NOT to move. `kingInDanger(x)` answers "can the mover capture x's king",
+  // which is only meaningful about the waiting side; passing `game.turn` asked whether the mover can capture its
+  // own king and so was always false, and this banner has never once rendered. Warning the waiting side is also
+  // the moment that matters: they have just left their king exposed and the opponent is on the clock.
+  const endangered: Side | null = useMemo(() => {
+    const waiting: Side = game.turn === 'white' ? 'black' : 'white';
+    return game.kingInDanger(waiting) ? waiting : null;
+  }, [game]);
   const rows = [7, 6, 5, 4, 3, 2, 1, 0];
 
   return (
@@ -424,7 +432,7 @@ export function GameBoard({
         game={game}
         result={result}
         pendingExtra={pendingExtra}
-        kingInDanger={kingInDanger}
+        endangered={endangered}
         thinking={humanBlocked}
         aiName={ai?.difficulty.name ?? (waitingForOpponent ? controlled?.opponentName : undefined)}
         onLeave={onLeave}
@@ -645,7 +653,7 @@ function StatusBar({
   game,
   result,
   pendingExtra,
-  kingInDanger,
+  endangered,
   thinking,
   aiName,
   onLeave,
@@ -654,7 +662,8 @@ function StatusBar({
   game: PokemonChess;
   result: ReturnType<PokemonChess['result']>;
   pendingExtra: boolean;
-  kingInDanger: boolean;
+  /** The side whose king can be taken by the player on the clock, or null. */
+  endangered: Side | null;
   thinking: boolean;
   aiName: string | undefined;
   onLeave: () => void;
@@ -730,7 +739,7 @@ function StatusBar({
                 </span>
               )),
           )}
-          {kingInDanger && (
+          {endangered !== null && (
             <span
               style={{
                 background: TIER_PRESENTATION.immune.color,
@@ -741,7 +750,9 @@ function StatusBar({
                 fontSize: '0.8rem',
               }}
             >
-              ⚠ Your king can be taken
+              {/* Named rather than "your": the warning is about the side *not* on the clock, and in a
+                  hot-seat game "your" would be ambiguous about which player it addresses. */}
+              ⚠ {endangered === 'white' ? "White's" : "Black's"} king can be taken
             </span>
           )}
         </>

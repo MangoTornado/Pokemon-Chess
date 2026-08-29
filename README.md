@@ -47,7 +47,8 @@ draft and match interface. The ruleset is being specified in [`docs/design/`](./
 
 ## Running it
 
-Requires Node 20+ (developed on 24).
+Requires Node 24+. Not 20: the server runs its TypeScript directly (no build step) and uses the built-in
+`node:sqlite`, and neither exists before 24.
 
 ```sh
 npm install

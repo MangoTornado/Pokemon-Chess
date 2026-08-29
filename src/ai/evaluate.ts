@@ -84,10 +84,17 @@ export function evaluate(game: PokemonChess, side: Side, ply = 0): number {
     score += piece.side === side ? v : -v;
   }
 
-  // King safety: being the side whose king can be taken right now is a real, immediate danger.
+  // King safety: being the side whose king can be taken right now is a real, immediate danger, and it is meant
+  // to dominate every material term.
+  //
+  // No turn guard here. `kingInDanger(x)` already requires that it be x's *opponent* to move — it asks "can
+  // the mover take x's king", which is only answerable then. Guarding it with `game.turn === x` therefore
+  // demanded the opposite of what the call itself demands, so both terms were unsatisfiable and the search has
+  // never valued an immediate king-capture threat at all. The two conditions below remain mutually exclusive by
+  // construction, which is the property the guards were reaching for.
   const enemy: Side = side === 'white' ? 'black' : 'white';
-  if (game.turn === side && game.kingInDanger(side)) score -= 600;
-  if (game.turn === enemy && game.kingInDanger(enemy)) score += 600;
+  if (game.kingInDanger(side)) score -= 600;
+  if (game.kingInDanger(enemy)) score += 600;
 
   // A small tempo bonus for having more available actions — mobility, which correlates with initiative.
   return score;

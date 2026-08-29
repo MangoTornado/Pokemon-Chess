@@ -119,21 +119,41 @@ export class Accounts {
     const createdAt = this.now().toISOString();
     const avatar = normalizeAvatar(input.avatar ?? DEFAULT_AVATAR);
 
-    // A single transaction so an account never exists without its profile and starter collection.
-    const accountId = this.db.raw
-      .prepare('INSERT INTO accounts (username, username_lower, password_hash, created_at) VALUES (?, ?, ?, ?)')
-      .run(username.value, lower, hash, createdAt).lastInsertRowid as number;
+    // A single transaction so an account never exists without its profile and starter collection. This comment
+    // used to be the only thing making that true: the writes ran in autocommit, so a failure part-way left an
+    // account with no profile (every later `publicProfile` read returns null) while permanently reserving the
+    // username, which cannot be released through any API. The password hash is computed above, outside the
+    // transaction, because it is deliberately slow and must not hold a write lock.
+    //
+    // The UNIQUE index on username_lower is what actually decides the race: two simultaneous registrations both
+    // pass the availability check above, and the loser's INSERT throws in here and rolls back cleanly.
+    let accountId: number;
+    let token: string;
+    this.db.raw.prepare('BEGIN').run();
+    try {
+      accountId = this.db.raw
+        .prepare('INSERT INTO accounts (username, username_lower, password_hash, created_at) VALUES (?, ?, ?, ?)')
+        .run(username.value, lower, hash, createdAt).lastInsertRowid as number;
 
-    this.db.raw
-      .prepare('INSERT INTO profiles (account_id, display_name, bio, status, avatar, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(accountId, displayName.value, '', '', JSON.stringify(avatar), createdAt);
+      this.db.raw
+        .prepare('INSERT INTO profiles (account_id, display_name, bio, status, avatar, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(accountId, displayName.value, '', '', JSON.stringify(avatar), createdAt);
 
-    const grant = this.db.raw.prepare(
-      'INSERT INTO collection (account_id, species_id, acquired_at) VALUES (?, ?, ?)',
-    );
-    for (const species of STARTER_SPECIES) grant.run(accountId, species, createdAt);
+      const grant = this.db.raw.prepare(
+        'INSERT INTO collection (account_id, species_id, acquired_at) VALUES (?, ?, ?)',
+      );
+      for (const species of STARTER_SPECIES) grant.run(accountId, species, createdAt);
 
-    const token = this.openSession(accountId);
+      token = this.openSession(accountId);
+      this.db.raw.prepare('COMMIT').run();
+    } catch (error) {
+      this.db.raw.prepare('ROLLBACK').run();
+      // A lost username race is the expected failure here and reads as a taken name, not a server error.
+      const message = error instanceof Error ? error.message : '';
+      if (/UNIQUE|constraint/i.test(message)) return fail('That username is taken.', 'username');
+      throw error;
+    }
+
     return ok({ profile: this.publicProfile(accountId)!, token });
   }
 

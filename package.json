@@ -6,7 +6,7 @@
   "description": "Chess played with Pokemon, where type matchups decide what a capture means.",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "vite",
