@@ -17,6 +17,7 @@ import { api } from '../net/api.ts';
 import type { RoomView } from '../net/api.ts';
 import type { PokemonChess } from '../engine/variant.ts';
 import { GameBoard } from './GameBoard.tsx';
+import { EncounterCard } from './EncounterCard.tsx';
 
 /** How often to poll a room for the opponent's moves and status. Fine for a turn-based game. */
 const POLL_MS = 900;
@@ -259,6 +260,9 @@ function OnlineGame({
           </button>
         </div>
       </div>
+
+      {/* A ranked game's result is recorded server-side, which is what issues the encounter. */}
+      {finished && <EncounterCard dex={dex} />}
 
       <Clocks room={room} side={side} />
 

@@ -31,6 +31,10 @@ export interface ProfileRow {
   badges: string; // JSON
   /** ISO timestamp of the account's last authenticated request, or null if never. */
   last_seen: string | null;
+  /** The unclaimed post-match encounter as JSON, or null. Server-issued, so an offer cannot be forged. */
+  encounter: string | null;
+  /** Encounters since the last rare-or-better offer, for the pity counter. */
+  pity: number;
   updated_at: string;
 }
 
@@ -127,6 +131,34 @@ export class Db {
       );
       CREATE INDEX IF NOT EXISTS idx_friend_req ON friendships(requester, status);
       CREATE INDEX IF NOT EXISTS idx_friend_addr ON friendships(addressee, status);
+
+      -- The wonder-trade pool: a Pokémon deposited to be swapped with a stranger's, sight unseen. Held here
+      -- rather than in the owner's collection so it cannot be traded twice or fielded while waiting.
+      CREATE TABLE IF NOT EXISTS wonder_pool (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        species_id   TEXT NOT NULL,
+        nickname     TEXT,
+        xp           INTEGER NOT NULL DEFAULT 0,
+        deposited_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_wonder_account ON wonder_pool(account_id);
+
+      -- The marketplace: an individual offered publicly, with the species its owner wants in return. Like the
+      -- wonder pool, the listed Pokémon leaves the collection while it is listed.
+      CREATE TABLE IF NOT EXISTS listings (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        species_id   TEXT NOT NULL,
+        nickname     TEXT,
+        xp           INTEGER NOT NULL DEFAULT 0,
+        -- JSON array of species ids the owner will accept; an empty array means "any Pokémon".
+        wants        TEXT NOT NULL DEFAULT '[]',
+        status       TEXT NOT NULL DEFAULT 'open',
+        created_at   TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
+      CREATE INDEX IF NOT EXISTS idx_listings_account ON listings(account_id, status);
     `);
 
     // Columns added after the first schema shipped: `CREATE TABLE IF NOT EXISTS` will not add them to an
@@ -137,6 +169,9 @@ export class Db {
     this.addColumnIfMissing('collection', 'xp', 'INTEGER NOT NULL DEFAULT 0');
     // Presence: when this account was last seen, so a friend list can show who is around.
     this.addColumnIfMissing('profiles', 'last_seen', 'TEXT');
+    // The unclaimed post-match encounter (JSON), and how many encounters have passed without anything rare.
+    this.addColumnIfMissing('profiles', 'encounter', 'TEXT');
+    this.addColumnIfMissing('profiles', 'pity', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   /** Adds a column to a table if it is not already present. */

@@ -21,7 +21,7 @@ import type { GymLeader } from '../ladder/badges.ts';
 import { BASE_RATING, kFactorFor, tierProgress, updateRating } from '../ladder/rating.ts';
 import type { LadderView } from '../ladder/store.ts';
 import { GameBoard } from './GameBoard.tsx';
-import { RewardChooser } from './CollectionScreen.tsx';
+import { EncounterCard } from './EncounterCard.tsx';
 import { TYPE_COLORS, textColorOn } from './typeColors.ts';
 
 export interface LadderScreenProps {
@@ -300,8 +300,8 @@ export interface LadderMatchProps {
   gym: GymLeader;
   ladder: LadderView;
   onExit: () => void;
-  /** When signed in, claims a reward Pokémon after a win. Absent for guests (no collection). */
-  onClaimReward?: (species: string) => Promise<{ error: string } | null>;
+  /** True when a signed-in account can receive the post-match encounter. */
+  signedIn?: boolean;
 }
 
 interface Outcome {
@@ -318,7 +318,7 @@ interface Outcome {
  * with the leader's compensating budget. On game over it records the result to the ladder and shows the
  * rating change and any badge earned.
  */
-export function LadderMatch({ dex, gym, ladder, onExit, onClaimReward }: LadderMatchProps) {
+export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchProps) {
   // A fresh seed per mount so a rematch is a new game, captured once so React state changes do not reroll it.
   const seed = useRef(`gym-${gym.id}-${Math.floor(performance.now())}`).current;
   const setup = useMemo(() => buildGymMatch(dex, gym.type, seed), [dex, gym.type, seed]);
@@ -367,10 +367,9 @@ export function LadderMatch({ dex, gym, ladder, onExit, onClaimReward }: LadderM
 
       {outcome && <OutcomeBanner gym={gym} outcome={outcome} onExit={onExit} />}
 
-      {/* A win catches a reward Pokémon (signed-in players only — the collection is account-bound). */}
-      {outcome?.score === 1 && onClaimReward && (
-        <RewardChooser dex={dex} rollKey={seed} claim={onClaimReward} />
-      )}
+      {/* Every finished game yields an encounter, issued by the server when it recorded the result — a win
+          offers more and better, a loss fewer and plainer, but never nothing. */}
+      {outcome && signedIn && <EncounterCard dex={dex} />}
 
       <GameBoard
         dex={dex}

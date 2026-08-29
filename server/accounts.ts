@@ -15,20 +15,34 @@ import type { Avatar } from '../src/profile/avatar.ts';
 import {
   validateUsername, validatePassword, validateDisplayName, validateBio, validateStatus,
 } from '../src/profile/profile.ts';
-import type { FriendView, PublicProfile, TradeView } from '../src/profile/profile.ts';
+import type { FriendView, ListingView, PublicProfile, TradeView, WonderResult } from '../src/profile/profile.ts';
 import { updateRating, kFactorFor } from '../src/ladder/rating.ts';
 import { GYM_BY_ID, GYM_LEADERS, highestBadge } from '../src/ladder/badges.ts';
+import type { Encounter, MatchOutcome } from '../src/game/encounters.ts';
 
 /** Sessions live a fortnight; a returning player is not re-challenged constantly, but a token expires. */
 const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 /**
- * The starter collection a new account receives, so it can field a legal 16-piece army immediately —
- * the day-one floor `DIRECTION.md` requires. A spread of accessible, recognisable species across roles.
+ * The starter team a new account receives.
+ *
+ * Enough to field a full legal army on day one — the floor `DIRECTION.md` requires — and chosen so the very
+ * first game already teaches the type layer. That means: one of each Kanto starter so the Fire/Water/Grass
+ * triangle is in hand from the start; a spread that covers most of the chart, so almost every matchup a
+ * player meets has an answer somewhere on the bench; and eight unevolved species, so the evolution loop has
+ * something to work on immediately.
+ *
+ * Recognisable on purpose. A new player should see names they know, not a random draw from 1025.
  */
 export const STARTER_SPECIES: readonly string[] = [
-  'bulbasaur', 'charmander', 'squirtle', 'pikachu', 'eevee', 'growlithe', 'machop', 'geodude',
-  'gastly', 'abra', 'magikarp', 'snorlax', 'dratini', 'larvitar', 'ralts', 'rufflet', 'rockruff', 'applin',
+  // The starter triangle — the first type lesson, in three Pokémon.
+  'bulbasaur', 'charmander', 'squirtle',
+  // Familiar faces that also widen the type coverage.
+  'pikachu', 'eevee', 'machop', 'geodude', 'gastly', 'abra', 'growlithe',
+  // Unevolved species with somewhere to go, so evolution is reachable at once.
+  'dratini', 'larvitar', 'ralts', 'rockruff', 'applin', 'rufflet', 'magikarp',
+  // One bulky body, so a new army has something that can hold a square.
+  'snorlax',
 ];
 
 export type ServiceError = { error: string; field?: string };
@@ -54,13 +68,30 @@ export class Accounts {
   private readonly now: () => Date;
   /** Resolves a species' possible evolutions; injected so the service need not import the dex. */
   private readonly evosOf: (species: string) => string[];
+  /**
+   * Rolls a post-match encounter, and reports whether an offer counts as rare-or-better for the pity counter.
+   *
+   * Injected rather than imported so this service stays dex-free and a test can supply a fixed roll.
+   */
+  private readonly rollEncounter: ((outcome: MatchOutcome, seed: string, pity: number) => Encounter) | undefined;
+  private readonly satisfiesPity: ((choices: readonly string[]) => boolean) | undefined;
 
   // Fields are declared and assigned explicitly rather than via constructor parameter properties, because
   // Node's strip-only TypeScript loader (which runs the server) does not support parameter properties.
-  constructor(db: Db, now: () => Date = () => new Date(), evosOf: (species: string) => string[] = () => []) {
+  constructor(
+    db: Db,
+    now: () => Date = () => new Date(),
+    evosOf: (species: string) => string[] = () => [],
+    encounters?: {
+      roll: (outcome: MatchOutcome, seed: string, pity: number) => Encounter;
+      satisfiesPity: (choices: readonly string[]) => boolean;
+    },
+  ) {
     this.db = db;
     this.now = now;
     this.evosOf = evosOf;
+    this.rollEncounter = encounters?.roll;
+    this.satisfiesPity = encounters?.satisfiesPity;
   }
 
   // -------------------------------------------------------------------------
@@ -316,6 +347,10 @@ export class Accounts {
     // The winner's team trains (a draw trains neither).
     if (winner === 'white') this.grantTeamXp(whiteId);
     else if (winner === 'black') this.grantTeamXp(blackId);
+
+    // Both players meet wild Pokémon; the loser simply meets fewer.
+    this.issueEncounter(whiteId, winner === 'draw' ? 'draw' : winner === 'white' ? 'win' : 'loss');
+    this.issueEncounter(blackId, winner === 'draw' ? 'draw' : winner === 'black' ? 'win' : 'loss');
   }
 
   // -------------------------------------------------------------------------
@@ -413,6 +448,217 @@ export class Accounts {
       badge: r.badge,
       online: r.last_seen !== null && now - new Date(r.last_seen).getTime() <= PRESENCE_WINDOW_MS,
     }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Wonder trade
+  // -------------------------------------------------------------------------
+
+  /**
+   * Deposits one of your Pokémon for a stranger's, sight unseen.
+   *
+   * The deposit leaves your collection immediately and joins a pool. If someone else's is already waiting you
+   * swap on the spot; otherwise yours waits for the next depositor. That is what makes it a *wonder* trade —
+   * you give something up before you know what you get — and holding the Pokémon in the pool rather than in
+   * the collection is what stops it being traded twice or fielded while it waits.
+   *
+   * You never receive your own deposit back.
+   */
+  wonderTrade(accountId: number, collectionId: unknown): Result<WonderResult> {
+    if (!Number.isInteger(collectionId)) return fail('Choose a Pokémon to send.');
+    const cid = collectionId as number;
+    const mine = this.db.raw
+      .prepare('SELECT species_id, nickname, xp FROM collection WHERE id = ? AND account_id = ?')
+      .get(cid, accountId) as { species_id: string; nickname: string | null; xp: number } | undefined;
+    if (!mine) return fail('You do not own that Pokémon.');
+
+    // Someone else's deposit, oldest first so the pool drains fairly.
+    const theirs = this.db.raw
+      .prepare('SELECT id, account_id, species_id, nickname, xp FROM wonder_pool WHERE account_id != ? ORDER BY id LIMIT 1')
+      .get(accountId) as { id: number; account_id: number; species_id: string; nickname: string | null; xp: number } | undefined;
+
+    const stamp = this.now().toISOString();
+    this.db.raw.prepare('BEGIN').run();
+    try {
+      this.db.raw.prepare('DELETE FROM collection WHERE id = ? AND account_id = ?').run(cid, accountId);
+
+      if (!theirs) {
+        // Nobody waiting: our Pokémon joins the pool and we are told to come back.
+        this.db.raw
+          .prepare('INSERT INTO wonder_pool (account_id, species_id, nickname, xp, deposited_at) VALUES (?, ?, ?, ?, ?)')
+          .run(accountId, mine.species_id, mine.nickname, mine.xp, stamp);
+        this.db.raw.prepare('COMMIT').run();
+        return ok({ gave: mine.species_id, got: mine.species_id, waiting: true });
+      }
+
+      // A match: we take theirs, and ours goes to them.
+      this.db.raw.prepare('DELETE FROM wonder_pool WHERE id = ?').run(theirs.id);
+      const insert = this.db.raw.prepare(
+        'INSERT INTO collection (account_id, species_id, nickname, xp, acquired_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      insert.run(accountId, theirs.species_id, theirs.nickname, theirs.xp, stamp);
+      insert.run(theirs.account_id, mine.species_id, mine.nickname, mine.xp, stamp);
+      this.db.raw.prepare('COMMIT').run();
+      return ok({ gave: mine.species_id, got: theirs.species_id, waiting: false });
+    } catch {
+      this.db.raw.prepare('ROLLBACK').run();
+      return fail('The trade could not be completed.');
+    }
+  }
+
+  /** How many Pokémon are waiting in the wonder pool, and how many are the viewer's own. */
+  wonderPoolStatus(accountId: number): { total: number; yours: number } {
+    const total = (this.db.raw.prepare('SELECT COUNT(*) AS n FROM wonder_pool').get() as { n: number }).n;
+    const yours = (this.db.raw
+      .prepare('SELECT COUNT(*) AS n FROM wonder_pool WHERE account_id = ?')
+      .get(accountId) as { n: number }).n;
+    return { total, yours };
+  }
+
+  // -------------------------------------------------------------------------
+  // Marketplace
+  // -------------------------------------------------------------------------
+
+  /**
+   * Lists a Pokémon publicly, naming the species you will accept for it.
+   *
+   * An empty want-list means "any Pokémon", which is the quickest way to shift a spare. The listed individual
+   * leaves the collection while it is listed, for the same reason as the wonder pool.
+   */
+  createListing(accountId: number, collectionId: unknown, wants: unknown): Result<ListingView> {
+    if (!Number.isInteger(collectionId)) return fail('Choose a Pokémon to list.');
+    const cid = collectionId as number;
+    const wantList = Array.isArray(wants)
+      ? wants.filter((w): w is string => typeof w === 'string' && /^[a-z0-9.'-]{1,40}$/.test(w)).slice(0, 12)
+      : [];
+
+    const row = this.db.raw
+      .prepare('SELECT species_id, nickname, xp FROM collection WHERE id = ? AND account_id = ?')
+      .get(cid, accountId) as { species_id: string; nickname: string | null; xp: number } | undefined;
+    if (!row) return fail('You do not own that Pokémon.');
+
+    const open = (this.db.raw
+      .prepare("SELECT COUNT(*) AS n FROM listings WHERE account_id = ? AND status = 'open'")
+      .get(accountId) as { n: number }).n;
+    if (open >= 12) return fail('You already have twelve Pokémon listed.');
+
+    const stamp = this.now().toISOString();
+    this.db.raw.prepare('BEGIN').run();
+    try {
+      this.db.raw.prepare('DELETE FROM collection WHERE id = ? AND account_id = ?').run(cid, accountId);
+      const info = this.db.raw
+        .prepare('INSERT INTO listings (account_id, species_id, nickname, xp, wants, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(accountId, row.species_id, row.nickname, row.xp, JSON.stringify(wantList), 'open', stamp);
+      this.db.raw.prepare('COMMIT').run();
+      return ok(this.listingView(Number(info.lastInsertRowid), accountId)!);
+    } catch {
+      this.db.raw.prepare('ROLLBACK').run();
+      return fail('The listing could not be created.');
+    }
+  }
+
+  /** Open listings, newest first. */
+  listings(accountId: number, limit = 60): ListingView[] {
+    const rows = this.db.raw
+      .prepare("SELECT id FROM listings WHERE status = 'open' ORDER BY id DESC LIMIT ?")
+      .all(limit) as { id: number }[];
+    return rows.map((r) => this.listingView(r.id, accountId)).filter((l): l is ListingView => l !== null);
+  }
+
+  private listingView(listingId: number, viewerId: number): ListingView | null {
+    const row = this.db.raw.prepare('SELECT * FROM listings WHERE id = ?').get(listingId) as
+      | { id: number; account_id: number; species_id: string; nickname: string | null; wants: string; created_at: string }
+      | undefined;
+    if (!row) return null;
+    const seller = (this.db.raw.prepare('SELECT username FROM accounts WHERE id = ?').get(row.account_id) as
+      | { username: string }
+      | undefined)?.username ?? '?';
+    let wants: string[] = [];
+    try {
+      const parsed = JSON.parse(row.wants);
+      if (Array.isArray(parsed)) wants = parsed.filter((w): w is string => typeof w === 'string');
+    } catch { /* a malformed want-list reads as "any" */ }
+    return {
+      id: row.id,
+      seller,
+      species: row.species_id,
+      nickname: row.nickname,
+      wants,
+      mine: row.account_id === viewerId,
+      createdAt: row.created_at,
+    };
+  }
+
+  /**
+   * Takes a listing, paying with one of your own Pokémon.
+   *
+   * Validates that your payment is something the seller actually asked for (or that they asked for anything),
+   * then swaps in one transaction: their listed Pokémon becomes yours, your payment becomes theirs.
+   */
+  buyListing(accountId: number, listingId: unknown, payWith: unknown): Result<{ got: string; gave: string }> {
+    if (!Number.isInteger(listingId) || !Number.isInteger(payWith)) return fail('Choose what to trade.');
+    const lid = listingId as number;
+    const pid = payWith as number;
+
+    const listing = this.db.raw.prepare("SELECT * FROM listings WHERE id = ? AND status = 'open'").get(lid) as
+      | { id: number; account_id: number; species_id: string; nickname: string | null; xp: number; wants: string }
+      | undefined;
+    if (!listing) return fail('That listing is no longer available.');
+    if (listing.account_id === accountId) return fail('That is your own listing.');
+
+    const payment = this.db.raw
+      .prepare('SELECT species_id, nickname, xp FROM collection WHERE id = ? AND account_id = ?')
+      .get(pid, accountId) as { species_id: string; nickname: string | null; xp: number } | undefined;
+    if (!payment) return fail('You do not own that Pokémon.');
+
+    let wants: string[] = [];
+    try {
+      const parsed = JSON.parse(listing.wants);
+      if (Array.isArray(parsed)) wants = parsed.filter((w): w is string => typeof w === 'string');
+    } catch { /* treat as "any" */ }
+    if (wants.length > 0 && !wants.includes(payment.species_id)) {
+      return fail('The seller is not asking for that Pokémon.');
+    }
+
+    const stamp = this.now().toISOString();
+    this.db.raw.prepare('BEGIN').run();
+    try {
+      this.db.raw.prepare("UPDATE listings SET status = 'sold' WHERE id = ?").run(lid);
+      this.db.raw.prepare('DELETE FROM collection WHERE id = ? AND account_id = ?').run(pid, accountId);
+      const insert = this.db.raw.prepare(
+        'INSERT INTO collection (account_id, species_id, nickname, xp, acquired_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      insert.run(accountId, listing.species_id, listing.nickname, listing.xp, stamp);
+      insert.run(listing.account_id, payment.species_id, payment.nickname, payment.xp, stamp);
+      this.db.raw.prepare('COMMIT').run();
+      return ok({ got: listing.species_id, gave: payment.species_id });
+    } catch {
+      this.db.raw.prepare('ROLLBACK').run();
+      return fail('The trade could not be completed.');
+    }
+  }
+
+  /** Withdraws your own listing, returning the Pokémon to your collection. */
+  cancelListing(accountId: number, listingId: unknown): Result<{ ok: true }> {
+    if (!Number.isInteger(listingId)) return fail('Choose a listing.');
+    const lid = listingId as number;
+    const listing = this.db.raw
+      .prepare("SELECT * FROM listings WHERE id = ? AND status = 'open' AND account_id = ?")
+      .get(lid, accountId) as { species_id: string; nickname: string | null; xp: number } | undefined;
+    if (!listing) return fail('That listing is not yours, or is no longer open.');
+
+    this.db.raw.prepare('BEGIN').run();
+    try {
+      this.db.raw.prepare("UPDATE listings SET status = 'cancelled' WHERE id = ?").run(lid);
+      this.db.raw
+        .prepare('INSERT INTO collection (account_id, species_id, nickname, xp, acquired_at) VALUES (?, ?, ?, ?, ?)')
+        .run(accountId, listing.species_id, listing.nickname, listing.xp, this.now().toISOString());
+      this.db.raw.prepare('COMMIT').run();
+      return ok({ ok: true });
+    } catch {
+      this.db.raw.prepare('ROLLBACK').run();
+      return fail('The listing could not be withdrawn.');
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -552,6 +798,65 @@ export class Accounts {
     return this.collection(acc.id).map((c) => ({ id: c.id, species: c.species, nickname: c.nickname }));
   }
 
+  // -------------------------------------------------------------------------
+  // Post-match encounters
+  // -------------------------------------------------------------------------
+
+  /**
+   * Issues an encounter for a finished game, replacing any unclaimed one.
+   *
+   * Called only from the paths that record a real result, which is what makes the offer trustworthy: a client
+   * cannot ask for an encounter, so it cannot reroll one either. Advances the pity counter unless the offer
+   * itself contained something rare.
+   */
+  private issueEncounter(accountId: number, outcome: MatchOutcome): void {
+    if (!this.rollEncounter || !this.satisfiesPity) return;
+    const row = this.db.raw.prepare('SELECT pity FROM profiles WHERE account_id = ?').get(accountId) as
+      | { pity: number }
+      | undefined;
+    if (!row) return;
+
+    const seed = `${accountId}:${this.now().toISOString()}:${outcome}`;
+    const encounter = this.rollEncounter(outcome, seed, row.pity);
+    const nextPity = this.satisfiesPity(encounter.choices) ? 0 : row.pity + 1;
+
+    this.db.raw
+      .prepare('UPDATE profiles SET encounter = ?, pity = ? WHERE account_id = ?')
+      .run(JSON.stringify(encounter), nextPity, accountId);
+  }
+
+  /** The account's unclaimed encounter, or null. */
+  pendingEncounter(accountId: number): Encounter | null {
+    const row = this.db.raw.prepare('SELECT encounter FROM profiles WHERE account_id = ?').get(accountId) as
+      | { encounter: string | null }
+      | undefined;
+    if (!row?.encounter) return null;
+    try {
+      return JSON.parse(row.encounter) as Encounter;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Claims one choice from the pending encounter, by index.
+   *
+   * By index rather than by species id, deliberately: the offer is the server's, so a client can only ever
+   * take something it was actually offered. Clears the encounter, so each is claimed once.
+   */
+  claimEncounter(accountId: number, index: unknown): Result<{ species: string; profile: PublicProfile }> {
+    const encounter = this.pendingEncounter(accountId);
+    if (!encounter) return fail('You have no Pokémon waiting.');
+    if (!Number.isInteger(index)) return fail('Choose one of the Pokémon offered.');
+    const i = index as number;
+    const species = encounter.choices[i];
+    if (species === undefined) return fail('Choose one of the Pokémon offered.');
+
+    this.db.raw.prepare('UPDATE profiles SET encounter = NULL WHERE account_id = ?').run(accountId);
+    this.grant(accountId, species);
+    return ok({ species, profile: this.publicProfile(accountId)! });
+  }
+
   /** Grants a species to an account — a post-match reward, a starter pick, or a trade in. */
   grant(accountId: number, species: string): void {
     this.db.raw
@@ -559,21 +864,6 @@ export class Accounts {
       .run(accountId, species, this.now().toISOString());
   }
 
-  /**
-   * Claims a post-match reward Pokémon into the collection, returning the updated profile.
-   *
-   * Validation is deliberately light: the collection has zero competitive weight (SPEC §17.11 — ranked is
-   * point-buy from a shared pool, so collection depth is worth nothing in a match), so a spare grant is a
-   * completionist reward, not an advantage. The id shape is checked and the total is capped to keep the
-   * table from growing without bound; duplicates are allowed, because you own individuals (§17.8).
-   */
-  claimSpecies(accountId: number, species: unknown): Result<PublicProfile> {
-    if (typeof species !== 'string' || !/^[a-z0-9.'-]{1,40}$/.test(species)) return fail('Unknown Pokémon.');
-    const { n } = this.db.raw.prepare('SELECT COUNT(*) AS n FROM collection WHERE account_id = ?').get(accountId) as { n: number };
-    if (n >= 2000) return fail('Your collection is full.');
-    this.grant(accountId, species);
-    return ok(this.publicProfile(accountId)!);
-  }
 
   /**
    * Records a rated match result and updates the account's rating, games count, and badge case.
@@ -618,6 +908,12 @@ export class Accounts {
 
     // A win trains the team toward evolution (§17.8).
     if (score === 1) this.grantTeamXp(accountId);
+
+    // Every finished game yields an encounter — a win offers more and better, a loss fewer and worse, but
+    // never nothing: the player who is losing is the one who most needs new Pokémon to try.
+    if (!rematch) {
+      this.issueEncounter(accountId, score === 1 ? 'win' : score === 0 ? 'loss' : 'draw');
+    }
 
     return ok(this.publicProfile(accountId)!);
   }

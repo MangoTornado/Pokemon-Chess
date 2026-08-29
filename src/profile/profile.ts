@@ -67,6 +67,27 @@ export interface FriendView {
   readonly online: boolean;
 }
 
+/** A Pokémon listed on the marketplace, as shown to any browser. */
+export interface ListingView {
+  readonly id: number;
+  readonly seller: string;
+  readonly species: string;
+  readonly nickname: string | null;
+  /** Species the seller will accept; empty means any Pokémon. */
+  readonly wants: readonly string[];
+  /** True when the viewer is the seller, so the UI offers Cancel rather than Trade. */
+  readonly mine: boolean;
+  readonly createdAt: string;
+}
+
+/** What a completed wonder trade gave and got. */
+export interface WonderResult {
+  readonly gave: string;
+  readonly got: string;
+  /** True when the deposit is waiting in the pool because nobody else's was available yet. */
+  readonly waiting: boolean;
+}
+
 /** A validation outcome: the cleaned value, or an error message for the field. */
 export type FieldResult =
   | { readonly ok: true; readonly value: string }

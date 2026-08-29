@@ -82,8 +82,13 @@ export interface SpeciesEntry {
   changesFrom?: string;
   /** Name of this species' G-Max move, if it has one. */
   canGigantamax?: string;
-  /** e.g. `Legendary`, `Sub-Legendary`, `Mythical`, `Paradox`, `Restricted Legendary`. */
-  tags: string[];
+  /**
+   * e.g. `Legendary`, `Sub-Legendary`, `Mythical`, `Paradox`, `Restricted Legendary`.
+   *
+   * Absent for the great majority of species: the generator omits empty arrays, so a reader must treat a
+   * missing value as "no tags" rather than assume an array.
+   */
+  tags?: string[];
   gen: number;
   /** Smogon singles tier, useful as a rough power prior. */
   tier?: string;

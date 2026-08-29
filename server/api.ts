@@ -136,12 +136,20 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     return json(200, { collection: accounts.collection(accountId) });
   }
 
-  if (method === 'POST' && path === '/api/collection/claim') {
+  // The pending post-match encounter. Read-only: an offer is issued by the server when a real game ends, so
+  // a client can neither request one nor reroll it.
+  if (method === 'GET' && path === '/api/encounter') {
     const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
     if (accountId === null) return json(401, { error: 'Not signed in.' });
-    const result = accounts.claimSpecies(accountId, asObject(req.body).species);
+    return json(200, { encounter: accounts.pendingEncounter(accountId) });
+  }
+
+  if (method === 'POST' && path === '/api/encounter/claim') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const result = accounts.claimEncounter(accountId, asObject(req.body).index);
     if (!result.ok) return json(400, result.error);
-    return json(200, { profile: result.value });
+    return json(200, result.value);
   }
 
   if (method === 'POST' && path === '/api/collection/evolve') {
@@ -151,6 +159,49 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     const result = accounts.evolve(accountId, b.id, b.target);
     if (!result.ok) return json(400, result.error);
     return json(200, { profile: result.value });
+  }
+
+  // ---- Wonder trade ----
+  if (method === 'GET' && path === '/api/wonder') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    return json(200, { pool: accounts.wonderPoolStatus(accountId) });
+  }
+
+  if (method === 'POST' && path === '/api/wonder') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const result = accounts.wonderTrade(accountId, asObject(req.body).id);
+    if (!result.ok) return json(400, result.error);
+    return json(200, result.value);
+  }
+
+  // ---- Marketplace ----
+  if (method === 'GET' && path === '/api/listings') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    return json(200, { listings: accounts.listings(accountId) });
+  }
+
+  if (method === 'POST' && path === '/api/listings') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const b = asObject(req.body);
+    const result = accounts.createListing(accountId, b.id, b.wants);
+    if (!result.ok) return json(400, result.error);
+    return json(201, { listing: result.value });
+  }
+
+  const listingMatch = /^\/api\/listings\/(\d+)\/(buy|cancel)$/.exec(path);
+  if (method === 'POST' && listingMatch) {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const id = Number(listingMatch[1]);
+    const result = listingMatch[2] === 'buy'
+      ? accounts.buyListing(accountId, id, asObject(req.body).payWith)
+      : accounts.cancelListing(accountId, id);
+    if (!result.ok) return json(400, result.error);
+    return json(200, result.value);
   }
 
   // ---- Friends ----

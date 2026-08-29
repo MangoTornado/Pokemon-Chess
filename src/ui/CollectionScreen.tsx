@@ -4,7 +4,8 @@
  *
  * You own *individuals*, not species (DIRECTION §15), so duplicates are real fieldable pieces and the grid
  * shows a count per species. The Pokédex figure is distinct species owned against the full 1025 — the
- * long-tail completionist pursuit. Rewards flow in from the {@link RewardChooser}, offered after a win.
+ * long-tail completionist pursuit. New Pokémon arrive from post-match encounters (`EncounterCard`), from
+ * evolution, and from the market.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -13,6 +14,7 @@ import type { Dex } from '../data/dex.ts';
 import type { BattleType, SpeciesEntry } from '../data/schema.ts';
 import { api } from '../net/api.ts';
 import type { CollectionEntry } from '../net/api.ts';
+import { EncounterCard } from './EncounterCard.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { TYPE_COLORS } from './typeColors.ts';
 
@@ -117,6 +119,9 @@ export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: Collection
       </div>
 
       {error && <p style={{ color: '#f85149' }}>{error}</p>}
+
+      {/* Anything waiting from your last game gets claimed here too, not only on the match screen. */}
+      <EncounterCard dex={dex} onClaimed={refresh} />
 
       {/* Filters. Only offered once there is enough to filter, so a new account sees a clean screen. */}
       {(entries?.length ?? 0) > 8 && (
@@ -226,92 +231,6 @@ export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: Collection
 }
 
 // ---------------------------------------------------------------------------
-// Post-win reward
-// ---------------------------------------------------------------------------
-
-export interface RewardChooserProps {
-  dex: Dex;
-  /** A stable key (e.g. the match seed) so the same three choices persist across re-renders of one win. */
-  rollKey: string;
-  claim: (species: string) => Promise<{ error: string } | null>;
-}
-
-/**
- * Offers three Pokémon to catch after a win. The three are rolled once per win from the base formes; a
- * pick is claimed into the collection and the panel confirms the catch.
- */
-export function RewardChooser({ dex, rollKey, claim }: RewardChooserProps) {
-  const choices = useMemo(() => rollThree(dex, rollKey), [dex, rollKey]);
-  const [claimed, setClaimed] = useState<SpeciesEntry | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  if (claimed) {
-    return (
-      <div style={panel}>
-        <span aria-hidden style={{ fontSize: '1.4rem' }}>🎉</span>
-        <strong>{claimed.name} was added to your collection!</strong>
-      </div>
-    );
-  }
-
-  const pick = async (s: SpeciesEntry) => {
-    setBusy(true);
-    setError(null);
-    const err = await claim(s.id);
-    setBusy(false);
-    if (err) setError(err.error);
-    else setClaimed(s);
-  };
-
-  return (
-    <div style={{ ...panel, flexDirection: 'column', alignItems: 'stretch' }}>
-      <strong>Choose a Pokémon to catch</strong>
-      {error && <span style={{ color: '#f85149', fontSize: '0.82rem' }}>{error}</span>}
-      <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-        {choices.map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            disabled={busy}
-            onClick={() => pick(s)}
-            style={{
-              display: 'grid', placeItems: 'center', gap: '0.15rem', padding: '0.6rem 0.8rem', flex: 1, minWidth: 96,
-              background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 9, cursor: busy ? 'default' : 'pointer',
-            }}
-          >
-            <div style={{ height: 40, display: 'grid', placeItems: 'center' }}>
-              <PokemonIcon species={s} />
-            </div>
-            <span style={{ fontSize: '0.78rem', fontWeight: 700 }}>{s.name}</span>
-            <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>{s.types.join('/')}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** Three distinct base-forme species, chosen from a stable string key so the offer is steady per win. */
-function rollThree(dex: Dex, key: string): SpeciesEntry[] {
-  // A small string hash seeds a simple LCG, so the same win always offers the same three.
-  let h = 0x811c9dc5;
-  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 0x01000193); }
-  const pool = dex.baseFormes.filter((s) => s.types.length > 0);
-  const picks: SpeciesEntry[] = [];
-  const seen = new Set<number>();
-  let state = h >>> 0;
-  while (picks.length < 3 && seen.size < pool.length) {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    const idx = state % pool.length;
-    if (seen.has(idx)) continue;
-    seen.add(idx);
-    picks.push(pool[idx]!);
-  }
-  return picks;
-}
-
-// ---------------------------------------------------------------------------
 
 function Head({ title, onExit }: { title: string; onExit: () => void }) {
   return (
@@ -336,10 +255,6 @@ const selectStyle = {
   borderRadius: 7, padding: '0.4rem 0.5rem', fontSize: '0.85rem',
 } as const;
 
-const panel = {
-  display: 'flex', alignItems: 'center', gap: '0.7rem',
-  background: 'var(--bg-raised)', border: '1px solid var(--accent)', borderRadius: 10, padding: '0.85rem 1rem',
-} as const;
 const ghost = {
   background: 'transparent', color: 'var(--text)', border: '1px solid var(--border)',
   borderRadius: 7, padding: '0.4rem 0.9rem', cursor: 'pointer', fontWeight: 600,

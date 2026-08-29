@@ -27,6 +27,7 @@ import { OnlineScreen } from './OnlineScreen.tsx';
 import { SandboxScreen } from './SandboxScreen.tsx';
 import { CollectionScreen } from './CollectionScreen.tsx';
 import { TradeScreen } from './TradeScreen.tsx';
+import { MarketScreen } from './MarketScreen.tsx';
 import { FriendsScreen } from './FriendsScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
 import { api } from '../net/api.ts';
@@ -47,6 +48,7 @@ type Screen =
   | { readonly kind: 'sandbox' }
   | { readonly kind: 'collection' }
   | { readonly kind: 'trade' }
+  | { readonly kind: 'market' }
   | { readonly kind: 'friends' }
   | { readonly kind: 'gym'; readonly gymId: string }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
@@ -117,12 +119,21 @@ export function App() {
           gym={GYM_BY_ID.get(screen.gymId)!}
           ladder={ladder}
           onExit={() => setScreen({ kind: 'ladder' })}
-          {...(session.profile ? { onClaimReward: session.claimReward } : {})}
+          {...(session.profile ? { signedIn: true } : {})}
         />
       )}
 
       {screen.kind === 'collection' && (
         <CollectionScreen
+          dex={dex}
+          signedIn={!!session.profile}
+          onExit={() => setScreen({ kind: 'title' })}
+          onSignIn={() => setScreen({ kind: 'account' })}
+        />
+      )}
+
+      {screen.kind === 'market' && (
+        <MarketScreen
           dex={dex}
           signedIn={!!session.profile}
           onExit={() => setScreen({ kind: 'title' })}
@@ -179,6 +190,7 @@ export function App() {
           onSandbox={() => setScreen({ kind: 'sandbox' })}
           onCollection={() => setScreen({ kind: 'collection' })}
           onTrade={() => setScreen({ kind: 'trade' })}
+          onMarket={() => setScreen({ kind: 'market' })}
           onFriends={() => setScreen({ kind: 'friends' })}
         />
       )}
@@ -261,6 +273,7 @@ function TitleScreen({
   onSandbox,
   onCollection,
   onTrade,
+  onMarket,
   onFriends,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
@@ -271,6 +284,7 @@ function TitleScreen({
   onSandbox: () => void;
   onCollection: () => void;
   onTrade: () => void;
+  onMarket: () => void;
   onFriends: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
@@ -412,6 +426,9 @@ function TitleScreen({
         </button>
         <button type="button" onClick={onTrade} style={linkStyle}>
           Trade
+        </button>
+        <button type="button" onClick={onMarket} style={linkStyle}>
+          Market
         </button>
         <button type="button" onClick={onSandbox} style={linkStyle}>
           Sandbox — AI-vs-AI batch playtests

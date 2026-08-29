@@ -10,7 +10,7 @@
  * both the client and the API, so the origin is always the same and no base URL is needed.
  */
 
-import type { FriendView, PublicProfile, TradeView } from '../profile/profile.ts';
+import type { FriendView, ListingView, PublicProfile, TradeView, WonderResult } from '../profile/profile.ts';
 import type { Avatar, TrainerOption } from '../profile/avatar.ts';
 
 export interface ApiError {
@@ -59,6 +59,14 @@ export interface CollectionEntry {
 }
 
 /** A live online match's state, mirroring the server's `RoomView`. */
+/** A post-match encounter, as offered by the server. */
+export interface EncounterView {
+  readonly outcome: 'win' | 'draw' | 'loss';
+  readonly choices: readonly string[];
+  /** True when the pity counter guaranteed a rare in this offer. */
+  readonly pity: boolean;
+}
+
 export interface RoomView {
   readonly id: string;
   readonly code: string | null;
@@ -95,8 +103,24 @@ export const api = {
 
   collection: () => call<{ collection: CollectionEntry[] }>('GET', '/api/collection'),
 
-  /** Claims a post-match reward Pokémon into the collection; returns the updated profile. */
-  claimReward: (species: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/claim', { species }),
+  // --- Post-match encounters ---
+  /** The Pokémon waiting to be claimed after your last game, if any. */
+  encounter: () => call<{ encounter: EncounterView | null }>('GET', '/api/encounter'),
+  /** Claims one of the offered Pokémon, by its index in the offer. */
+  claimEncounter: (index: number) =>
+    call<{ species: string; profile: PublicProfile }>('POST', '/api/encounter/claim', { index }),
+
+  // --- Wonder trade ---
+  wonderPool: () => call<{ pool: { total: number; yours: number } }>('GET', '/api/wonder'),
+  wonderTrade: (id: number) => call<WonderResult>('POST', '/api/wonder', { id }),
+
+  // --- Marketplace ---
+  listings: () => call<{ listings: ListingView[] }>('GET', '/api/listings'),
+  createListing: (id: number, wants: string[]) =>
+    call<{ listing: ListingView }>('POST', '/api/listings', { id, wants }),
+  buyListing: (id: number, payWith: number) =>
+    call<{ got: string; gave: string }>('POST', `/api/listings/${id}/buy`, { payWith }),
+  cancelListing: (id: number) => call<{ ok: true }>('POST', `/api/listings/${id}/cancel`),
 
   /** Evolves a trained individual into one of its evolutions. */
   evolve: (id: number, target: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/evolve', { id, target }),
