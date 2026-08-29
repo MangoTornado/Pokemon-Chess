@@ -64,6 +64,14 @@ function artFor(game: PokemonChess, pieceId: number, options: ReadonlyMap<Square
   return null;
 }
 
+/** The Terastallisation offered for a piece, if any. Like an art, its destination is its own square. */
+function teraFor(game: PokemonChess, pieceId: number, options: ReadonlyMap<Square, VariantMove>): VariantMove | null {
+  for (const option of options.values()) {
+    if (option.tera && game.position.pieceAt(option.move.from)?.id === pieceId) return option;
+  }
+  return null;
+}
+
 /** One line on what casting this art will do. */
 function artDescription(art: Art): string {
   if (art.effect.kind === 'weather') return `Sets ${WEATHER_LABEL[art.effect.weather].toLowerCase()} over the board`;
@@ -403,7 +411,7 @@ export function GameBoard({
               const tier = option?.effectiveness != null ? tierOf(option.effectiveness) : null;
 
               const label = piece && pokemon && live
-                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(pokemon.species)?.name ?? pokemon.species}, ${pokemon.type} type, ${live.hp} of ${live.maxHp} HP${
+                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(pokemon.species)?.name ?? pokemon.species}, ${game.battleTypeOf(piece.id)} type, ${live.hp} of ${live.maxHp} HP${
                     tier ? `. Capture forecast: ${TIER_PRESENTATION[tier].label}` : ''
                   }${denial ? `. Cannot be captured: ${denial}` : ''}`
                 : `${squareName(square)}: empty${canMoveHere ? '. Legal move' : ''}`;
@@ -432,13 +440,15 @@ export function GameBoard({
                   {piece && pokemon && live && (
                     <BoardPiece
                       species={dex.requireSpecies(pokemon.species)}
-                      type={pokemon.type}
+                      // The type it *fights* as, so a Terastallised piece's ring reads its new type.
+                      type={game.battleTypeOf(piece.id)}
                       cls={piece.cls}
                       side={piece.side}
                       hp={live.hp}
                       maxHp={live.maxHp}
                       {...(status ? { status } : {})}
                       {...(stages ? { stages } : {})}
+                      {...(game.hasTerastallised(piece.id) ? { terastallised: true } : {})}
                       {...(motion.get(square) ? { motion: motion.get(square)! } : {})}
                     />
                   )}
@@ -741,7 +751,7 @@ function SidePanel({
                   {selectedLive.maxHp} HP
                 </span>
               </div>
-              <TypePill type={selectedPokemon.type} />
+              <TypePill type={game.battleTypeOf(selectedPiece.id)} />
             </div>
 
             {/* Ability and item change how a capture resolves, so they belong on the piece card — an effect
@@ -768,6 +778,35 @@ function SidePanel({
                   </span>
                 </span>
               </button>
+            )}
+
+            {/* Terastallisation — one per side per game, so the panel says so plainly. */}
+            {teraFor(game, selectedPiece.id, options) && (
+              <button
+                type="button"
+                onClick={() => { const t = teraFor(game, selectedPiece.id, options); if (t) onCast(t); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.4rem', textAlign: 'left',
+                  background: `linear-gradient(90deg, ${TYPE_COLORS[teraFor(game, selectedPiece.id, options)!.tera!]}44, var(--bg))`,
+                  border: `1px solid ${TYPE_COLORS[teraFor(game, selectedPiece.id, options)!.tera!]}`,
+                  borderRadius: 8, padding: '0.4rem 0.55rem', cursor: 'pointer', color: 'var(--text)',
+                  fontSize: '0.78rem',
+                }}
+              >
+                <span aria-hidden>💠</span>
+                <span style={{ display: 'grid' }}>
+                  <strong>Terastallise → {teraFor(game, selectedPiece.id, options)!.tera}</strong>
+                  <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>
+                    Changes what it resists and what it hits hard — once per game.
+                  </span>
+                </span>
+              </button>
+            )}
+
+            {game.hasTerastallised(selectedPiece.id) && (
+              <span style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
+                💠 Terastallised — fighting as {game.battleTypeOf(selectedPiece.id)}
+              </span>
             )}
 
             {/* Stat stages, with the effective Speed spelled out: Speed decides who swings first, so a drop

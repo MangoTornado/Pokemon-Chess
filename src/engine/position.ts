@@ -135,6 +135,22 @@ export function encodeArt(square: Square, cls: PieceClass): EncodedMove {
 /** Whether an encoded action is an art cast rather than a chess move. */
 export const isArtMove = (move: EncodedMove): boolean => (move & MOVE_ART) !== 0;
 
+/**
+ * Not a chess move either: Terastallisation, where a piece changes the type it fights and defends as.
+ *
+ * Encoded the same way as an art cast (`from === to`), on its own flag bit, for the same reason: the action
+ * list stays a list of numbers and replay, validation and the online protocol need no new format.
+ */
+export const MOVE_TERA = 1 << 26;
+
+/** Encodes a Terastallisation by the piece on `square`. */
+export function encodeTera(square: Square, cls: PieceClass): EncodedMove {
+  return square | (square << 6) | (PIECE_CLASSES.indexOf(cls) << 12) | (NO_CLASS << 15) | (NO_CLASS << 18) | MOVE_TERA;
+}
+
+/** Whether an encoded action is a Terastallisation. */
+export const isTeraMove = (move: EncodedMove): boolean => (move & MOVE_TERA) !== 0;
+
 export const moveFrom = (move: EncodedMove): Square => move & 63;
 export const moveTo = (move: EncodedMove): Square => (move >>> 6) & 63;
 

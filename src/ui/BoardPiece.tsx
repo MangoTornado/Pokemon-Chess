@@ -34,6 +34,13 @@ export interface BoardPieceProps {
   /** Stat stages, shown as a small ▲/▼ marker — a Speed drop changes who swings first, so it must be visible. */
   stages?: StatStages;
   /**
+   * True when this piece has Terastallised.
+   *
+   * Its `type` prop is already the type it now fights as, so the ring colour is correct on its own; this adds
+   * a crystal so the change is legible as a *transformation* rather than a mis-draft.
+   */
+  terastallised?: boolean;
+  /**
    * Transient battle motion — the attacker's lunge at its target, or a recoil from a blow that just landed.
    *
    * Applied to a wrapper around the sprite rather than the square, so it composes with the status tilt and
@@ -61,7 +68,7 @@ function hpColor(fraction: number): string {
   return '#f85149';
 }
 
-export function BoardPiece({ species, type, cls, side, hp, maxHp, status, stages, motion }: BoardPieceProps) {
+export function BoardPiece({ species, type, cls, side, hp, maxHp, status, stages, terastallised, motion }: BoardPieceProps) {
   const typeColor = TYPE_COLORS[type];
   const isWhite = side === 'white';
   const showHp = hp !== undefined && maxHp !== undefined && maxHp > 0;
@@ -173,6 +180,21 @@ export function BoardPiece({ species, type, cls, side, hp, maxHp, status, stages
               transition: 'width 220ms ease, background 220ms ease',
             }}
           />
+        </span>
+      )}
+
+      {/* A Terastallised piece wears a crystal in its new type's colour. */}
+      {terastallised && (
+        <span
+          aria-hidden
+          title={`Terastallised — fighting as ${type}`}
+          style={{
+            position: 'absolute', top: '3%', left: '4%', zIndex: 3,
+            fontSize: '15cqmin', lineHeight: 1, color: typeColor,
+            textShadow: '0 1px 2px rgba(0,0,0,0.95), 0 0 6px rgba(255,255,255,0.5)',
+          }}
+        >
+          ◆
         </span>
       )}
 

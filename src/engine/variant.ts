@@ -34,7 +34,7 @@ import type { Dex } from '../data/dex.ts';
 import { fileOf } from './board.ts';
 import type { PieceClass, Side, Square } from './board.ts';
 import { Position } from './position.ts';
-import { encodeArt, isArtMove } from './position.ts';
+import { encodeArt, encodeTera, isArtMove, isTeraMove } from './position.ts';
 import type { Move, Piece } from './position.ts';
 import { Rng } from './rng.ts';
 import type { RngState } from './rng.ts';
@@ -81,12 +81,21 @@ export interface PokemonLoadout {
   /** The held item (a real dex item id). Scales blows, reduces damage taken, or heals at Checkup. */
   readonly item?: string;
   /**
+   * The type this piece becomes if it Terastallises.
+   *
+   * Type is this game's core mechanic, so changing it is the most consequential transformation available:
+   * a Tera'd piece resists different things and gains STAB on a different move. Auto-picked at draft time.
+   */
+  readonly teraType?: BattleType;
+  /**
    * The field move this piece can cast instead of moving (weather, or a band of hazards).
    *
    * Absent for most pieces, which is the point: a team that can shape the field is built deliberately.
    * Auto-picked from the species' learnset when the loadout does not name one.
    */
   readonly art?: Art;
+  /** Set when this action Terastallises the piece — changing the type it fights and defends as. */
+  readonly tera?: BattleType;
 }
 
 /** Loadouts keyed by the chess piece's persistent id, which survives movement and promotion. */
@@ -135,6 +144,8 @@ export interface VariantMove {
    * `MOVE_ART` flag so a replay reproduces it.
    */
   readonly art?: Art;
+  /** Set when this action Terastallises the piece — changing the type it fights and defends as. */
+  readonly tera?: BattleType;
 }
 
 export interface ResolvedMove {
@@ -271,6 +282,13 @@ export class PokemonChess {
   /** Weather over the board and hazards laid on it — the battlefield's own state. */
   readonly field: Field;
   /**
+   * Pieces that have Terastallised, and so fight as their Tera type.
+   *
+   * One per side per game, as in the games — which makes it a decision about *when*, not just whether. The
+   * set is small and immutable, so it threads through game state like the rest.
+   */
+  private readonly tera: ReadonlySet<number>;
+  /**
    * The field move each piece can cast, or null — computed once at creation.
    *
    * Static per piece, exactly like its stats and its moveset, so it is built in `create` and carried
@@ -297,6 +315,7 @@ export class PokemonChess {
     statuses: ReadonlyMap<number, PieceStatus>,
     stages: ReadonlyMap<number, StatStages>,
     field: Field,
+    tera: ReadonlySet<number>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -312,6 +331,7 @@ export class PokemonChess {
     this.statuses = statuses;
     this.stages = stages;
     this.field = field;
+    this.tera = tera;
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -359,6 +379,7 @@ export class PokemonChess {
       new Map(), // statuses
       new Map(), // stat stages
       options.weather ? { weather: { kind: options.weather, turns: Infinity }, hazards: new Map() } : EMPTY_FIELD,
+      new Set(), // nobody has Terastallised yet
       new Rng(options.seed).state,
       null,
       [],
@@ -407,9 +428,8 @@ export class PokemonChess {
    * A king is never immune as a defender: a 0× reads as exactly 1×, so a king can always be attacked.
    * That closes the untouchable-king exploit (a Ghost king a Normal army could never threaten).
    */
-  private multiplierAgainst(attackerType: BattleType, defenderId: number): number {
-    const defender = this.loadoutOf(defenderId);
-    const raw = effectiveness(attackerType, defender.type);
+  multiplierAgainst(attackerType: BattleType, defenderId: number): number {
+    const raw = effectiveness(attackerType, this.battleTypeOf(defenderId));
     const piece = this.pieceById(defenderId);
     if (piece?.cls === 'king' && raw === 0) return 1;
     return raw;
@@ -493,6 +513,28 @@ export class PokemonChess {
       });
     }
 
+    // Terastallisation: one per side per game, so it is a decision about *when*. Offered only to a piece
+    // whose Tera type would actually differ from the type it is already fighting as.
+    if (pending === null && this.teraAvailable(this.position.turn)) {
+      for (const { square, piece } of this.position.allPieces()) {
+        if (piece.side !== this.position.turn) continue;
+        if (movementLock(this.statusOf(piece.id)) !== null) continue;
+        const teraType = this.loadoutOf(piece.id).teraType;
+        if (!teraType || teraType === this.battleTypeOf(piece.id)) continue;
+        out.push({
+          move: this.pseudoMoveFor(square, piece.cls, encodeTera(square, piece.cls)),
+          attacker: this.loadoutOf(piece.id),
+          defender: null,
+          effectiveness: null,
+          forecast: 'quiet',
+          slot: 0,
+          moveName: `Terastallise → ${teraType}`,
+          isExtraMove: false,
+          tera: teraType,
+        });
+      }
+    }
+
     // Art casts: a piece may spend its turn shaping the field instead of moving. Never offered as a bonus
     // move, because the bonus exists to continue an assault, and never while the caster is incapacitated.
     if (pending === null) {
@@ -503,7 +545,7 @@ export class PokemonChess {
         if (!art) continue;
         if (!this.artWouldChangeAnything(art, piece.side, square)) continue;
         out.push({
-          move: this.artMoveFor(square, piece.cls),
+          move: this.pseudoMoveFor(square, piece.cls, encodeArt(square, piece.cls)),
           attacker: this.loadoutOf(piece.id),
           defender: null,
           effectiveness: null,
@@ -579,6 +621,9 @@ export class PokemonChess {
     const dStats = this.statsOf(defenderId);
     const move = this.movesetOf(attackerId)[slot] ?? this.movesetOf(attackerId)[0]!;
 
+    // Read the *fighting* types, which differ from the declared ones for a Terastallised piece.
+    const aType = this.battleTypeOf(attackerId);
+    const dType = this.battleTypeOf(defenderId);
     const aPhysical = move.category === 'Physical';
     const dPhysical = dStats.atk >= dStats.spa;
     const aCategory = aPhysical ? 'Physical' : 'Special';
@@ -586,7 +631,7 @@ export class PokemonChess {
 
     // Held items scale the blow being thrown and reduce the blow being taken (SPEC §5 steps 2/13/14).
     const aItem = offensiveItemMods(a.item, move.type, aCategory, effectiveness(move.type, d.type) > 1);
-    const dItem = offensiveItemMods(d.item, d.type, dCategory, effectiveness(d.type, a.type) > 1);
+    const dItem = offensiveItemMods(d.item, dType, dCategory, effectiveness(dType, aType) > 1);
     const aDefend = defensiveItemMod(a.item, dCategory, this.isNfe(a.species));
     const dDefend = defensiveItemMod(d.item, aCategory, this.isNfe(d.species));
 
@@ -596,16 +641,16 @@ export class PokemonChess {
     const dStages = this.stagesOf(defenderId);
 
     const atk: DamageInput = {
-      attackerType: a.type,
+      attackerType: aType,
       moveType: move.type,
-      defenderType: d.type,
+      defenderType: dType,
       category: aCategory,
       basePower: move.basePower,
       offensiveStat: aPhysical ? aStats.atk : aStats.spa,
       defensiveStat: aPhysical ? dStats.def : dStats.spd,
       offensiveStage: stageOf(aStages, aPhysical ? 'atk' : 'spa'),
       defensiveStage: stageOf(dStages, aPhysical ? 'def' : 'spd'),
-      stab: move.type === a.type,
+      stab: move.type === aType,
       // A burned piece hits weaker with physical moves — the games' Attack halving, as a Clash penalty.
       burned: this.statusOf(attackerId).burned !== undefined,
       basePowerMod: aItem.basePowerMod,
@@ -614,9 +659,9 @@ export class PokemonChess {
       weatherMod: weatherDamageMod(this.field.weather, move.type),
     };
     const def: DamageInput = {
-      attackerType: d.type,
-      moveType: d.type,
-      defenderType: a.type,
+      attackerType: dType,
+      moveType: dType,
+      defenderType: aType,
       category: dCategory,
       basePower: MELEE_BASE_POWER,
       offensiveStat: dPhysical ? dStats.atk : dStats.spa,
@@ -627,7 +672,7 @@ export class PokemonChess {
       basePowerMod: dItem.basePowerMod,
       attackerFinalMod: dItem.attackerFinalMod,
       defenderFinalMod: aDefend,
-      weatherMod: weatherDamageMod(this.field.weather, d.type),
+      weatherMod: weatherDamageMod(this.field.weather, dType),
     };
     return { atk, def };
   }
@@ -721,6 +766,32 @@ export class PokemonChess {
     const attackerId = moverPiece.id;
     const attacker = this.loadoutOf(attackerId);
 
+    // Terastallisation: the piece changes the type it fights as and the turn passes. No board change, and no
+    // Clash, so it cannot hurt anyone by itself — its whole effect is on every exchange afterwards.
+    if (isTeraMove(move.encoded)) {
+      const nextTera = new Set(this.tera);
+      nextTera.add(attackerId);
+      const resolved: ResolvedMove = {
+        move, side, attacker, defender: null, effectiveness: null,
+        verdict: 'quiet',
+        attackerHpAfter: this.liveOf(attackerId).hp,
+        defenderHpAfter: 0,
+        attackerMaxHp: this.liveOf(attackerId).maxHp,
+        defenderMaxHp: null,
+        crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
+        moveName: attacker.teraType ? `Terastallise → ${attacker.teraType}` : 'Terastallise',
+        moveType: attacker.teraType ?? null,
+        statusInflicted: null, boostsInflicted: null, recoilTaken: 0,
+        grantsBonus: false, removed: [], kingCaptured: false,
+      };
+      const nextPos = this.position.withTurnReturned();
+      const up = this.checkup(side, nextPos, this.live, this.statuses, this.field);
+      return {
+        game: this.next(up.position, up.live, up.statuses, this.stages, up.field, nextTera, nextRngState, null, resolved),
+        resolved,
+      };
+    }
+
     // An art cast: the piece stays put and shapes the field instead. No board change, so the turn is passed
     // explicitly, exactly as the REPEL verdict does.
     if (isArtMove(move.encoded)) {
@@ -740,7 +811,7 @@ export class PokemonChess {
       const nextPos = this.position.withTurnReturned();
       const up = this.checkup(side, nextPos, this.live, this.statuses, nextField);
       return {
-        game: this.next(up.position, up.live, up.statuses, this.stages, up.field, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, this.stages, up.field, this.tera, nextRngState, null, resolved),
         resolved,
       };
     }
@@ -764,7 +835,7 @@ export class PokemonChess {
       // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
       const up = this.checkup(side, arrival.position, arrival.live, arrival.statuses, this.field);
       return {
-        game: this.next(up.position, up.live, up.statuses, arrival.stages, up.field, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, arrival.stages, up.field, this.tera, nextRngState, null, resolved),
         resolved,
       };
     }
@@ -775,7 +846,7 @@ export class PokemonChess {
     // Resolve with the best legal slot — the same one the forecast and the offer used.
     const best = this.bestSlotAgainst(attackerId, defenderId);
     const slot = best?.slot ?? 0;
-    const mult = best?.multiplier ?? this.multiplierAgainst(attacker.type, defenderId);
+    const mult = best?.multiplier ?? this.multiplierAgainst(this.battleTypeOf(attackerId), defenderId);
 
     const aLive = this.liveOf(attackerId);
     const dLive = this.liveOf(defenderId);
@@ -909,12 +980,12 @@ export class PokemonChess {
     if (pending === null && !kingCaptured) {
       const up = this.checkup(side, posForNext, nextLive, nextStatus, this.field);
       return {
-        game: this.next(up.position, up.live, up.statuses, nextStages, up.field, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, nextStages, up.field, this.tera, nextRngState, null, resolved),
         resolved,
       };
     }
     return {
-      game: this.next(posForNext, nextLive, nextStatus, nextStages, this.field, nextRngState, pending, resolved),
+      game: this.next(posForNext, nextLive, nextStatus, nextStages, this.field, this.tera, nextRngState, pending, resolved),
       resolved,
     };
   }
@@ -925,13 +996,14 @@ export class PokemonChess {
     statuses: ReadonlyMap<number, PieceStatus>,
     stages: ReadonlyMap<number, StatStages>,
     field: Field,
+    tera: ReadonlySet<number>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
       position, this.loadout, this.rules, this.dex, this.stats, this.movesets, this.arts, live, statuses,
-      stages, field, rngState, pending, [...this.history, resolved],
+      stages, field, tera, rngState, pending, [...this.history, resolved],
     );
   }
 
@@ -980,8 +1052,7 @@ export class PokemonChess {
     const none = { position, live, statuses, stages, removed: [] as number[], status: null, boosts: null };
     if (!at) return none;
 
-    const loadout = this.loadoutOf(pieceId);
-    const toll = hazardToll(at, loadout.type);
+    const toll = hazardToll(at, this.battleTypeOf(pieceId));
     if (toll.damageFraction === 0 && !toll.status && !toll.boosts) return none;
 
     const nlive = new Map(live);
@@ -1050,12 +1121,16 @@ export class PokemonChess {
     };
   }
 
-  /** A synthetic `Move` describing an art cast, so the action list stays a list of encoded numbers. */
-  private artMoveFor(square: Square, cls: PieceClass): Move {
+  /**
+   * A synthetic `Move` for a non-board action (an art cast, a Terastallisation).
+   *
+   * `from === to` is the acting piece's own square, a combination no real chess move produces, so the two
+   * kinds can never be confused — and the action list stays a list of encoded numbers.
+   */
+  private pseudoMoveFor(square: Square, cls: PieceClass, encoded: number): Move {
     return {
       from: square, to: square, cls, captured: null, capturedSquare: null, promotion: null,
-      isCapture: false, isEnPassant: false, isDoublePush: false, castle: null,
-      encoded: encodeArt(square, cls),
+      isCapture: false, isEnPassant: false, isDoublePush: false, castle: null, encoded,
     };
   }
 
@@ -1079,6 +1154,31 @@ export class PokemonChess {
   /** The field move a piece can cast, or null. Auto-picked from its species when the loadout omits one. */
   artOf(pieceId: number): Art | null {
     return this.loadoutOf(pieceId).art ?? this.arts.get(pieceId) ?? null;
+  }
+
+  /**
+   * The type a piece actually fights and defends as right now.
+   *
+   * Every combat decision — effectiveness, STAB, immunity, hazard tolls, weather chip — must read this rather
+   * than the loadout's declared type, because a Terastallised piece has genuinely changed type.
+   */
+  battleTypeOf(pieceId: number): BattleType {
+    const loadout = this.loadoutOf(pieceId);
+    return this.tera.has(pieceId) && loadout.teraType ? loadout.teraType : loadout.type;
+  }
+
+  /** Whether this piece has Terastallised. */
+  hasTerastallised(pieceId: number): boolean {
+    return this.tera.has(pieceId);
+  }
+
+  /** Whether a side still has its one Terastallisation available. */
+  teraAvailable(side: Side): boolean {
+    for (const id of this.tera) {
+      if (this.pieceById(id)?.side === side) return false;
+    }
+    // A piece that Terastallised and then fell still spent the side's use, so check the history too.
+    return !this.history.some((h) => h.side === side && isTeraMove(h.move.encoded));
   }
 
   /** The stat stages a piece is carrying, defaulting to all zero. */
@@ -1126,7 +1226,7 @@ export class PokemonChess {
       if (piece.side !== side) continue;
 
       // Sandstorm scratches everything that does not resist it — the field's own upkeep, before items heal.
-      const chip = weatherChipFraction(field.weather, this.loadoutOf(piece.id).type);
+      const chip = weatherChipFraction(field.weather, this.battleTypeOf(piece.id));
       if (chip > 0) {
         const l = nlive.get(piece.id) ?? this.liveOf(piece.id);
         if (l.hp > 0) {
@@ -1233,13 +1333,14 @@ export class PokemonChess {
     const moves = this.movesetOf(attackerId);
     const defender = this.loadoutOf(defenderId);
     const isKing = this.pieceById(defenderId)?.cls === 'king';
+    const defenderType = this.battleTypeOf(defenderId);
     // A king is never immune (R6), so its ability grants no immunity as a defender either.
     const ability = isKing ? undefined : defender.ability;
     const wonderGuard = ability === WONDER_GUARD;
     let best: { slot: number; type: BattleType; multiplier: number } | null = null;
     for (let slot = 0; slot < moves.length; slot++) {
       const type = moves[slot]!.type;
-      let mult = effectiveness(type, defender.type);
+      let mult = effectiveness(type, defenderType);
       if (mult === 0 && isKing) mult = 1; // R6: a king is never immune as a defender
       // An ability can make the bearer immune to a whole type; Wonder Guard admits only super-effective hits.
       if (abilityGrantsImmunity(ability, type)) mult = 0;
@@ -1260,7 +1361,6 @@ export class PokemonChess {
    */
   blockedReason(attackerId: number, defenderId: number): string | null {
     if (this.bestSlotAgainst(attackerId, defenderId) !== null) return null;
-    const attacker = this.loadoutOf(attackerId);
     const defender = this.loadoutOf(defenderId);
     const ability = defender.ability;
     if (ability === WONDER_GUARD) {
@@ -1274,7 +1374,7 @@ export class PokemonChess {
         }
       }
     }
-    return `${attacker.type} and its coverage cannot touch ${defender.type}`;
+    return `${this.battleTypeOf(attackerId)} and its coverage cannot touch ${this.battleTypeOf(defenderId)}`;
   }
 
   // -------------------------------------------------------------------------

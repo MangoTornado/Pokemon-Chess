@@ -16,6 +16,8 @@ import { Rng } from '../engine/rng.ts';
 import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
 import { autodraft } from './autodraft.ts';
 import { pickHeldItem } from './heldItems.ts';
+import { buildMoveset } from './moveset.ts';
+import { pickTeraType } from './tera.ts';
 
 /** Base-stat-total bands per role — the same shape as the ordinary draft, so a gym pawn is not a legendary. */
 function inBand(species: SpeciesEntry, cls: PieceClass): boolean {
@@ -75,10 +77,15 @@ export function buildGymMatch(dex: Dex, leaderType: BattleType, seed: string | n
       const species = pickTyped(dex, pool, cls, rng, taken);
       const ability = species.abilities[0];
       const item = pickHeldItem(species, cls, leaderType, rng);
+      // The engine builds each piece's moveset from the *match* seed, so derive the Tera type from the same
+      // one — otherwise it would be chosen against a kit the piece never actually carries.
+      const moveset = buildMoveset(dex, species, leaderType, `${seed}:${piece.id}`);
+      const teraType = pickTeraType(species, leaderType, moveset);
       loadout.set(piece.id, {
         species: species.id, type: leaderType,
         ...(ability ? { ability } : {}),
         ...(item ? { item } : {}),
+        ...(teraType ? { teraType } : {}),
       });
     }
   }
