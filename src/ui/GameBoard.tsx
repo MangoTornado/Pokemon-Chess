@@ -30,6 +30,7 @@ import { chooseMove } from '../ai/search.ts';
 import type { Difficulty } from '../ai/search.ts';
 import { replay } from '../game/replay.ts';
 import { BoardPiece } from './BoardPiece.tsx';
+import { FxLayer, useBattleFx } from './BattleFx.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { TIER_PRESENTATION, VERDICT_PRESENTATION, tierOf, verdictCause } from './outcomes.ts';
 import { ROLE_GLYPH, ROLE_LABEL } from './pieceRoles.ts';
@@ -279,6 +280,10 @@ export function GameBoard({
     return map;
   }, [effects]);
 
+  // The blow-by-blow layer replays the exchange the engine just resolved. Keyed on the effect nonce so the
+  // same move resolving again (a replayed online action) restarts the sequence.
+  const { fx, motion } = useBattleFx(last, effects[0]?.nonce ?? 0);
+
   const waitingForOpponent = controlled !== undefined && game.turn !== controlled.side && !over;
   const humanBlocked = (ai !== undefined && game.turn === ai.side && !over) || waitingForOpponent;
   const pendingExtra = game.extraMovePieceId !== null;
@@ -312,6 +317,10 @@ export function GameBoard({
             aspectRatio: '1 / 1',
             maxWidth: 620,
             opacity: over ? 0.8 : 1,
+            // The effects overlay is absolutely positioned against this grid, and container units let the
+            // callout and damage numbers scale with the board rather than the viewport.
+            position: 'relative',
+            containerType: 'inline-size',
           }}
         >
           {rows.flatMap((rank) =>
@@ -363,6 +372,7 @@ export function GameBoard({
                       hp={live.hp}
                       maxHp={live.maxHp}
                       {...(status ? { status } : {})}
+                      {...(motion.get(square) ? { motion: motion.get(square)! } : {})}
                     />
                   )}
 
@@ -423,6 +433,9 @@ export function GameBoard({
               );
             }),
           )}
+
+          {/* Damage numbers, impacts, the move callout and status pops, over the whole board. */}
+          <FxLayer fx={fx} />
         </div>
 
         <SidePanel dex={dex} game={game} last={last} selected={selected} options={options} />

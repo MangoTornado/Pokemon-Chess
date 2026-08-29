@@ -8,10 +8,13 @@
  * from a 40px mobile square to a 96px desktop one without a media query or a hard-coded pixel size.
  */
 
+import type { CSSProperties } from 'react';
+
 import type { SpeciesEntry } from '../data/schema.ts';
 import type { BattleType } from '../data/schema.ts';
 import type { PieceClass, Side } from '../engine/board.ts';
 import type { PieceStatus } from '../engine/variant.ts';
+import type { Motion } from './BattleFx.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { GLYPH_FONT_STACK, ROLE_GLYPH, ROLE_RING_WEIGHT, ROLE_SPRITE_SCALE } from './pieceRoles.ts';
 import { TYPE_COLORS } from './typeColors.ts';
@@ -27,6 +30,13 @@ export interface BoardPieceProps {
   maxHp?: number;
   /** Status condition, for the rotation and counter-pip markers. */
   status?: PieceStatus;
+  /**
+   * Transient battle motion — the attacker's lunge at its target, or a recoil from a blow that just landed.
+   *
+   * Applied to a wrapper around the sprite rather than the square, so it composes with the status tilt and
+   * never disturbs the board's layout.
+   */
+  motion?: Motion;
 }
 
 /** How far the sprite tilts for each rotation-class status — the TCG's rotate-the-card marking. */
@@ -42,7 +52,7 @@ function hpColor(fraction: number): string {
   return '#f85149';
 }
 
-export function BoardPiece({ species, type, cls, side, hp, maxHp, status }: BoardPieceProps) {
+export function BoardPiece({ species, type, cls, side, hp, maxHp, status, motion }: BoardPieceProps) {
   const typeColor = TYPE_COLORS[type];
   const isWhite = side === 'white';
   const showHp = hp !== undefined && maxHp !== undefined && maxHp > 0;
@@ -67,23 +77,34 @@ export function BoardPiece({ species, type, cls, side, hp, maxHp, status }: Boar
         }}
       />
 
-      {/* A tilted (or upside-down) sprite is the TCG's rotate-the-card marking for a rotation-class
-          status. The rotation is on a wrapper so it composes with the icon's own scale and flip. */}
+      {/* Two nested wrappers: the outer one carries transient battle motion (lunge / recoil), the inner one
+          the status tilt. Separating them lets a poisoned, tilted piece still lunge correctly, and keeps
+          each animation a pure transform. */}
       <span
+        className={motion?.lunge ? 'pc-lunge' : motion?.hit ? 'pc-hit' : undefined}
         style={{
           position: 'relative',
           zIndex: 1,
           display: 'inline-flex',
-          transform: tilt ? `rotate(${tilt}deg)` : undefined,
-          transition: 'transform 200ms ease',
+          ...(motion?.lunge
+            ? ({ '--pc-dx': String(motion.lunge.dx), '--pc-dy': String(motion.lunge.dy) } as CSSProperties)
+            : {}),
         }}
       >
-        <PokemonIcon
-          species={species}
-          scale={ROLE_SPRITE_SCALE[cls]}
-          flipped={!isWhite}
-          style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))' }}
-        />
+        <span
+          style={{
+            display: 'inline-flex',
+            transform: tilt ? `rotate(${tilt}deg)` : undefined,
+            transition: 'transform 200ms ease',
+          }}
+        >
+          <PokemonIcon
+            species={species}
+            scale={ROLE_SPRITE_SCALE[cls]}
+            flipped={!isWhite}
+            style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5))' }}
+          />
+        </span>
       </span>
 
       {/* The role badge is the primary role cue, so it sits above the sprite and never overlaps the

@@ -38,7 +38,7 @@ import { Rng } from './rng.ts';
 import type { RngState } from './rng.ts';
 import { effectiveness } from './typechart.ts';
 import { resolveClash } from '../rules/clash.ts';
-import type { ClashRoll, ClashVerdict, Combatant } from '../rules/clash.ts';
+import type { BlowRecord, ClashRoll, ClashVerdict, Combatant } from '../rules/clash.ts';
 import type { DamageInput } from '../rules/damage.ts';
 import { computeStats } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
@@ -125,6 +125,18 @@ export interface ResolvedMove {
   readonly crit: boolean;
   readonly momentum: number;
   readonly blowCount: number;
+  /**
+   * Every blow of the exchange, in order — who threw it, for how much, and the target's HP after.
+   *
+   * This is what lets the board *show* the Clash rather than only its verdict: a damage number per blow,
+   * a hit reaction per blow, and the attacker's and defender's swings distinguishable.
+   */
+  readonly blows: readonly BlowRecord[];
+  /** The move the attacker used, and its type, so an impact can be announced and coloured. */
+  readonly moveName: string | null;
+  readonly moveType: BattleType | null;
+  /** A status mark this action inflicted on the surviving defender, if any (`burned`, `poisoned`, …). */
+  readonly statusInflicted: string | null;
   readonly grantsBonus: boolean;
   /** Ids removed from the board. */
   readonly removed: readonly number[];
@@ -616,7 +628,8 @@ export class PokemonChess {
         defenderHpAfter: 0,
         attackerMaxHp: this.liveOf(attackerId).maxHp,
         defenderMaxHp: null,
-        crit: false, momentum: roll.momentum, blowCount: 0,
+        crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
+        moveName: null, moveType: null, statusInflicted: null,
         grantsBonus: false, removed: [], kingCaptured: false,
       };
       // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
@@ -696,9 +709,16 @@ export class PokemonChess {
     const nextStatus = new Map(this.statuses);
     for (const id of removed) nextStatus.delete(id);
     const defenderSurvives = dC.hp > 0 && !removed.includes(defenderId);
+    // The move actually thrown, and the mark it landed (if any) — both surfaced on the result so the board
+    // can announce them.
+    const usedMove = this.movesetOf(attackerId)[slot];
+    let inflicted: string | null = null;
     if (defenderSurvives && riderHits) {
-      const rider = this.movesetOf(attackerId)[slot]?.rider;
-      if (rider) nextStatus.set(defenderId, applyRider(this.statusOf(defenderId), rider.mark));
+      const rider = usedMove?.rider;
+      if (rider) {
+        nextStatus.set(defenderId, applyRider(this.statusOf(defenderId), rider.mark));
+        inflicted = rider.mark;
+      }
     }
 
     // A bonus move is granted only by ADVANTAGE, only while the cap is unspent, and only if the piece can
@@ -725,6 +745,10 @@ export class PokemonChess {
       crit: roll.crit,
       momentum: roll.momentum,
       blowCount: result.blows.length,
+      blows: result.blows,
+      moveName: usedMove?.name ?? null,
+      moveType: usedMove?.type ?? null,
+      statusInflicted: inflicted,
       grantsBonus: pending !== null,
       removed,
       kingCaptured,
