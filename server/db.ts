@@ -29,6 +29,8 @@ export interface ProfileRow {
   games: number;
   /** JSON array of earned gym badge ids — the badge case (SPEC §17.8). */
   badges: string; // JSON
+  /** ISO timestamp of the account's last authenticated request, or null if never. */
+  last_seen: string | null;
   updated_at: string;
 }
 
@@ -133,6 +135,8 @@ export class Db {
     this.addColumnIfMissing('profiles', 'badges', "TEXT NOT NULL DEFAULT '[]'");
     // Training progress toward evolution, per owned individual (SPEC §17.8 "evolving through play").
     this.addColumnIfMissing('collection', 'xp', 'INTEGER NOT NULL DEFAULT 0');
+    // Presence: when this account was last seen, so a friend list can show who is around.
+    this.addColumnIfMissing('profiles', 'last_seen', 'TEXT');
   }
 
   /** Adds a column to a table if it is not already present. */

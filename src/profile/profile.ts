@@ -63,6 +63,8 @@ export interface FriendView {
   readonly state: 'friend' | 'incoming' | 'outgoing';
   readonly rating: number;
   readonly badge: string | null;
+  /** True when this player was active within the presence window — "around right now". */
+  readonly online: boolean;
 }
 
 /** A validation outcome: the cleaned value, or an error message for the field. */

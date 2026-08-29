@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { Dex } from '../data/dex.ts';
-import type { SpeciesEntry } from '../data/schema.ts';
+import type { BattleType, SpeciesEntry } from '../data/schema.ts';
 import { api } from '../net/api.ts';
 import type { CollectionEntry } from '../net/api.ts';
 import { PokemonIcon } from './PokemonIcon.tsx';
@@ -26,6 +26,9 @@ export interface CollectionScreenProps {
 export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: CollectionScreenProps) {
   const [entries, setEntries] = useState<CollectionEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState<BattleType | 'all'>('all');
+  const [sort, setSort] = useState<'dex' | 'name' | 'count'>('dex');
 
   const refresh = useCallback(() => {
     api.collection().then((r) => {
@@ -51,10 +54,43 @@ export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: Collection
   const owned = useMemo(() => {
     const counts = new Map<string, number>();
     for (const e of entries ?? []) counts.set(e.species, (counts.get(e.species) ?? 0) + 1);
-    return [...counts.entries()]
+    const all = [...counts.entries()]
       .map(([id, count]) => ({ species: dex.getSpecies(id), count }))
-      .filter((x): x is { species: SpeciesEntry; count: number } => !!x.species)
-      .sort((a, b) => a.species.num - b.species.num);
+      .filter((x): x is { species: SpeciesEntry; count: number } => !!x.species);
+
+    const needle = query.trim().toLowerCase();
+    const filtered = all.filter(({ species }) => {
+      if (typeFilter !== 'all' && !species.types.includes(typeFilter)) return false;
+      if (needle && !species.name.toLowerCase().includes(needle)) return false;
+      return true;
+    });
+
+    return filtered.sort((a, b) => {
+      if (sort === 'name') return a.species.name.localeCompare(b.species.name);
+      // Most-duplicated first is how you find your tradeable spares.
+      if (sort === 'count') return b.count - a.count || a.species.num - b.species.num;
+      return a.species.num - b.species.num;
+    });
+  }, [entries, dex, query, typeFilter, sort]);
+
+  /**
+   * Distinct species owned, regardless of any filter.
+   *
+   * The Pokédex figure is a fact about the account, not about the current view — filtering the grid must not
+   * appear to shrink your dex.
+   */
+  const distinctOwned = useMemo(
+    () => new Set((entries ?? []).map((e) => e.species)).size,
+    [entries],
+  );
+
+  /** Types the player actually owns, so the filter offers nothing that would return an empty grid. */
+  const ownedTypes = useMemo(() => {
+    const set = new Set<BattleType>();
+    for (const e of entries ?? []) {
+      for (const t of dex.getSpecies(e.species)?.types ?? []) set.add(t);
+    }
+    return [...set].sort();
   }, [entries, dex]);
 
   const totalSpecies = useMemo(() => new Set(dex.species.map((s) => s.num)).size, [dex]);
@@ -76,11 +112,51 @@ export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: Collection
       <Head title="Collection & Pokédex" onExit={onExit} />
 
       <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'baseline', flexWrap: 'wrap' }}>
-        <Metric big={String(owned.length)} small={`of ${totalSpecies} species`} label="Pokédex" />
+        <Metric big={String(distinctOwned)} small={`of ${totalSpecies} species`} label="Pokédex" />
         <Metric big={String(entries?.length ?? '…')} small="individuals owned" label="Collection" />
       </div>
 
       {error && <p style={{ color: '#f85149' }}>{error}</p>}
+
+      {/* Filters. Only offered once there is enough to filter, so a new account sees a clean screen. */}
+      {(entries?.length ?? 0) > 8 && (
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name"
+            style={{
+              background: 'var(--bg)', color: 'var(--text)', border: '1px solid var(--border)',
+              borderRadius: 7, padding: '0.4rem 0.6rem', width: 170, fontSize: '0.85rem',
+            }}
+          />
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as BattleType | 'all')}
+            style={selectStyle}
+          >
+            <option value="all">All types</option>
+            {ownedTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select value={sort} onChange={(e) => setSort(e.target.value as 'dex' | 'name' | 'count')} style={selectStyle}>
+            <option value="dex">Pokédex order</option>
+            <option value="name">Name</option>
+            <option value="count">Most duplicates</option>
+          </select>
+          <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+            {owned.length} shown
+          </span>
+          {(query || typeFilter !== 'all') && (
+            <button
+              type="button"
+              onClick={() => { setQuery(''); setTypeFilter('all'); }}
+              style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: '0.78rem', textDecoration: 'underline' }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       {evolvable.length > 0 && (
         <div style={{ display: 'grid', gap: '0.5rem' }}>
@@ -254,6 +330,11 @@ function Metric({ big, small, label }: { big: string; small: string; label: stri
     </div>
   );
 }
+
+const selectStyle = {
+  background: 'var(--bg)', color: 'var(--text)', border: '1px solid var(--border)',
+  borderRadius: 7, padding: '0.4rem 0.5rem', fontSize: '0.85rem',
+} as const;
 
 const panel = {
   display: 'flex', alignItems: 'center', gap: '0.7rem',

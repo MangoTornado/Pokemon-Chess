@@ -37,7 +37,11 @@ export function FriendsScreen({ signedIn, onExit, onSignIn, onChallenge }: Frien
   }, []);
 
   useEffect(() => {
-    if (signedIn) void refresh();
+    if (!signedIn) return;
+    void refresh();
+    // Presence is only meaningful if it is current, so refresh while the screen is open.
+    const timer = setInterval(() => void refresh(), 20000);
+    return () => clearInterval(timer);
   }, [signedIn, refresh]);
 
   const act = async (fn: () => Promise<{ ok: true; value: unknown } | { ok: false; error: { error: string } }>, done?: string) => {
@@ -58,7 +62,10 @@ export function FriendsScreen({ signedIn, onExit, onSignIn, onChallenge }: Frien
     );
   }
 
-  const accepted = (friends ?? []).filter((f) => f.state === 'friend');
+  // Online friends first — the list's job is to get you into a game with someone who is actually around.
+  const accepted = (friends ?? [])
+    .filter((f) => f.state === 'friend')
+    .sort((a, b) => (a.online === b.online ? a.displayName.localeCompare(b.displayName) : a.online ? -1 : 1));
   const incoming = (friends ?? []).filter((f) => f.state === 'incoming');
   const outgoing = (friends ?? []).filter((f) => f.state === 'outgoing');
 
@@ -108,7 +115,7 @@ export function FriendsScreen({ signedIn, onExit, onSignIn, onChallenge }: Frien
         </Group>
       )}
 
-      <Group title={`Friends (${accepted.length})`}>
+      <Group title={`Friends (${accepted.length})${accepted.some((f) => f.online) ? ` · ${accepted.filter((f) => f.online).length} online` : ''}`}>
         {accepted.length === 0 && <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.85rem' }}>No friends yet — add someone by username.</p>}
         {accepted.map((f) => (
           <Row key={f.username} friend={f}>
@@ -135,7 +142,19 @@ export function FriendsScreen({ signedIn, onExit, onSignIn, onChallenge }: Frien
 function Row({ friend, children }: { friend: FriendView; children: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '0.7rem', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 9, padding: '0.5rem 0.7rem' }}>
-      <AvatarView avatar={friend.avatar} size={34} framed />
+      <span style={{ position: 'relative', flexShrink: 0 }}>
+        <AvatarView avatar={friend.avatar} size={34} framed />
+        {/* A presence dot, sized so it reads at a glance without competing with the avatar. */}
+        <span
+          aria-hidden
+          title={friend.online ? 'Online now' : 'Offline'}
+          style={{
+            position: 'absolute', right: -1, bottom: -1, width: 10, height: 10, borderRadius: '50%',
+            background: friend.online ? '#3fb950' : '#6b7280',
+            border: '2px solid var(--bg-raised)',
+          }}
+        />
+      </span>
       <span style={{ display: 'grid', gap: '0.05rem', minWidth: 0 }}>
         <strong style={{ fontSize: '0.9rem' }}>{friend.displayName}</strong>
         <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>

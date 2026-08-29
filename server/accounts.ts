@@ -41,6 +41,14 @@ const fail = (error: string, field?: string): Result<never> =>
 /** Wins needed to train an individual before it can evolve (SPEC §17.8 "through play"). */
 export const EVOLVE_XP = 3;
 
+/**
+ * How recently an account must have been seen to count as online.
+ *
+ * Generously wide because presence here is polled from ordinary requests rather than a socket: a player
+ * reading their collection is still "around", and a window shorter than the poll interval would flicker.
+ */
+export const PRESENCE_WINDOW_MS = 3 * 60 * 1000;
+
 export class Accounts {
   private readonly db: Db;
   private readonly now: () => Date;
@@ -140,7 +148,16 @@ export class Accounts {
       this.db.raw.prepare('DELETE FROM sessions WHERE token = ?').run(hashToken(token));
       return null;
     }
+    // Any authenticated request is evidence the player is around, which is all presence needs.
+    this.touchPresence(row.account_id);
     return row.account_id;
+  }
+
+  /** Records that an account was just active. Cheap enough to run on every authenticated request. */
+  private touchPresence(accountId: number): void {
+    this.db.raw
+      .prepare('UPDATE profiles SET last_seen = ? WHERE account_id = ?')
+      .run(this.now().toISOString(), accountId);
   }
 
   logout(token: string | undefined): void {
@@ -373,7 +390,7 @@ export class Accounts {
     const rows = this.db.raw
       .prepare(`
         SELECT f.requester, f.addressee, f.status,
-               a.username, p.display_name, p.avatar, p.rating, p.badge
+               a.username, p.display_name, p.avatar, p.rating, p.badge, p.last_seen
           FROM friendships f
           JOIN accounts a ON a.id = CASE WHEN f.requester = ? THEN f.addressee ELSE f.requester END
           JOIN profiles p ON p.account_id = a.id
@@ -383,8 +400,10 @@ export class Accounts {
       .all(accountId, accountId, accountId) as {
         requester: number; addressee: number; status: string;
         username: string; display_name: string; avatar: string; rating: number; badge: string | null;
+        last_seen: string | null;
       }[];
 
+    const now = this.now().getTime();
     return rows.map((r) => ({
       username: r.username,
       displayName: r.display_name,
@@ -392,6 +411,7 @@ export class Accounts {
       state: r.status === 'accepted' ? 'friend' : r.requester === accountId ? 'outgoing' : 'incoming',
       rating: r.rating,
       badge: r.badge,
+      online: r.last_seen !== null && now - new Date(r.last_seen).getTime() <= PRESENCE_WINDOW_MS,
     }));
   }
 

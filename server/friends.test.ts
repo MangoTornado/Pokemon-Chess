@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { Accounts } from './accounts.ts';
+import { Accounts, PRESENCE_WINDOW_MS } from './accounts.ts';
 import { Db } from './db.ts';
 
 async function threePlayers() {
@@ -83,5 +83,59 @@ describe('friends', () => {
     expect(row.displayName).toBe('misty');
     expect(row.avatar.trainer).toBeTruthy();
     expect(typeof row.rating).toBe('number');
+  });
+});
+
+describe('presence', () => {
+  /** An Accounts with a clock we control, so the presence window can be crossed without waiting. */
+  async function withClock() {
+    let now = new Date('2026-01-01T00:00:00Z');
+    const accounts = new Accounts(new Db(':memory:'), () => now);
+    const mk = async (u: string) => {
+      const r = await accounts.register({ username: u, password: 'password123', displayName: u });
+      if (!r.ok) throw new Error('setup failed');
+      return r.value.token;
+    };
+    const ashToken = await mk('ash');
+    const mistyToken = await mk('misty');
+    const ash = accounts.accountForToken(ashToken)!;
+    accounts.requestFriend(ash, 'misty');
+    accounts.acceptFriend(accounts.accountForToken(mistyToken)!, 'ash');
+    return {
+      accounts, ash, ashToken, mistyToken,
+      advance: (ms: number) => { now = new Date(now.getTime() + ms); },
+    };
+  }
+
+  it('a friend seen just now is online', async () => {
+    const { accounts, ash, mistyToken, advance } = await withClock();
+    advance(1000);
+    // Misty makes an authenticated request, which is what marks her present.
+    accounts.accountForToken(mistyToken);
+    expect(accounts.friends(ash)[0]!.online).toBe(true);
+  });
+
+  it('a friend goes offline once the presence window has passed', async () => {
+    const { accounts, ash, mistyToken, advance } = await withClock();
+    accounts.accountForToken(mistyToken);
+    expect(accounts.friends(ash)[0]!.online).toBe(true);
+
+    advance(PRESENCE_WINDOW_MS + 1000);
+    expect(accounts.friends(ash)[0]!.online).toBe(false);
+
+    // And comes back the moment they are seen again.
+    accounts.accountForToken(mistyToken);
+    expect(accounts.friends(ash)[0]!.online).toBe(true);
+  });
+
+  it('an account never seen is offline rather than erroring', async () => {
+    const accounts = new Accounts(new Db(':memory:'));
+    const a = await accounts.register({ username: 'solo', password: 'password123', displayName: 'Solo' });
+    const b = await accounts.register({ username: 'other', password: 'password123', displayName: 'Other' });
+    if (!a.ok || !b.ok) throw new Error('setup failed');
+    const soloId = accounts.accountForToken(a.value.token)!;
+    accounts.requestFriend(soloId, 'other');
+    // 'other' has never made an authenticated request in this test.
+    expect(accounts.friends(soloId)[0]!.online).toBe(false);
   });
 });
