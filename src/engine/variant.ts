@@ -671,7 +671,8 @@ export class PokemonChess {
 
     // Terastallisation: one per side per game, so it is a decision about *when*. Offered only to a piece
     // whose Tera type would actually differ from the type it is already fighting as.
-    if (pending === null && this.teraAvailable(this.position.turn)) {
+    const canTransform = pending === null && this.transformAvailable(this.position.turn);
+    if (canTransform) {
       for (const { square, piece } of this.position.allPieces()) {
         if (piece.side !== this.position.turn) continue;
         if (movementLock(this.statusOf(piece.id)) !== null) continue;
@@ -694,7 +695,7 @@ export class PokemonChess {
     // The other three transformations, sharing the same one-per-side budget as Tera. Each is offered only to a
     // piece that can actually reach it: a mega stone that names its species, a Z-crystal matching one of its
     // moves, and — for Dynamax, which needs nothing held — any piece at all.
-    if (pending === null && this.transformAvailable(this.position.turn)) {
+    if (canTransform) {
       for (const { square, piece } of this.position.allPieces()) {
         if (piece.side !== this.position.turn) continue;
         if (movementLock(this.statusOf(piece.id)) !== null) continue;
@@ -896,7 +897,7 @@ export class PokemonChess {
     // Forecast the exchange that will actually be fought, not the one that was aimed at. A redirected attack
     // resolves against the interceptor, so previewing the target would promise the player an outcome the
     // engine will not deliver — and the board's whole contract is that a square says beforehand what it does.
-    const intercept = this.interceptorFor(attackerId, move.captured.id);
+    const intercept = this.interceptorFor(attackerId, move.captured.id, move.capturedSquare ?? move.to);
     if (intercept?.kind === 'draw') return 'blocked';
     const defenderId = intercept ? intercept.pieceId : move.captured.id;
 
@@ -1075,7 +1076,7 @@ export class PokemonChess {
 
     // Redirection, resolved before the Clash because a Clash is between exactly two pieces and this decides
     // which two. A drawing ability absorbs the attack outright; a cast guard fights it in the target's place.
-    const intercept = this.interceptorFor(attackerId, targetId);
+    const intercept = this.interceptorFor(attackerId, targetId, move.capturedSquare ?? move.to);
     if (intercept?.kind === 'draw') {
       return this.absorbedAttack(move, side, attackerId, attacker, intercept, targetId, roll, nextRngState);
     }
@@ -1889,28 +1890,37 @@ export class PokemonChess {
    * on) and it absorbs the attack outright rather than fighting it, so letting a guard pre-empt it would throw
    * away an immunity the defender's side already owned.
    */
-  interceptorFor(attackerId: number, defenderId: number): Interception | null {
-    const target = this.pieceSquare(defenderId);
-    const defenderPiece = this.pieceById(defenderId);
-    if (target === null || !defenderPiece) return null;
+  interceptorFor(attackerId: number, defenderId: number, targetSquare: Square): Interception | null {
+    const defenderPiece = this.position.pieceAt(targetSquare);
+    if (!defenderPiece) return null;
 
-    const best = this.bestSlotAgainst(attackerId, defenderId);
-    const moveType = this.movesetOf(attackerId)[best?.slot ?? 0]?.type ?? this.battleTypeOf(attackerId);
-
+    // The neighbour scan comes first, and the attacker's move type is resolved only if it turns out to matter.
+    // This runs for every capture the generator forecasts, so the common case — nobody adjacent who could
+    // intercept — must cost eight board lookups and nothing more. Resolving the move type up front meant a
+    // second `bestSlotAgainst` on every single forecast, which is the expensive call in the whole path.
     let guard: Interception | null = null;
-    for (const neighbour of KING_MOVES[target] ?? []) {
+    let drawer: { pieceId: number; square: Square; ability: string } | null = null;
+    for (const neighbour of KING_MOVES[targetSquare] ?? []) {
       const piece = this.position.pieceAt(neighbour);
       // Only an ally of the attacked piece can step in, and never the attacked piece itself.
       if (!piece || piece.side !== defenderPiece.side || piece.id === defenderId) continue;
 
-      const neighbourAbility = this.abilityOf(piece.id);
-      if (abilityDraws(neighbourAbility) === moveType) {
-        return { pieceId: piece.id, square: neighbour, kind: 'draw', ability: neighbourAbility! };
+      const ability = this.abilityOf(piece.id);
+      if (drawer === null && ability !== undefined && abilityDraws(ability) !== null) {
+        drawer = { pieceId: piece.id, square: neighbour, ability };
       }
-      // Remember the first guard, but keep looking for a drawer, which outranks it.
+      // Remember the first guard, but a drawer outranks it.
       if (guard === null && this.guardTurnsLeft(piece.id) > 0) {
         guard = { pieceId: piece.id, square: neighbour, kind: 'guard' };
       }
+    }
+    if (drawer === null) return guard;
+
+    // A drawer only draws its own type, so only now does the move being thrown matter.
+    const best = this.bestSlotAgainst(attackerId, defenderId);
+    const moveType = this.movesetOf(attackerId)[best?.slot ?? 0]?.type ?? this.battleTypeOf(attackerId);
+    if (abilityDraws(drawer.ability) === moveType) {
+      return { pieceId: drawer.pieceId, square: drawer.square, kind: 'draw', ability: drawer.ability };
     }
     return guard;
   }
@@ -1970,7 +1980,8 @@ export class PokemonChess {
   blockedReason(attackerId: number, defenderId: number): string | null {
     // A drawn attack is refused by a *neighbour*, not by the piece being attacked, so blaming the target's own
     // typing would send the player looking in the wrong place for the reason their move is greyed out.
-    const drawn = this.interceptorFor(attackerId, defenderId);
+    const defenderSquare = this.pieceSquare(defenderId);
+    const drawn = defenderSquare === null ? null : this.interceptorFor(attackerId, defenderId, defenderSquare);
     if (drawn?.kind === 'draw') {
       const by = this.loadoutOf(drawn.pieceId);
       const name = this.dex.getSpecies(by.species)?.name ?? by.species;
