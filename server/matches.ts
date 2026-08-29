@@ -14,13 +14,22 @@
  * rooms in one process. Finished and abandoned rooms are pruned so memory does not grow without bound.
  */
 
+import type { EngineOps } from './gameValidator.ts';
+
 /** How long a room survives its last activity before being pruned. */
 const ROOM_TTL_MS = 30 * 60 * 1000;
 
 /** How long a player may sit unmatched in the queue before their room is reclaimed. */
 const QUEUE_TTL_MS = 5 * 60 * 1000;
 
-import type { MoveValidator } from './gameValidator.ts';
+/**
+ * Each side's total thinking time for the whole game.
+ *
+ * SPEC §17.10 asks for 60s per turn plus a 3-minute reserve; a single generous budget per side is the same
+ * protection with one number to explain and one number to show, and it cannot punish a long
+ * super-effective chain (which is one "turn" made of several sub-moves).
+ */
+const CLOCK_MS = 8 * 60 * 1000;
 
 export type Side = 'white' | 'black';
 export type RoomStatus = 'waiting' | 'playing' | 'over';
@@ -52,8 +61,15 @@ interface Room {
   status: RoomStatus;
   /** Set when the game ends: the winning side, or 'draw'. */
   outcome: Side | 'draw' | null;
+  endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
   /** Guards the one-time end transition (rating settlement fires exactly once). */
   ended: boolean;
+  /** Thinking time left per side, in ms. */
+  clock: { white: number; black: number };
+  /** When the side to move started thinking, for deducting elapsed time. Null while waiting to start. */
+  turnStartedAt: number | null;
+  /** Whose turn it is, per the engine (a bonus move can keep the same side on the move). */
+  turn: Side;
   createdAt: number;
   lastActivity: number;
 }
@@ -70,6 +86,10 @@ export interface RoomView {
   readonly outcome: Side | 'draw' | null;
   /** The requesting account's side, or null if they are only watching. */
   readonly you: Side | null;
+  /** Thinking time left per side in ms, with the side on the move already debited. */
+  readonly clock: { white: number; black: number };
+  /** How the game ended, when it did — so the UI can say "on time" rather than just "you lost". */
+  readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
 }
 
 export type MatchResult<T> = { ok: true; value: T } | { ok: false; error: string; status: number };
@@ -86,19 +106,19 @@ export class Matches {
   private readonly now: () => number;
   private readonly makeId: () => string;
   /** When set, moves are validated against the engine (server-authoritative); else the server relays only. */
-  private readonly validator: MoveValidator | undefined;
+  private readonly engine: EngineOps | undefined;
   /** Fired once when a game ends, for rating settlement. */
   private readonly onEnd: ((info: EndInfo) => void) | undefined;
 
   constructor(
     clock: () => number = () => Date.now(),
     makeId: () => string = defaultId,
-    validator?: MoveValidator,
+    engine?: EngineOps,
     onEnd?: (info: EndInfo) => void,
   ) {
     this.now = clock;
     this.makeId = makeId;
-    this.validator = validator;
+    this.engine = engine;
     this.onEnd = onEnd;
   }
 
@@ -113,6 +133,7 @@ export class Matches {
         // A different player pairs in as Black.
         room.black = player;
         room.status = 'playing';
+        room.turnStartedAt = this.now(); // the clock starts now that both players are here
         room.lastActivity = this.now();
         this.waitingRoomId = null;
         return ok(this.view(room, player.accountId));
@@ -155,6 +176,7 @@ export class Matches {
     if (room.black) return fail('That game is already full.', 409);
     room.black = player;
     room.status = 'playing';
+    room.turnStartedAt = this.now(); // the clock starts now that both players are here
     room.lastActivity = this.now();
     return ok(this.view(room, player.accountId));
   }
@@ -163,6 +185,8 @@ export class Matches {
   state(id: string, accountId: number): MatchResult<RoomView> {
     const room = this.rooms.get(id);
     if (!room) return fail('No such game.', 404);
+    // Polling is also how a flag-fall is noticed, so charge the clock on read.
+    this.chargeClock(room);
     return ok(this.view(room, accountId));
   }
 
@@ -182,18 +206,49 @@ export class Matches {
     if (!Number.isInteger(encoded) || encoded < 0 || encoded > 0xffffff) {
       return fail('Malformed move.', 400);
     }
-    // Server-authoritative check: is this a legal move for this side right now? (Relay-only if no validator.)
-    if (this.validator) {
-      const verdict = this.validator(room.seed, room.actions, encoded, side);
+    // A player who has run out of time loses before their move is considered.
+    if (this.chargeClock(room) && room.status !== 'playing') return ok(this.view(room, accountId));
+
+    // Server-authoritative check: is this a legal move for this side right now? (Relay-only if no engine.)
+    if (this.engine) {
+      const verdict = this.engine.validate(room.seed, room.actions, encoded, side);
       if (!verdict.ok) return fail(verdict.error, 409);
       room.actions.push(encoded);
+      room.turn = verdict.turn;
+      room.turnStartedAt = this.now();
       room.lastActivity = this.now();
-      if (verdict.ended) this.finalizeEnd(room, verdict.winner ?? 'draw');
+      if (verdict.ended) {
+        this.finalizeEnd(room, verdict.winner ?? 'draw', verdict.winner === 'draw' ? 'draw' : 'king-capture');
+      }
       return ok(this.view(room, accountId));
     }
     room.actions.push(encoded);
+    room.turn = side === 'white' ? 'black' : 'white';
+    room.turnStartedAt = this.now();
     room.lastActivity = this.now();
     return ok(this.view(room, accountId));
+  }
+
+  /**
+   * Debits the side on the move for the time they have spent thinking, ending the game if they have run
+   * out. Returns true if the clock ran out (the game is then over on time).
+   *
+   * Called on every read and write of a live room, so a flag-fall is noticed by whoever polls next — no
+   * timers, no background loop, which keeps the server a plain request handler.
+   */
+  private chargeClock(room: Room): boolean {
+    if (room.status !== 'playing' || room.turnStartedAt === null) return false;
+    const now = this.now();
+    const elapsed = Math.max(0, now - room.turnStartedAt);
+    const remaining = room.clock[room.turn] - elapsed;
+    if (remaining <= 0) {
+      room.clock[room.turn] = 0;
+      this.finalizeEnd(room, room.turn === 'white' ? 'black' : 'white', 'timeout');
+      return true;
+    }
+    room.clock[room.turn] = remaining;
+    room.turnStartedAt = now;
+    return false;
   }
 
   /** Ends the game: the caller resigns, handing the win to the other side. */
@@ -202,7 +257,7 @@ export class Matches {
     if (!room) return fail('No such game.', 404);
     const side = this.sideOf(room, accountId);
     if (!side) return fail('You are not a player in this game.', 403);
-    this.finalizeEnd(room, side === 'white' ? 'black' : 'white');
+    this.finalizeEnd(room, side === 'white' ? 'black' : 'white', 'resign');
     return ok(this.view(room, accountId));
   }
 
@@ -214,18 +269,20 @@ export class Matches {
     const room = this.rooms.get(id);
     if (!room) return fail('No such game.', 404);
     if (!this.sideOf(room, accountId)) return fail('You are not a player in this game.', 403);
-    // With a validator the server already ends games itself; a client report is then only a harmless
+    // With an engine the server already ends games itself; a client report is then only a harmless
     // confirmation. Without one, this is how a game ends. Either way it settles exactly once.
-    this.finalizeEnd(room, outcome);
+    this.finalizeEnd(room, outcome, outcome === 'draw' ? 'draw' : 'king-capture');
     return ok(this.view(room, accountId));
   }
 
   /** Ends a room exactly once, recording the outcome and firing the rating callback for a ranked game. */
-  private finalizeEnd(room: Room, winner: Side | 'draw'): void {
+  private finalizeEnd(room: Room, winner: Side | 'draw', by: 'king-capture' | 'draw' | 'resign' | 'timeout' = 'king-capture'): void {
     if (room.ended) return;
     room.ended = true;
     room.status = 'over';
     room.outcome = winner;
+    room.endedBy = by;
+    room.turnStartedAt = null;
     room.lastActivity = this.now();
     if (room.white && room.black && this.onEnd) {
       this.onEnd({ whiteId: room.white.accountId, blackId: room.black.accountId, winner, ranked: room.matchmaking });
@@ -250,7 +307,12 @@ export class Matches {
       actions: [],
       status: 'waiting',
       outcome: null,
+      endedBy: null,
       ended: false,
+      clock: { white: CLOCK_MS, black: CLOCK_MS },
+      // The clock starts when the second player arrives, not while waiting for one.
+      turnStartedAt: null,
+      turn: 'white',
       createdAt: this.now(),
       lastActivity: this.now(),
     };
@@ -275,6 +337,8 @@ export class Matches {
       actions: room.actions,
       outcome: room.outcome,
       you: this.sideOf(room, accountId),
+      clock: { ...room.clock },
+      endedBy: room.endedBy,
     };
   }
 

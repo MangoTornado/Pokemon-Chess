@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { PokemonChess } from '../src/engine/variant.ts';
 import { autodraft } from '../src/game/autodraft.ts';
 import { loadDexFromDisk } from './gameDex.ts';
-import { createValidator } from './gameValidator.ts';
+import { createEngineOps } from './gameValidator.ts';
 import { Matches } from './matches.ts';
 import type { EndInfo } from './matches.ts';
 
 const dex = loadDexFromDisk();
-const validate = createValidator(dex);
+const engine = createEngineOps(dex);
+const validate = engine.validate;
 
 /** A legal move's encoding for the side to move, from the game a seed produces. */
 function firstLegal(seed: string, priorActions: number[] = []): { encoded: number; turn: 'white' | 'black' } {
@@ -50,7 +51,7 @@ describe('server-side move validation', () => {
 
 describe('Matches with a validator (server-authoritative)', () => {
   function ranked(onEnd?: (i: EndInfo) => void) {
-    const m = new Matches(undefined, undefined, validate, onEnd);
+    const m = new Matches(undefined, undefined, engine, onEnd);
     const p1 = m.enqueue({ accountId: 1, name: 'A' });
     const p2 = m.enqueue({ accountId: 2, name: 'B' });
     const id = p1.ok ? p1.value.id : '';
@@ -80,7 +81,7 @@ describe('Matches with a validator (server-authoritative)', () => {
 
   it('a private (friendly) game is not ranked', () => {
     const ends: EndInfo[] = [];
-    const m = new Matches(undefined, undefined, validate, (i) => ends.push(i));
+    const m = new Matches(undefined, undefined, engine, (i) => ends.push(i));
     const created = m.createPrivate({ accountId: 1, name: 'A' });
     const code = created.ok ? created.value.code! : '';
     const joined = m.joinByCode(code, { accountId: 2, name: 'B' });

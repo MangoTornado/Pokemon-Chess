@@ -18,7 +18,7 @@ import { Accounts } from './accounts.ts';
 import { Matches } from './matches.ts';
 import { createServer } from './server.ts';
 import { loadDexFromDisk } from './gameDex.ts';
-import { createValidator } from './gameValidator.ts';
+import { createEngineOps } from './gameValidator.ts';
 
 const PORT = Number(process.env.PORT ?? 8080);
 const DB_PATH = resolve(process.env.DB_PATH ?? './data/pokemon-chess.db');
@@ -33,7 +33,7 @@ const db = new Db(DB_PATH);
 // (matchmaking) games settle both ratings when they end. Private games are friendly and unrated.
 const dex = loadDexFromDisk();
 const accounts = new Accounts(db, () => new Date(), (species) => dex.getSpecies(species)?.evos ?? []);
-const matches = new Matches(undefined, undefined, createValidator(dex), (info) => {
+const matches = new Matches(undefined, undefined, createEngineOps(dex), (info) => {
   if (info.ranked) accounts.recordHeadToHead(info.whiteId, info.blackId, info.winner);
 });
 

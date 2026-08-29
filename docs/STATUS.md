@@ -1,7 +1,8 @@
 # Implementation status — what's complete, partial, and missing
 
 An honest map of the codebase against `docs/design/SPEC.md` and `docs/design/DIRECTION.md`, so it is
-clear what "a complete game" still needs. Updated 2026-08-28 (status effects executing + rendered).
+clear what "a complete game" still needs. Updated 2026-08-29 (server-authoritative online, friends,
+trading, evolution, ability immunities).
 
 Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 
@@ -18,7 +19,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | RNG (seeded, serialisable) | ✅ | `engine/rng.ts` — fair d6/coins, replayable. |
 | Determinism / replayability | ✅ | game = seed + action list; the property tests rely on it. |
 
-## The content system — complete at the descriptor level, not yet executed in the Clash
+## The content system — compiled in full; execution in the Clash is progressive
 
 | Area | State | Notes |
 |---|---|---|
@@ -46,17 +47,18 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Playable vs AI in the app | ✅ | title-screen opponent/difficulty picker; AI plays its turn automatically. |
 | Web Worker / off-thread search | ○ | runs on the main thread; fine at low depth, would stutter at Champion on a full board. |
 
-## The meta-game — backend built, client and ladder pending
+## The meta-game
 
 | Area | State | Notes |
 |---|---|---|
 | Accounts, passwords, sessions | ✅ | `server/` — scrypt, secure cookies, zero native deps. |
 | Profiles (display name, bio, status) | ✅ | server-side; validated and moderated-by-shape. |
 | Character customization (avatar) | ✅ | `profile/avatar.ts` — games-faithful, shared client/server model. |
-| Collection / Pokédex (individuals) | ◑ | `ui/CollectionScreen.tsx` — the owned grid (duplicates counted) and a Pokédex figure of distinct species / 1025. **Acquisition loop shipped:** a Gym win offers three Pokémon to catch (`RewardChooser`), claimed via `POST /api/collection/claim`. Evolution-through-play and trading remain. |
+| Collection / Pokédex (individuals) | ◑ | `ui/CollectionScreen.tsx` — the owned grid (duplicates counted) and a Pokédex figure of distinct species / 1025. **Acquisition loop shipped:** a Gym win offers three Pokémon to catch (`RewardChooser`), claimed via `POST /api/collection/claim`, and each individual trains toward evolution. Remaining: richer filters/sort and per-individual detail. |
 | Client UI for accounts/profile | ✅ | `ui/AccountScreen.tsx`, `ui/AvatarCustomizer.tsx`, `ui/useSession.ts`, `net/api.ts` — sign-up, login, profile fields, and the region-grouped trainer customizer, wired to the backend and routed from `App.tsx`. |
-| Ranked ladder + gym badges | ◑ | **Single-player ladder shipped.** `src/ladder/` + `ui/LadderScreen.tsx` — eight Kanto Gym Leaders fielding mono-type armies (`game/gymArmy.ts`), gyms unlock in canon order, Elo rating with league tiers, and a badge case a losing streak never strips (§17.8). Local-first, syncing to the account when signed in (`POST /api/ladder/result`, server-authoritative). Missing: human matchmaking (needs the multiplayer tract). |
-| Multiplayer (matchmaking, friendly games, live games) | ◑ | **Online play shipped and now server-authoritative.** `server/matches.ts` + `ui/OnlineScreen.tsx` — in-memory rooms, matchmaking (random pairing, **ranked**) and private games by shareable code (friendly). Since a game is a seed + action list, both clients draft the same armies from the shared seed; the server runs the engine (`server/gameValidator.ts`, dex read from disk) to validate every move — illegal or out-of-turn moves are rejected, king capture ends the game, and ranked games settle both ratings (`Accounts.recordHeadToHead`). Board plays via GameBoard controlled mode; client polls. Pending: friends graph/presence, chat, turn timers. |
+| Ranked ladder + gym badges | ◑ | **Single-player ladder shipped.** `src/ladder/` + `ui/LadderScreen.tsx` — eight Kanto Gym Leaders fielding mono-type armies (`game/gymArmy.ts`), gyms unlock in canon order, Elo rating with league tiers, and a badge case a losing streak never strips (§17.8). Local-first, syncing to the account when signed in (`POST /api/ladder/result`, server-authoritative). Human ranked matchmaking now ships too — see Multiplayer. |
+| Multiplayer (matchmaking, friendly games, live games) | ◑ | **Online play shipped and now server-authoritative.** `server/matches.ts` + `ui/OnlineScreen.tsx` — in-memory rooms, matchmaking (random pairing, **ranked**) and private games by shareable code (friendly). Since a game is a seed + action list, both clients draft the same armies from the shared seed; the server runs the engine (`server/gameValidator.ts`, dex read from disk) to validate every move — illegal or out-of-turn moves are rejected, king capture ends the game, and ranked games settle both ratings (`Accounts.recordHeadToHead`). **Turn clocks**: 8 min per side, debited server-side on every read/write; a flag-fall loses on time (`endedBy: 'timeout'`). Board plays via GameBoard controlled mode; client polls. Pending: presence (online/offline) and chat. |
+| Friends | ✅ | `ui/FriendsScreen.tsx` + `friendships` table — add by username, accept/decline, remove/withdraw; requesting someone who already asked you accepts instead. A friend row's primary action is Challenge, which opens a private game and hands you the code to send them. No free-text chat by design (§17.10 treats stranger chat as a moderation liability for this audience). |
 | Trading | ✅ | `ui/TradeScreen.tsx` + `trades` table — propose a swap of individuals to another trainer (give and/or request, picked from both collections), who accepts/declines; the proposer can cancel. Ownership is validated on both sides at propose and again at accept, and the swap runs in one transaction so nothing duplicates. Verified end-to-end over HTTP. |
 
 ## Presentation & onboarding
@@ -72,13 +74,19 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 
 ## Suggested order from here
 
-1. ~~Client account/profile UI~~ — **done.** Sign-up, login, profile, and the trainer customizer ship.
-2. **Execute compiled effects in the Clash** — ◑ **status slice done** (riders, Checkup, movement lock,
-   burn penalty, board markers). Remaining: abilities, items, hazards, weather, and the wider ISA op set.
-3. ~~The tutorial~~ — **done.** Twelve lessons, rot-proofed against the engine (§18.1).
-4. ~~The ladder & Gym Leader matches~~ — **done** (single-player). Eight gyms, Elo + badges, persisted.
-5. ~~Multiplayer~~ — **core + server-authoritative ranked shipped.** Matchmaking (ranked) and private
-   games (friendly); the server validates every move and settles ratings. Remaining: friends graph, chat, timers.
-6. ◑ **Sandbox, collection loop, trading, and evolution-through-play done.** Remaining: the deeper
-   ISA-op execution (abilities/items/hazards/weather firing in the Clash), and social polish
-   (friends graph, chat, turn timers).
+Everything in the original six-tract plan has shipped. What remains, in value order:
+
+1. **The rest of ISA-op execution in the Clash** — the one genuinely large tract left. Ability *immunities*
+   fire today; still to run: item effects, stat stages (Speed decides who swings first, so a Speed drop is
+   the highest-leverage one), hazards, and weather. Each is a slice of the same interpreter over the
+   already-compiled descriptors, so this is incremental rather than a rewrite.
+2. **Effect animations** — now unblocked for the effects that do fire (status marks land silently today).
+3. **Presence and chat** — a friend list that shows who is online, and a fixed quick-chat vocabulary
+   (§17.10 rules out free text between strangers for this audience).
+4. **Mega / Z-Move / Tera / Dynamax** — the data is present; these are in-battle transformations on top of
+   the ISA work in (1).
+5. **Off-thread AI search** — a Web Worker, so Champion depth cannot stutter the board.
+6. **Collection depth** — filters, sort, and per-individual detail (evolution line, record).
+
+Known measurements worth revisiting: White scores ~0.54 (Trainer) to ~0.68 (Ace) in self-play — normal for
+a chess-like game, but worth re-measuring if the bonus-move rule changes.

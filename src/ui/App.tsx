@@ -27,7 +27,9 @@ import { OnlineScreen } from './OnlineScreen.tsx';
 import { SandboxScreen } from './SandboxScreen.tsx';
 import { CollectionScreen } from './CollectionScreen.tsx';
 import { TradeScreen } from './TradeScreen.tsx';
+import { FriendsScreen } from './FriendsScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
+import { api } from '../net/api.ts';
 import { AvatarView } from './AvatarView.tsx';
 import { useSession } from './useSession.ts';
 import { useLadder } from '../ladder/store.ts';
@@ -45,6 +47,7 @@ type Screen =
   | { readonly kind: 'sandbox' }
   | { readonly kind: 'collection' }
   | { readonly kind: 'trade' }
+  | { readonly kind: 'friends' }
   | { readonly kind: 'gym'; readonly gymId: string }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
@@ -136,6 +139,18 @@ export function App() {
         />
       )}
 
+      {screen.kind === 'friends' && (
+        <FriendsScreen
+          signedIn={!!session.profile}
+          onExit={() => setScreen({ kind: 'title' })}
+          onSignIn={() => setScreen({ kind: 'account' })}
+          onChallenge={async () => {
+            const r = await api.mpCreate();
+            return r.ok ? r.value.game.code : null;
+          }}
+        />
+      )}
+
       {screen.kind === 'online' && (
         <OnlineScreen
           dex={dex}
@@ -164,6 +179,7 @@ export function App() {
           onSandbox={() => setScreen({ kind: 'sandbox' })}
           onCollection={() => setScreen({ kind: 'collection' })}
           onTrade={() => setScreen({ kind: 'trade' })}
+          onFriends={() => setScreen({ kind: 'friends' })}
         />
       )}
 
@@ -245,6 +261,7 @@ function TitleScreen({
   onSandbox,
   onCollection,
   onTrade,
+  onFriends,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
@@ -254,6 +271,7 @@ function TitleScreen({
   onSandbox: () => void;
   onCollection: () => void;
   onTrade: () => void;
+  onFriends: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
   const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
@@ -388,6 +406,9 @@ function TitleScreen({
       <div style={{ display: 'flex', gap: '1.1rem', flexWrap: 'wrap' }}>
         <button type="button" onClick={onCollection} style={linkStyle}>
           Collection & Pokédex
+        </button>
+        <button type="button" onClick={onFriends} style={linkStyle}>
+          Friends
         </button>
         <button type="button" onClick={onTrade} style={linkStyle}>
           Trade

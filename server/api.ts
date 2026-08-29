@@ -153,6 +153,30 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     return json(200, { profile: result.value });
   }
 
+  // ---- Friends ----
+  if (path === '/api/friends' || path.startsWith('/api/friends/')) {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const b = asObject(req.body);
+
+    if (method === 'GET' && path === '/api/friends') {
+      return json(200, { friends: accounts.friends(accountId) });
+    }
+    if (method === 'POST' && path === '/api/friends/request') {
+      const r = accounts.requestFriend(accountId, b.username);
+      return r.ok ? json(200, r.value) : json(400, r.error);
+    }
+    if (method === 'POST' && path === '/api/friends/accept') {
+      const r = accounts.acceptFriend(accountId, b.username);
+      return r.ok ? json(200, r.value) : json(400, r.error);
+    }
+    if (method === 'POST' && path === '/api/friends/remove') {
+      const r = accounts.removeFriend(accountId, b.username);
+      return r.ok ? json(200, r.value) : json(400, r.error);
+    }
+    return json(404, { error: 'Not found.' });
+  }
+
   // ---- Trading ----
   if (method === 'GET' && path === '/api/trades') {
     const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);

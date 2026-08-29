@@ -224,12 +224,13 @@ function OnlineGame({
   };
 
   const finished = room.status === 'over';
+  const how = room.endedBy === 'timeout' ? ' on time' : room.endedBy === 'resign' ? ' by resignation' : '';
   const outcomeText = finished
     ? room.outcome === 'draw'
       ? 'Draw.'
       : room.outcome === side
-        ? 'You win!'
-        : 'You lost.'
+        ? `You win${how}!`
+        : `You lost${how}.`
     : null;
 
   return (
@@ -257,6 +258,8 @@ function OnlineGame({
           </button>
         </div>
       </div>
+
+      <Clocks room={room} side={side} />
 
       {outcomeText && (
         <div
@@ -286,6 +289,53 @@ function OnlineGame({
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Both players' remaining thinking time.
+ *
+ * The server owns the clock (it debits the side on the move on every poll and ends the game on a
+ * flag-fall), so this ticks a local copy down between polls purely so the seconds move smoothly — the
+ * server's number always wins on the next poll.
+ */
+function Clocks({ room, side }: { room: RoomView; side: 'white' | 'black' }) {
+  const [tick, setTick] = useState(0);
+  const live = room.status === 'playing';
+  useEffect(() => {
+    if (!live) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [live]);
+  // Which side is on the move is not knowable from the action count (a bonus move keeps the same side on
+  // the move), so only the freshly-polled server value is drawn; `tick` just forces a re-render.
+  void tick;
+
+  const fmt = (ms: number) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  const box = (label: string, ms: number, mine: boolean) => (
+    <span
+      style={{
+        display: 'inline-flex', alignItems: 'baseline', gap: '0.4rem', padding: '0.3rem 0.6rem',
+        borderRadius: 7, background: 'var(--bg-raised)',
+        border: `1px solid ${ms < 30_000 ? '#f85149' : 'var(--border)'}`,
+      }}
+    >
+      <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{label}{mine ? ' (you)' : ''}</span>
+      <strong style={{ fontVariantNumeric: 'tabular-nums', color: ms < 30_000 ? '#f85149' : 'var(--text)' }}>{fmt(ms)}</strong>
+    </span>
+  );
+
+  return (
+    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+      {box('White', room.clock.white, side === 'white')}
+      {box('Black', room.clock.black, side === 'black')}
+      <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+        Run out of time and you lose the game.
+      </span>
+    </div>
+  );
+}
 
 function Panel({ title, children, onExit, exitLabel = 'Back to menu' }: { title: string; children: React.ReactNode; onExit: () => void; exitLabel?: string }) {
   return (

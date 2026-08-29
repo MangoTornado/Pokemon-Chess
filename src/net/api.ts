@@ -10,7 +10,7 @@
  * both the client and the API, so the origin is always the same and no base URL is needed.
  */
 
-import type { PublicProfile, TradeView } from '../profile/profile.ts';
+import type { FriendView, PublicProfile, TradeView } from '../profile/profile.ts';
 import type { Avatar, TrainerOption } from '../profile/avatar.ts';
 
 export interface ApiError {
@@ -70,6 +70,10 @@ export interface RoomView {
   readonly outcome: 'white' | 'black' | 'draw' | null;
   /** The requesting player's side, or null if only watching. */
   readonly you: 'white' | 'black' | null;
+  /** Thinking time left per side in ms. */
+  readonly clock: { white: number; black: number };
+  /** How the game ended, when it did. */
+  readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
 }
 
 export const api = {
@@ -98,6 +102,12 @@ export const api = {
   evolve: (id: number, target: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/evolve', { id, target }),
 
   avatarOptions: () => call<{ trainers: TrainerOption[] }>('GET', '/api/avatar-options'),
+
+  // --- Friends ---
+  friends: () => call<{ friends: FriendView[] }>('GET', '/api/friends'),
+  addFriend: (username: string) => call<{ state: 'pending' | 'accepted' }>('POST', '/api/friends/request', { username }),
+  acceptFriend: (username: string) => call<{ ok: true }>('POST', '/api/friends/accept', { username }),
+  removeFriend: (username: string) => call<{ ok: true }>('POST', '/api/friends/remove', { username }),
 
   // --- Trading ---
   trades: () => call<{ trades: TradeView[] }>('GET', '/api/trades'),

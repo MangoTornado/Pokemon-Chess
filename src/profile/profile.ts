@@ -54,6 +54,17 @@ export interface TradeView {
   readonly createdAt: string;
 }
 
+/** A friend or friend-request, from the viewer's point of view. */
+export interface FriendView {
+  readonly username: string;
+  readonly displayName: string;
+  readonly avatar: Avatar;
+  /** `friend` once accepted; `incoming`/`outgoing` while a request is pending. */
+  readonly state: 'friend' | 'incoming' | 'outgoing';
+  readonly rating: number;
+  readonly badge: string | null;
+}
+
 /** A validation outcome: the cleaned value, or an error message for the field. */
 export type FieldResult =
   | { readonly ok: true; readonly value: string }

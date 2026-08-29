@@ -112,6 +112,19 @@ export class Db {
       );
       CREATE INDEX IF NOT EXISTS idx_trades_to ON trades(to_account, status);
       CREATE INDEX IF NOT EXISTS idx_trades_from ON trades(from_account, status);
+
+      -- Friendships. One row per direction-agnostic pair, stored with the requester first so a pending
+      -- request knows who asked. status: pending | accepted | blocked.
+      CREATE TABLE IF NOT EXISTS friendships (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        requester    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        addressee    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TEXT NOT NULL,
+        UNIQUE(requester, addressee)
+      );
+      CREATE INDEX IF NOT EXISTS idx_friend_req ON friendships(requester, status);
+      CREATE INDEX IF NOT EXISTS idx_friend_addr ON friendships(addressee, status);
     `);
 
     // Columns added after the first schema shipped: `CREATE TABLE IF NOT EXISTS` will not add them to an

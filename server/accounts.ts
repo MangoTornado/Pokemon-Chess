@@ -15,7 +15,7 @@ import type { Avatar } from '../src/profile/avatar.ts';
 import {
   validateUsername, validatePassword, validateDisplayName, validateBio, validateStatus,
 } from '../src/profile/profile.ts';
-import type { PublicProfile, TradeView } from '../src/profile/profile.ts';
+import type { FriendView, PublicProfile, TradeView } from '../src/profile/profile.ts';
 import { updateRating, kFactorFor } from '../src/ladder/rating.ts';
 import { GYM_BY_ID, GYM_LEADERS, highestBadge } from '../src/ladder/badges.ts';
 
@@ -299,6 +299,100 @@ export class Accounts {
     // The winner's team trains (a draw trains neither).
     if (winner === 'white') this.grantTeamXp(whiteId);
     else if (winner === 'black') this.grantTeamXp(blackId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Friends
+  // -------------------------------------------------------------------------
+
+  private accountIdForUsername(username: string): number | null {
+    const row = this.db.raw.prepare('SELECT id FROM accounts WHERE username_lower = ?').get(username.toLowerCase()) as
+      | { id: number }
+      | undefined;
+    return row?.id ?? null;
+  }
+
+  /**
+   * Sends a friend request, or accepts one that is already pending from the other side.
+   *
+   * Requesting someone who has already requested you is the natural way to accept, so the same call does
+   * both — no separate "accept" needed when both sides ask.
+   */
+  requestFriend(accountId: number, username: unknown): Result<{ state: 'pending' | 'accepted' }> {
+    if (typeof username !== 'string') return fail('Choose someone to add.');
+    const other = this.accountIdForUsername(username);
+    if (other === null) return fail('No player with that name.');
+    if (other === accountId) return fail('You cannot add yourself.');
+
+    const existing = this.db.raw
+      .prepare('SELECT id, requester, status FROM friendships WHERE (requester = ? AND addressee = ?) OR (requester = ? AND addressee = ?)')
+      .get(accountId, other, other, accountId) as { id: number; requester: number; status: string } | undefined;
+
+    if (existing) {
+      if (existing.status === 'accepted') return fail('You are already friends.');
+      if (existing.status === 'blocked') return fail('That player cannot be added.');
+      // A pending request from the other side: this call accepts it.
+      if (existing.requester === other) {
+        this.db.raw.prepare('UPDATE friendships SET status = ? WHERE id = ?').run('accepted', existing.id);
+        return ok({ state: 'accepted' });
+      }
+      return fail('You have already sent a request.');
+    }
+
+    this.db.raw
+      .prepare('INSERT INTO friendships (requester, addressee, status, created_at) VALUES (?, ?, ?, ?)')
+      .run(accountId, other, 'pending', this.now().toISOString());
+    return ok({ state: 'pending' });
+  }
+
+  /** Accepts a pending incoming request. */
+  acceptFriend(accountId: number, username: unknown): Result<{ ok: true }> {
+    if (typeof username !== 'string') return fail('Choose a request.');
+    const other = this.accountIdForUsername(username);
+    if (other === null) return fail('No player with that name.');
+    const info = this.db.raw
+      .prepare("UPDATE friendships SET status = 'accepted' WHERE requester = ? AND addressee = ? AND status = 'pending'")
+      .run(other, accountId);
+    if (info.changes === 0) return fail('No pending request from that player.');
+    return ok({ ok: true });
+  }
+
+  /** Removes a friend, or withdraws/declines a request — the same "no longer connected" action. */
+  removeFriend(accountId: number, username: unknown): Result<{ ok: true }> {
+    if (typeof username !== 'string') return fail('Choose someone to remove.');
+    const other = this.accountIdForUsername(username);
+    if (other === null) return fail('No player with that name.');
+    this.db.raw
+      .prepare('DELETE FROM friendships WHERE (requester = ? AND addressee = ?) OR (requester = ? AND addressee = ?)')
+      .run(accountId, other, other, accountId);
+    return ok({ ok: true });
+  }
+
+  /** Friends and pending requests for an account, each with the public bits needed to show a row. */
+  friends(accountId: number): FriendView[] {
+    const rows = this.db.raw
+      .prepare(`
+        SELECT f.requester, f.addressee, f.status,
+               a.username, p.display_name, p.avatar, p.rating, p.badge
+          FROM friendships f
+          JOIN accounts a ON a.id = CASE WHEN f.requester = ? THEN f.addressee ELSE f.requester END
+          JOIN profiles p ON p.account_id = a.id
+         WHERE (f.requester = ? OR f.addressee = ?) AND f.status IN ('pending', 'accepted')
+         ORDER BY f.status, a.username
+      `)
+      .all(accountId, accountId, accountId) as {
+        requester: number; addressee: number; status: string;
+        username: string; display_name: string; avatar: string; rating: number; badge: string | null;
+      }[];
+
+    return rows.map((r) => ({
+      username: r.username,
+      displayName: r.display_name,
+      avatar: JSON.parse(r.avatar) as Avatar,
+      state: r.status === 'accepted' ? 'friend' : r.requester === accountId ? 'outgoing' : 'incoming',
+      rating: r.rating,
+      badge: r.badge,
+    }));
   }
 
   // -------------------------------------------------------------------------
