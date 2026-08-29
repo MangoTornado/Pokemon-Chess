@@ -82,6 +82,8 @@ export interface RoomView {
   readonly clock: { white: number; black: number };
   /** How the game ended, when it did. */
   readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
+  /** Recent quick-chat, oldest first. */
+  readonly chat: readonly { side: 'white' | 'black'; name: string; phrase: number; at: number }[];
 }
 
 export const api = {
@@ -157,6 +159,10 @@ export const api = {
   mpMove: (id: string, ply: number, encoded: number) =>
     call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/move`, { ply, encoded }),
   mpResign: (id: string) => call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/resign`),
+  /** The fixed quick-chat vocabulary; the client sends an index into it, never a string. */
+  mpPhrases: () => call<{ phrases: string[] }>('GET', '/api/mp/phrases'),
+  mpSay: (id: string, phrase: number) =>
+    call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/say`, { phrase }),
   mpOutcome: (id: string, outcome: 'white' | 'black' | 'draw') =>
     call<{ game: RoomView }>('POST', `/api/mp/game/${encodeURIComponent(id)}/outcome`, { outcome }),
 };

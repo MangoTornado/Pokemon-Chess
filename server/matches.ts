@@ -3,12 +3,14 @@
  *
  * The engine is pure and a game is a seed plus an ordered action list (SPEC §20.6), so a live match needs
  * to relay only two things: the shared seed both clients draft from, and the growing list of encoded moves.
- * This manager owns the rooms, pairs players, and enforces the invariants a relay can enforce without
- * running the engine — membership, and that moves append in order (an optimistic `ply` check that stops
- * double-submits and races). Move *legality* and whose-turn-it-is are validated by the clients' own
- * authoritative engine; full server-side validation waits until the engine builds under Node's strip-only
- * TypeScript (its constructors use parameter properties today), and is tracked as a follow-up. Until then
- * online play is unranked, so a trusted client cannot inflate a rating.
+ * This manager owns the rooms, pairs players, and enforces every invariant a server can: membership, that
+ * moves append in order (an optimistic `ply` check that stops double-submits and races), the turn clocks, and
+ * — through the injected {@link EngineOps} — that each move is actually **legal** for the side making it. That
+ * last one is why matchmaking games are ranked: the server runs the same pure engine the clients do, so a
+ * trusted client cannot inflate a rating.
+ *
+ * It also carries the fixed quick-chat vocabulary, which is an index into a closed list rather than free text,
+ * so there is nothing to moderate.
  *
  * In-memory by design: a match is ephemeral, and a single-VM deploy (the Oracle Cloud target) keeps all
  * rooms in one process. Finished and abandoned rooms are pruned so memory does not grow without bound.
@@ -30,6 +32,42 @@ const QUEUE_TTL_MS = 5 * 60 * 1000;
  * super-effective chain (which is one "turn" made of several sub-moves).
  */
 const CLOCK_MS = 8 * 60 * 1000;
+
+/**
+ * The fixed quick-chat vocabulary.
+ *
+ * SPEC §17.10 rules out free text between strangers, because this game's audience includes children and
+ * unmoderated chat is a liability. A closed phrase list keeps the social warmth — greeting an opponent,
+ * conceding a good move, apologising for a slow turn — with nothing to moderate, because nothing arbitrary
+ * can be said. The client sends an index into this list, never a string.
+ */
+export const QUICK_CHAT: readonly string[] = [
+  'Hi! Good luck.',
+  'Good game!',
+  'Nice move.',
+  'Ouch — that hurt.',
+  'Thinking…',
+  'Sorry, slow connection.',
+  'Well played.',
+  'Close one!',
+  'Rematch?',
+  'Thanks for the game.',
+];
+
+/** One quick-chat line as sent, with who said it. */
+export interface ChatLine {
+  readonly side: Side;
+  readonly name: string;
+  /** Index into {@link QUICK_CHAT}. */
+  readonly phrase: number;
+  readonly at: number;
+}
+
+/** How many lines a room keeps, so a long game cannot grow unbounded. */
+const CHAT_HISTORY = 20;
+
+/** How long a player must wait between lines, so quick-chat cannot be used to spam. */
+const CHAT_COOLDOWN_MS = 3000;
 
 export type Side = 'white' | 'black';
 export type RoomStatus = 'waiting' | 'playing' | 'over';
@@ -64,6 +102,9 @@ interface Room {
   endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
   /** Guards the one-time end transition (rating settlement fires exactly once). */
   ended: boolean;
+  chat: ChatLine[];
+  /** Last time each side said something, for the cooldown. */
+  lastChatAt: { white: number; black: number };
   /** Thinking time left per side, in ms. */
   clock: { white: number; black: number };
   /** When the side to move started thinking, for deducting elapsed time. Null while waiting to start. */
@@ -90,6 +131,8 @@ export interface RoomView {
   readonly clock: { white: number; black: number };
   /** How the game ended, when it did — so the UI can say "on time" rather than just "you lost". */
   readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
+  /** Recent quick-chat, oldest first. */
+  readonly chat: readonly ChatLine[];
 }
 
 export type MatchResult<T> = { ok: true; value: T } | { ok: false; error: string; status: number };
@@ -289,6 +332,32 @@ export class Matches {
     }
   }
 
+  /**
+   * Says one of the fixed quick-chat lines.
+   *
+   * Takes an index rather than a string, so nothing a player types can ever reach another player. Rate-limited
+   * per side, because a closed vocabulary can still be spammed.
+   */
+  say(id: string, accountId: number, phrase: unknown): MatchResult<RoomView> {
+    const room = this.rooms.get(id);
+    if (!room) return fail('No such game.', 404);
+    const side = this.sideOf(room, accountId);
+    if (!side) return fail('You are not a player in this game.', 403);
+    if (!Number.isInteger(phrase)) return fail('Unknown phrase.');
+    const index = phrase as number;
+    if (index < 0 || index >= QUICK_CHAT.length) return fail('Unknown phrase.');
+
+    const now = this.now();
+    if (now - room.lastChatAt[side] < CHAT_COOLDOWN_MS) return fail('One message at a time, please.', 429);
+    room.lastChatAt[side] = now;
+
+    const name = (side === 'white' ? room.white : room.black)?.name ?? 'Player';
+    room.chat.push({ side, name, phrase: index, at: now });
+    if (room.chat.length > CHAT_HISTORY) room.chat.splice(0, room.chat.length - CHAT_HISTORY);
+    room.lastActivity = now;
+    return ok(this.view(room, accountId));
+  }
+
   /** Rooms currently in memory, for a health check. */
   count(): number {
     return this.rooms.size;
@@ -309,6 +378,10 @@ export class Matches {
       outcome: null,
       endedBy: null,
       ended: false,
+      chat: [],
+      // -Infinity, not 0: with a clock that starts at zero, 0 would read as "just spoke" and silence the
+      // first message of the game.
+      lastChatAt: { white: -Infinity, black: -Infinity },
       clock: { white: CLOCK_MS, black: CLOCK_MS },
       // The clock starts when the second player arrives, not while waiting for one.
       turnStartedAt: null,
@@ -339,6 +412,7 @@ export class Matches {
       you: this.sideOf(room, accountId),
       clock: { ...room.clock },
       endedBy: room.endedBy,
+      chat: [...room.chat],
     };
   }
 

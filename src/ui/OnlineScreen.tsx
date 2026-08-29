@@ -264,6 +264,11 @@ function OnlineGame({
       {/* A ranked game's result is recorded server-side, which is what issues the encounter. */}
       {finished && <EncounterCard dex={dex} />}
 
+      <QuickChat room={room} onSay={async (phrase) => {
+        const r = await api.mpSay(room.id, phrase);
+        if (r.ok) setRoom(r.value.game);
+      }} />
+
       <Clocks room={room} side={side} />
 
       {outcomeText && (
@@ -294,6 +299,61 @@ function OnlineGame({
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Quick chat — a closed phrase list, not a chat box.
+ *
+ * SPEC §17.10 rules out free text between strangers for this audience, so a player picks from a fixed
+ * vocabulary and the client sends an index. That keeps the social warmth of greeting an opponent or conceding
+ * a good move, with nothing to moderate because nothing arbitrary can be said.
+ */
+function QuickChat({ room, onSay }: { room: RoomView; onSay: (phrase: number) => void }) {
+  const [phrases, setPhrases] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    void api.mpPhrases().then((r) => { if (r.ok) setPhrases(r.value.phrases); });
+  }, []);
+
+  return (
+    <div style={{ display: 'grid', gap: '0.4rem' }}>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        <button type="button" onClick={() => setOpen((v) => !v)} style={ghost}>
+          💬 {open ? 'Close' : 'Say something'}
+        </button>
+        {/* The most recent line, so a message is never missed while the panel is shut. */}
+        {room.chat.length > 0 && !open && (
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+            <strong style={{ color: 'var(--text)' }}>{room.chat[room.chat.length - 1]!.name}:</strong>{' '}
+            {phrases[room.chat[room.chat.length - 1]!.phrase] ?? '…'}
+          </span>
+        )}
+      </div>
+
+      {open && (
+        <div style={{ display: 'grid', gap: '0.45rem', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 10, padding: '0.6rem 0.75rem' }}>
+          <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+            {phrases.map((text, i) => (
+              <button key={i} type="button" onClick={() => onSay(i)} style={{ ...ghost, fontSize: '0.76rem', padding: '0.25rem 0.55rem' }}>
+                {text}
+              </button>
+            ))}
+          </div>
+          {room.chat.length > 0 && (
+            <div style={{ display: 'grid', gap: '0.15rem', maxHeight: 120, overflowY: 'auto', borderTop: '1px solid var(--border)', paddingTop: '0.4rem' }}>
+              {room.chat.map((line, i) => (
+                <span key={i} style={{ fontSize: '0.78rem' }}>
+                  <strong style={{ color: line.side === room.you ? 'var(--accent)' : 'var(--text)' }}>{line.name}:</strong>{' '}
+                  <span style={{ color: 'var(--text-dim)' }}>{phrases[line.phrase] ?? '…'}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * Both players' remaining thinking time.

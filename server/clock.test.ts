@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { Matches } from './matches.ts';
+import { Matches, QUICK_CHAT } from './matches.ts';
 import type { EndInfo } from './matches.ts';
 
 /** A Matches with a hand-cranked clock, so timeouts are tested without waiting. */
@@ -97,5 +97,58 @@ describe('turn clock', () => {
     const id2 = paired(h2);
     const o = h2.m.reportOutcome(id2, white.accountId, 'draw');
     expect(o.ok && o.value.endedBy).toBe('draw');
+  });
+});
+
+describe('quick chat', () => {
+  it('says a phrase by index and records who said it', () => {
+    const h = harness();
+    const id = paired(h);
+    const r = h.m.say(id, white.accountId, 0);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.value.chat).toHaveLength(1);
+    expect(r.ok && r.value.chat[0]).toMatchObject({ side: 'white', name: 'W', phrase: 0 });
+  });
+
+  it('refuses anything outside the fixed vocabulary', () => {
+    const h = harness();
+    const id = paired(h);
+    expect(h.m.say(id, white.accountId, -1).ok).toBe(false);
+    expect(h.m.say(id, white.accountId, QUICK_CHAT.length).ok).toBe(false);
+    expect(h.m.say(id, white.accountId, 'nice try' as unknown as number).ok).toBe(false);
+  });
+
+  it('refuses a non-member', () => {
+    const h = harness();
+    const id = paired(h);
+    const r = h.m.say(id, 999, 0);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.status).toBe(403);
+  });
+
+  it('rate-limits, so a closed vocabulary still cannot be spammed', () => {
+    const h = harness();
+    const id = paired(h);
+    expect(h.m.say(id, white.accountId, 0).ok).toBe(true);
+    const tooSoon = h.m.say(id, white.accountId, 1);
+    expect(tooSoon.ok).toBe(false);
+    expect(!tooSoon.ok && tooSoon.status).toBe(429);
+
+    // The other player is not blocked by their opponent's cooldown.
+    expect(h.m.say(id, black.accountId, 1).ok).toBe(true);
+    // And after the cooldown, White may speak again.
+    h.advance(4000);
+    expect(h.m.say(id, white.accountId, 2).ok).toBe(true);
+  });
+
+  it('keeps only recent history, so a long game cannot grow unbounded', () => {
+    const h = harness();
+    const id = paired(h);
+    for (let i = 0; i < 40; i++) {
+      h.advance(4000);
+      h.m.say(id, i % 2 === 0 ? white.accountId : black.accountId, i % QUICK_CHAT.length);
+    }
+    const state = h.m.state(id, white.accountId);
+    expect(state.ok && state.value.chat.length).toBeLessThanOrEqual(20);
   });
 });

@@ -10,7 +10,7 @@
  */
 
 import { Accounts } from './accounts.ts';
-import { Matches } from './matches.ts';
+import { Matches, QUICK_CHAT } from './matches.ts';
 import { TRAINERS } from '../src/profile/avatar.ts';
 
 export interface ApiRequest {
@@ -55,7 +55,9 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
       return mpResult(matches.joinByCode(code, player));
     }
 
-    const gameMatch = /^\/api\/mp\/game\/([A-Za-z0-9]+)(\/move|\/resign|\/outcome)?$/.exec(path);
+    if (method === 'GET' && path === '/api/mp/phrases') return json(200, { phrases: QUICK_CHAT });
+
+    const gameMatch = /^\/api\/mp\/game\/([A-Za-z0-9]+)(\/move|\/resign|\/outcome|\/say)?$/.exec(path);
     if (gameMatch) {
       const gameId = gameMatch[1]!;
       const action = gameMatch[2];
@@ -64,6 +66,7 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
         return mpResult(matches.move(gameId, accountId, Number(b.ply), Number(b.encoded)));
       }
       if (method === 'POST' && action === '/resign') return mpResult(matches.resign(gameId, accountId));
+      if (method === 'POST' && action === '/say') return mpResult(matches.say(gameId, accountId, b.phrase));
       if (method === 'POST' && action === '/outcome') {
         const outcome = b.outcome;
         if (outcome !== 'white' && outcome !== 'black' && outcome !== 'draw') {
