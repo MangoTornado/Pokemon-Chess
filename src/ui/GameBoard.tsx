@@ -29,8 +29,9 @@ import { HAZARD_LABEL, WEATHER_LABEL } from '../engine/field.ts';
 import type { Art } from '../game/arts.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
-import { chooseMove } from '../ai/search.ts';
 import type { Difficulty } from '../ai/search.ts';
+import { describeGame } from '../ai/gameDescriptor.ts';
+import { useAsyncSearch } from '../ai/useAsyncSearch.ts';
 import { replay } from '../game/replay.ts';
 import { BoardPiece } from './BoardPiece.tsx';
 import { FxLayer, useBattleFx } from './BattleFx.tsx';
@@ -162,6 +163,7 @@ export function GameBoard({
   const [effects, setEffects] = useState<readonly SquareEffect[]>([]);
   const [last, setLast] = useState<ResolvedMove | null>(null);
   const nonce = useRef(0);
+  const { search } = useAsyncSearch(dex);
 
   // In controlled (online) mode the game is a pure replay of the shared action list; in local mode it is
   // the mutated state above.
@@ -320,14 +322,22 @@ export function GameBoard({
   // A seed derived from the move count keeps the AI's play reproducible for a given game.
   useEffect(() => {
     if (!ai || controlled || over || game.turn !== ai.side) return;
+    let abandoned = false;
     const timer = setTimeout(() => {
-      const choice = chooseMove(game, ai.difficulty, game.history.length + 1);
-      if (!choice) return;
-      const target = game.legalMoves().find((m) => m.move.encoded === choice.move.encoded);
-      if (target) play(target);
+      // The search runs in a worker, so a deep Champion search cannot stutter the board mid-animation. The
+      // game is sent as a descriptor (seed + actions), which is all a rebuild needs.
+      const descriptor = describeGame(setup, seed, game);
+      void search(descriptor, ai.difficulty, game.history.length + 1, game).then((encoded) => {
+        if (abandoned || encoded === null) return;
+        const target = game.legalMoves().find((m) => m.move.encoded === encoded);
+        if (target) play(target);
+      });
     }, effects.length > 0 ? EFFECT_MS + 60 : 220);
-    return () => clearTimeout(timer);
-  }, [ai, controlled, over, game, effects.length, play]);
+    return () => {
+      abandoned = true;
+      clearTimeout(timer);
+    };
+  }, [ai, controlled, over, game, effects.length, play, search, setup, seed]);
 
   const effectBySquare = useMemo(() => {
     const map = new Map<Square, SquareEffect>();

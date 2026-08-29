@@ -11,6 +11,7 @@ import type { Dex } from '../data/dex.ts';
 import { PokemonChess } from '../engine/variant.ts';
 import type { Loadout, ResolvedMove } from '../engine/variant.ts';
 import type { Position } from '../engine/position.ts';
+import type { WeatherKind } from '../engine/field.ts';
 
 export interface ReplayResult {
   readonly game: PokemonChess;
@@ -31,8 +32,12 @@ export function replay(
   setup: { position: Position; loadout: Loadout },
   seed: string,
   actions: readonly number[],
+  /** A match weather condition, which must be reproduced for the replay to match the original game. */
+  weather?: WeatherKind,
 ): ReplayResult {
-  let game = PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed });
+  let game = PokemonChess.create({
+    dex, position: setup.position, loadout: setup.loadout, seed, ...(weather ? { weather } : {}),
+  });
   let last: ResolvedMove | null = null;
   let applied = 0;
 
