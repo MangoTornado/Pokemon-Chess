@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Matches } from './matches.ts';
+import { MAX_ENCODED_MOVE } from '../src/engine/position.ts';
 
 /** A Matches with a controllable clock and deterministic ids, so tests are not time- or luck-dependent. */
 function make() {
@@ -114,7 +115,10 @@ describe('moves', () => {
   it('rejects a malformed encoded move', () => {
     const { m, id } = playing();
     expect(m.move(id, alice.accountId, 0, -1).ok).toBe(false);
-    expect(m.move(id, alice.accountId, 0, 0xffffff + 1).ok).toBe(false);
+    // Not 0xffffff + 1: that is exactly MOVE_CASTLE_QUEEN, a real action. Bounding the encoding by hand is
+    // what broke it, so the ceiling to test against is the derived one.
+    expect(m.move(id, alice.accountId, 0, MAX_ENCODED_MOVE + 1).ok).toBe(false);
+    expect(m.move(id, alice.accountId, 0, 1.5).ok).toBe(false);
   });
 
   it('resign hands the win to the other side and stops further moves', () => {
