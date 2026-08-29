@@ -13,7 +13,8 @@ import {
   resolveKit,
 } from './draft.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
-import { isTransformItem } from './transform.ts';
+import { isTransformItem, megaStoneFor, zCrystalType } from './transform.ts';
+import { autodraft } from './autodraft.ts';
 import { candidateArts } from './arts.ts';
 
 const dex = await Dex.load();
@@ -235,6 +236,36 @@ describe('the drafted kit', () => {
       const previewed = resolveKit(dex, slot, slot.picked!);
       const fielded = finalized.loadout.get(finalized.position.pieceAt(slot.square)!.id)!;
       expect(fielded).toEqual(previewed);
+    }
+  });
+
+  it('hands the auto-draft exactly one transformation item per side, not one per capable piece', () => {
+    // The bug this pins cost the game its damage. A mega stone and a Z-crystal do nothing turn to turn, so
+    // every one handed out *replaces* a Life Orb or a Choice Band with dead weight. Giving 70% of mega-capable
+    // pieces a stone nearly doubled average game length in self-play (224 plies to 426) because nothing could
+    // be finished. A side can spend one transformation, so it gets one such item.
+    for (const seed of ['grant-a', 'grant-b', 'grant-c']) {
+      const { position, loadout } = autodraft(dex, seed);
+      const perSide: Record<string, number> = { white: 0, black: 0 };
+      for (const { piece } of position.allPieces()) {
+        const item = loadout.get(piece.id)?.item;
+        if (item && isTransformItem(dex, item)) perSide[piece.side] = (perSide[piece.side] ?? 0) + 1;
+      }
+      expect(perSide.white, seed).toBeLessThanOrEqual(1);
+      expect(perSide.black, seed).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('gives that item to a piece that can actually use it', () => {
+    const { position, loadout } = autodraft(dex, 'grant-usable');
+    for (const { piece } of position.allPieces()) {
+      const entry = loadout.get(piece.id)!;
+      if (!entry.item || !isTransformItem(dex, entry.item)) continue;
+      const species = dex.requireSpecies(entry.species);
+      const stone = megaStoneFor(dex, species);
+      // Either it is this species' own stone, or a crystal matching the type it fights as.
+      const usable = entry.item === stone?.id || zCrystalType(dex, entry.item) === entry.type;
+      expect(usable, `${species.name} holding ${entry.item}`).toBe(true);
     }
   });
 

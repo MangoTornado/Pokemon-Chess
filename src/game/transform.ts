@@ -136,6 +136,46 @@ export function zBasePower(basePower: number): number {
   return 200;
 }
 
+/** A drafted piece, as far as choosing the side's transformation item is concerned. */
+export interface TransformCandidate {
+  readonly pieceId: number;
+  readonly species: SpeciesEntry;
+  readonly type: BattleType;
+}
+
+/**
+ * Which one piece on a side should carry a transformation item, and which item.
+ *
+ * One per side, because that is exactly how many transformations a side can spend. This is not a balance
+ * nicety — handing stones out freely is actively destructive: a mega stone and a Z-crystal do nothing at all
+ * turn to turn, so every extra one *replaces* a Life Orb or a Choice Band with dead weight. Giving 70% of
+ * mega-capable pieces a stone measurably drained the whole game's damage and nearly doubled average game
+ * length in self-play (224 plies to 426), because nobody could finish anything.
+ *
+ * A mega stone is preferred over a Z-crystal where one exists: it is permanent and it changes stats, ability
+ * and sometimes typing, where a Z-Move is one blow. Returns null if the side has nobody who could use either.
+ */
+export function chooseTransformItem(
+  dex: Dex,
+  candidates: readonly TransformCandidate[],
+  rng: { below(bound: number): number },
+): { pieceId: number; item: string } | null {
+  const megaCapable = candidates
+    .map((c) => ({ c, stone: megaStoneFor(dex, c.species) }))
+    .filter((x): x is { c: TransformCandidate; stone: ItemEntry } => x.stone !== null);
+  if (megaCapable.length > 0) {
+    const chosen = megaCapable[rng.below(megaCapable.length)]!;
+    return { pieceId: chosen.c.pieceId, item: chosen.stone.id };
+  }
+
+  const zCapable = candidates
+    .map((c) => ({ c, crystal: zCrystalFor(dex, c.type) }))
+    .filter((x): x is { c: TransformCandidate; crystal: ItemEntry } => x.crystal !== null);
+  if (zCapable.length === 0) return null;
+  const chosen = zCapable[rng.below(zCapable.length)]!;
+  return { pieceId: chosen.c.pieceId, item: chosen.crystal.id };
+}
+
 /**
  * Whether an item does something through the transformation system rather than through `rules/items.ts`.
  *

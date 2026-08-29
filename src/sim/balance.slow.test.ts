@@ -7,6 +7,11 @@
  * honest version costs minutes, and it lives here rather than taxing every `npm test`.
  *
  * Run with `npm run test:balance`.
+ *
+ * The budget is minutes, not seconds, and it grew when the game did: transformations and redirection widened
+ * the action list, and measured against the same seeds a batch that once averaged 224 plies per game now
+ * averages around 411. That is the cost of a deeper game, and the assertion below — not the wall clock — is
+ * what this file is protecting, so the timeout is set with room rather than the sample cut down to fit it.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -29,7 +34,7 @@ describe('balance', () => {
    * one-sided result could be colour rather than skill. Thirty games per side is the smallest sample where
    * the effect is comfortably clear — at 14 it once landed exactly on 0.5 and proved nothing.
    */
-  it('a deeper-searching AI outscores a shallower one, in either colour', { timeout: 180000 }, () => {
+  it('a deeper-searching AI outscores a shallower one, in either colour', { timeout: 900000 }, () => {
     const asWhite = runBatch(dex, { games: 30, white: DEEP, black: SHALLOW, seed: 'strength', maxPlies: 200, draft: 'fresh' });
     expect(asWhite.whiteScore).toBeGreaterThan(0.55);
 

@@ -17,6 +17,8 @@ import { Position } from '../engine/position.ts';
 import { Rng } from '../engine/rng.ts';
 import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
 import { pickHeldItem } from './heldItems.ts';
+import { chooseTransformItem } from './transform.ts';
+import type { TransformCandidate } from './transform.ts';
 import { buildMoveset } from './moveset.ts';
 import { pickTeraType } from './tera.ts';
 
@@ -82,6 +84,8 @@ export function autodraft(dex: Dex, seed: string | number): DraftResult {
   const drafted: DraftedPiece[] = [];
 
   for (const side of ['white', 'black'] as const) {
+    /** This side's pieces, collected so exactly one of them can be given the transformation item. */
+    const candidates: TransformCandidate[] = [];
     for (const cls of PIECE_CLASSES) {
       for (const square of STARTING_SQUARES[side][cls]) {
         const species = pickForRole(dex, cls, rng, taken);
@@ -91,7 +95,7 @@ export function autodraft(dex: Dex, seed: string | number): DraftResult {
         // Each piece fights with one of its species' real abilities (the first non-hidden slot) and a
         // role-appropriate held item, so ability and item effects are grounded in the actual Pokémon.
         const ability = species.abilities[0];
-        const item = pickHeldItem(species, cls, type, rng, dex);
+        const item = pickHeldItem(species, cls, type, rng);
         // The Tera type is derived from the kit the piece will actually carry, so Terastallising turns its
         // best coverage move into STAB. The moveset is built with the same seed the engine will use.
         const moveset = buildMoveset(dex, species, type, `${seed}:${piece.id}`);
@@ -103,7 +107,16 @@ export function autodraft(dex: Dex, seed: string | number): DraftResult {
           ...(teraType ? { teraType } : {}),
         });
         drafted.push({ side, cls, square, species, type });
+        candidates.push({ pieceId: piece.id, species, type });
       }
+    }
+
+    // Exactly one piece per side carries a mega stone or a Z-crystal, matching the one transformation a side
+    // can spend. Any more would be dead weight in place of a real item — see chooseTransformItem.
+    const grant = chooseTransformItem(dex, candidates, rng);
+    if (grant) {
+      const entry = loadout.get(grant.pieceId)!;
+      loadout.set(grant.pieceId, { ...entry, item: grant.item });
     }
   }
 

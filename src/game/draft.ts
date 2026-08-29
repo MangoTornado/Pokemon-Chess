@@ -178,6 +178,10 @@ export function isDraftComplete(slots: readonly DraftSlot[]): boolean {
  * Keyed by square rather than by piece id so the draft screen and {@link finalizeDraft} agree without the UI
  * needing a built position.
  */
+// Note the asymmetry with `autodraft`, which hands exactly one piece per side a mega stone or a Z-crystal: a
+// generated army has nobody choosing for it, so something must. A hand-drafted one does — the draft screen
+// offers the stone and the crystal on the pieces that can use them — so auto-granting here would override a
+// considered decision, and would make the screen's own kit preview a lie about what gets fielded.
 export function resolveKit(
   dex: Dex,
   slot: DraftSlot,
@@ -190,7 +194,7 @@ export function resolveKit(
   const key = `${seed}:${slot.square}`;
   const moveset = buildMoveset(dex, species, pick.type, key);
   const ability = pick.ability ?? species.abilities[0];
-  const item = pick.item ?? pickHeldItem(species, slot.cls, pick.type, new Rng(`kit:${key}`), dex);
+  const item = pick.item ?? pickHeldItem(species, slot.cls, pick.type, new Rng(`kit:${key}`));
   const teraType = pick.teraType ?? pickTeraType(species, pick.type, moveset);
   // Most species know no field move at all, so an absent art is a real answer rather than a gap.
   const art = pick.art ?? pickArt(dex, pick.species, key);
