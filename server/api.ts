@@ -144,6 +144,15 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     return json(200, { profile: result.value });
   }
 
+  if (method === 'POST' && path === '/api/collection/evolve') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const b = asObject(req.body);
+    const result = accounts.evolve(accountId, b.id, b.target);
+    if (!result.ok) return json(400, result.error);
+    return json(200, { profile: result.value });
+  }
+
   // ---- Trading ----
   if (method === 'GET' && path === '/api/trades') {
     const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);

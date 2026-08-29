@@ -7,7 +7,7 @@
  * long-tail completionist pursuit. Rewards flow in from the {@link RewardChooser}, offered after a win.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { Dex } from '../data/dex.ts';
 import type { SpeciesEntry } from '../data/schema.ts';
@@ -27,16 +27,25 @@ export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: Collection
   const [entries, setEntries] = useState<CollectionEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!signedIn) return;
-    let live = true;
+  const refresh = useCallback(() => {
     api.collection().then((r) => {
-      if (!live) return;
       if (r.ok) setEntries(r.value.collection);
       else setError(r.error.error);
     });
-    return () => { live = false; };
-  }, [signedIn]);
+  }, []);
+
+  useEffect(() => {
+    if (signedIn) refresh();
+  }, [signedIn, refresh]);
+
+  const evolve = useCallback(async (id: number, target: string) => {
+    setError(null);
+    const r = await api.evolve(id, target);
+    if (!r.ok) setError(r.error.error);
+    refresh();
+  }, [refresh]);
+
+  const evolvable = (entries ?? []).filter((e) => e.evolvesTo.length > 0);
 
   // Group owned individuals by species, keeping a count.
   const owned = useMemo(() => {
@@ -72,6 +81,38 @@ export function CollectionScreen({ dex, signedIn, onExit, onSignIn }: Collection
       </div>
 
       {error && <p style={{ color: '#f85149' }}>{error}</p>}
+
+      {evolvable.length > 0 && (
+        <div style={{ display: 'grid', gap: '0.5rem' }}>
+          <h3 style={{ margin: 0, fontSize: '0.95rem', color: 'var(--accent)' }}>Ready to evolve ({evolvable.length})</h3>
+          <p style={{ margin: 0, fontSize: '0.78rem', color: 'var(--text-dim)' }}>
+            Trained by your wins. Evolving spends the training and advances the Pokémon.
+          </p>
+          <div style={{ display: 'flex', gap: '0.55rem', flexWrap: 'wrap' }}>
+            {evolvable.map((e) => {
+              const s = dex.getSpecies(e.species);
+              return (
+                <div key={e.id} style={{ display: 'grid', gap: '0.3rem', padding: '0.55rem', background: 'var(--bg-raised)', border: '1px solid var(--accent)', borderRadius: 9, placeItems: 'center' }}>
+                  <div style={{ height: 40, display: 'grid', placeItems: 'center' }}>{s && <PokemonIcon species={s} />}</div>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700 }}>{e.nickname ?? s?.name ?? e.species}</span>
+                  <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                    {e.evolvesTo.map((target) => (
+                      <button
+                        key={target}
+                        type="button"
+                        onClick={() => evolve(e.id, target)}
+                        style={{ background: 'var(--accent)', color: '#1a1500', border: 'none', borderRadius: 6, padding: '0.25rem 0.5rem', fontSize: '0.72rem', fontWeight: 800, cursor: 'pointer' }}
+                      >
+                        → {dex.getSpecies(target)?.name ?? target}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {entries && owned.length === 0 && (
         <p style={{ color: 'var(--text-dim)' }}>

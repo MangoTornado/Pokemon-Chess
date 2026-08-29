@@ -38,15 +38,21 @@ const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 const fail = (error: string, field?: string): Result<never> =>
   ({ ok: false, error: field ? { error, field } : { error } });
 
+/** Wins needed to train an individual before it can evolve (SPEC §17.8 "through play"). */
+export const EVOLVE_XP = 3;
+
 export class Accounts {
   private readonly db: Db;
   private readonly now: () => Date;
+  /** Resolves a species' possible evolutions; injected so the service need not import the dex. */
+  private readonly evosOf: (species: string) => string[];
 
   // Fields are declared and assigned explicitly rather than via constructor parameter properties, because
   // Node's strip-only TypeScript loader (which runs the server) does not support parameter properties.
-  constructor(db: Db, now: () => Date = () => new Date()) {
+  constructor(db: Db, now: () => Date = () => new Date(), evosOf: (species: string) => string[] = () => []) {
     this.db = db;
     this.now = now;
+    this.evosOf = evosOf;
   }
 
   // -------------------------------------------------------------------------
@@ -223,11 +229,45 @@ export class Accounts {
   // -------------------------------------------------------------------------
 
   /** Every owned individual, most recent first. */
-  collection(accountId: number): { id: number; species: string; nickname: string | null; acquiredAt: string }[] {
+  collection(accountId: number): { id: number; species: string; nickname: string | null; xp: number; evolvesTo: string[]; acquiredAt: string }[] {
     const rows = this.db.raw
-      .prepare('SELECT id, species_id, nickname, acquired_at FROM collection WHERE account_id = ? ORDER BY id DESC')
-      .all(accountId) as { id: number; species_id: string; nickname: string | null; acquired_at: string }[];
-    return rows.map((r) => ({ id: r.id, species: r.species_id, nickname: r.nickname, acquiredAt: r.acquired_at }));
+      .prepare('SELECT id, species_id, nickname, xp, acquired_at FROM collection WHERE account_id = ? ORDER BY id DESC')
+      .all(accountId) as { id: number; species_id: string; nickname: string | null; xp: number; acquired_at: string }[];
+    return rows.map((r) => ({
+      id: r.id,
+      species: r.species_id,
+      nickname: r.nickname,
+      xp: r.xp,
+      // Evolutions the individual is ready for: it must have trained enough and have somewhere to evolve.
+      evolvesTo: r.xp >= EVOLVE_XP ? this.evosOf(r.species_id) : [],
+      acquiredAt: r.acquired_at,
+    }));
+  }
+
+  /** Trains the whole team by one — every owned individual gains a point of evolution progress on a win. */
+  grantTeamXp(accountId: number): void {
+    this.db.raw.prepare('UPDATE collection SET xp = xp + 1 WHERE account_id = ?').run(accountId);
+  }
+
+  /**
+   * Evolves an owned individual into one of its evolutions, spending its training.
+   *
+   * "Evolving through play" (§17.8): an individual trains as your team wins, and once trained can evolve —
+   * changing which species it is (and, for a branching line like Eevee, which one you choose).
+   */
+  evolve(accountId: number, collectionId: unknown, target: unknown): Result<PublicProfile> {
+    if (!Number.isInteger(collectionId) || typeof target !== 'string') return fail('Invalid evolution.');
+    const cid = collectionId as number;
+    const row = this.db.raw
+      .prepare('SELECT species_id, xp FROM collection WHERE id = ? AND account_id = ?')
+      .get(cid, accountId) as { species_id: string; xp: number } | undefined;
+    if (!row) return fail('You do not own that Pokémon.');
+    if (row.xp < EVOLVE_XP) return fail('This Pokémon needs more training to evolve.');
+    if (!this.evosOf(row.species_id).includes(target)) return fail('It cannot evolve into that.');
+    this.db.raw
+      .prepare('UPDATE collection SET species_id = ?, xp = xp - ? WHERE id = ? AND account_id = ?')
+      .run(target, EVOLVE_XP, cid, accountId);
+    return ok(this.publicProfile(accountId)!);
   }
 
   /**
@@ -255,6 +295,10 @@ export class Accounts {
     const set = this.db.raw.prepare('UPDATE profiles SET rating = ?, games = ?, updated_at = ? WHERE account_id = ?');
     set.run(newWhite, w.games + 1, stamp, whiteId);
     set.run(newBlack, b.games + 1, stamp, blackId);
+
+    // The winner's team trains (a draw trains neither).
+    if (winner === 'white') this.grantTeamXp(whiteId);
+    else if (winner === 'black') this.grantTeamXp(blackId);
   }
 
   // -------------------------------------------------------------------------
@@ -453,6 +497,9 @@ export class Accounts {
     this.db.raw
       .prepare('UPDATE profiles SET rating = ?, games = ?, badges = ?, badge = ?, updated_at = ? WHERE account_id = ?')
       .run(newRating, prof.games + 1, JSON.stringify(orderedBadges), highest?.badge ?? null, this.now().toISOString(), accountId);
+
+    // A win trains the team toward evolution (§17.8).
+    if (score === 1) this.grantTeamXp(accountId);
 
     return ok(this.publicProfile(accountId)!);
   }

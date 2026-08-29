@@ -51,6 +51,10 @@ export interface CollectionEntry {
   readonly id: number;
   readonly species: string;
   readonly nickname: string | null;
+  /** Training progress toward evolution. */
+  readonly xp: number;
+  /** Species this individual can evolve into right now (empty until trained / if it has no evolution). */
+  readonly evolvesTo: readonly string[];
   readonly acquiredAt: string;
 }
 
@@ -89,6 +93,9 @@ export const api = {
 
   /** Claims a post-match reward Pokémon into the collection; returns the updated profile. */
   claimReward: (species: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/claim', { species }),
+
+  /** Evolves a trained individual into one of its evolutions. */
+  evolve: (id: number, target: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/evolve', { id, target }),
 
   avatarOptions: () => call<{ trainers: TrainerOption[] }>('GET', '/api/avatar-options'),
 

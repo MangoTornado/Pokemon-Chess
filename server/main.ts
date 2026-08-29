@@ -28,11 +28,11 @@ const PRODUCTION = process.env.NODE_ENV === 'production';
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 const db = new Db(DB_PATH);
-const accounts = new Accounts(db);
 
 // The dex loads from disk so the server can run the pure engine and validate every online move; ranked
 // (matchmaking) games settle both ratings when they end. Private games are friendly and unrated.
 const dex = loadDexFromDisk();
+const accounts = new Accounts(db, () => new Date(), (species) => dex.getSpecies(species)?.evos ?? []);
 const matches = new Matches(undefined, undefined, createValidator(dex), (info) => {
   if (info.ranked) accounts.recordHeadToHead(info.whiteId, info.blackId, info.winner);
 });

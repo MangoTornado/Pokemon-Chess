@@ -85,6 +85,7 @@ export class Db {
         species_id  TEXT NOT NULL,
         declared_type TEXT,
         nickname    TEXT,
+        xp          INTEGER NOT NULL DEFAULT 0,
         acquired_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_collection_account ON collection(account_id);
@@ -117,6 +118,8 @@ export class Db {
     // existing database, so add them here if absent. Cheap and idempotent on every boot.
     this.addColumnIfMissing('profiles', 'games', 'INTEGER NOT NULL DEFAULT 0');
     this.addColumnIfMissing('profiles', 'badges', "TEXT NOT NULL DEFAULT '[]'");
+    // Training progress toward evolution, per owned individual (SPEC §17.8 "evolving through play").
+    this.addColumnIfMissing('collection', 'xp', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   /** Adds a column to a table if it is not already present. */

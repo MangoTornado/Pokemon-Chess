@@ -35,7 +35,8 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Area | State | Notes |
 |---|---|---|
 | Promotion (pawn → back-rank class) | ✅ | via the chess core; "evolution" reskin not yet surfaced. |
-| Evolution as progression, Mega/Z/Tera/Dynamax | ○ | data is all present (`species.json` has evo chains, mega stones); no gameplay yet. |
+| Evolution as progression | ✅ | **Evolution through play (§17.8).** Each owned individual trains as your team wins (a win grants team XP, gym or ranked online); once trained (`EVOLVE_XP`) the Collection screen offers its evolution(s) — a branching line like Eevee lets you choose. Server-validated against the species' real `evos`. |
+| Mega / Z / Tera / Dynamax | ○ | data is present (mega stones, etc.); no in-battle transformation yet. |
 
 ## The opponent
 
@@ -78,5 +79,6 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 4. ~~The ladder & Gym Leader matches~~ — **done** (single-player). Eight gyms, Elo + badges, persisted.
 5. ~~Multiplayer~~ — **core + server-authoritative ranked shipped.** Matchmaking (ranked) and private
    games (friendly); the server validates every move and settles ratings. Remaining: friends graph, chat, timers.
-6. ◑ **Sandbox, collection loop, and trading done.** Remaining: evolution-through-play, and the deeper
-   ISA-op execution (abilities/items/hazards/weather firing in the Clash).
+6. ◑ **Sandbox, collection loop, trading, and evolution-through-play done.** Remaining: the deeper
+   ISA-op execution (abilities/items/hazards/weather firing in the Clash), and social polish
+   (friends graph, chat, turn timers).
