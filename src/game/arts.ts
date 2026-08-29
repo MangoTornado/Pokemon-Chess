@@ -48,14 +48,30 @@ export function artOfMove(move: MoveEntry): Art | null {
  * screen when a species knows several, because hazards are the most positional — and so the most chess-like.
  */
 export function pickArt(dex: Dex, speciesId: string, seed: string | number): Art | null {
-  const candidates = dex
-    .learnsetOf(speciesId)
-    .filter((m) => m.category === 'Status')
-    .map(artOfMove)
-    .filter((a): a is Art => a !== null);
+  const candidates = candidateArts(dex, speciesId);
   if (candidates.length === 0) return null;
 
   const hazards = candidates.filter((a) => a.effect.kind === 'hazard');
   const pool = hazards.length > 0 ? hazards : candidates;
   return new Rng(`art:${seed}:${speciesId}`).pick(pool);
+}
+
+/**
+ * Every art a species could cast — the choices a drafting player gets to make between.
+ *
+ * {@link pickArt} takes one of these for you; a Ferrothorn that can lay Spikes, set Stealth Rock *or* raise
+ * Light Screen is three different pieces, and which one it is should be the player's call. Sorted by name so
+ * the same species always offers its arts in the same order.
+ */
+export function candidateArts(dex: Dex, speciesId: string): Art[] {
+  const seen = new Set<string>();
+  const arts: Art[] = [];
+  for (const move of dex.learnsetOf(speciesId)) {
+    if (move.category !== 'Status') continue;
+    const art = artOfMove(move);
+    if (!art || seen.has(art.id)) continue;
+    seen.add(art.id);
+    arts.push(art);
+  }
+  return arts.sort((a, b) => a.name.localeCompare(b.name));
 }

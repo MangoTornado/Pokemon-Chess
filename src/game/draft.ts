@@ -17,6 +17,11 @@ import type { PieceClass, Side } from '../engine/board.ts';
 import { PIECE_CLASSES, STARTING_SQUARES } from '../engine/board.ts';
 import { Position } from '../engine/position.ts';
 import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
+import { Rng } from '../engine/rng.ts';
+import { buildMoveset } from './moveset.ts';
+import { pickHeldItem } from './heldItems.ts';
+import { pickTeraType } from './tera.ts';
+import { pickArt } from './arts.ts';
 
 /** A single slot the draft is filling. */
 export interface DraftSlot {
@@ -162,9 +167,49 @@ export function isDraftComplete(slots: readonly DraftSlot[]): boolean {
  * Throws if the draft is not complete, because a match with a hole in it is nonsense. Callers should
  * check {@link isDraftComplete} first.
  */
+/**
+ * A drafted piece's full kit: the player's choices, with the auto-draft's choice filling in each blank.
+ *
+ * A slot only ever records what the player actually decided — species, type, and whichever of ability, item
+ * and Tera type they went on to choose. Everything they left alone is resolved here, the same way the
+ * auto-draft resolves it, so a hand-drafted army is never quietly weaker than a generated one and the draft
+ * screen can show a player exactly what a piece will carry before they commit to it.
+ *
+ * Keyed by square rather than by piece id so the draft screen and {@link finalizeDraft} agree without the UI
+ * needing a built position.
+ */
+export function resolveKit(
+  dex: Dex,
+  slot: DraftSlot,
+  pick: PokemonLoadout,
+  seed: string | number = 'draft',
+): PokemonLoadout {
+  const species = dex.getSpecies(pick.species);
+  if (!species) throw new Error(`unknown species ${pick.species} in a draft slot`);
+
+  const key = `${seed}:${slot.square}`;
+  const moveset = buildMoveset(dex, species, pick.type, key);
+  const ability = pick.ability ?? species.abilities[0];
+  const item = pick.item ?? pickHeldItem(species, slot.cls, pick.type, new Rng(`kit:${key}`));
+  const teraType = pick.teraType ?? pickTeraType(species, pick.type, moveset);
+  // Most species know no field move at all, so an absent art is a real answer rather than a gap.
+  const art = pick.art ?? pickArt(dex, pick.species, key);
+
+  return {
+    species: pick.species,
+    type: pick.type,
+    ...(ability ? { ability } : {}),
+    ...(item ? { item } : {}),
+    ...(teraType ? { teraType } : {}),
+    ...(art ? { art } : {}),
+  };
+}
+
 export function finalizeDraft(
   dex: Dex,
   slots: readonly DraftSlot[],
+  /** Seed for the default kit, so a finished draft reproduces the same abilities, items and Tera types. */
+  seed: string | number = 'draft',
 ): { position: Position; loadout: Loadout; drafted: DraftedPiece[] } {
   if (!isDraftComplete(slots)) {
     throw new Error('cannot finalize a draft with empty slots');
@@ -182,10 +227,10 @@ export function finalizeDraft(
       );
     }
     const pick = slot.picked!;
-    loadout.set(piece.id, pick);
-
     const species = dex.getSpecies(pick.species);
     if (!species) throw new Error(`unknown species ${pick.species} in a completed draft`);
+
+    loadout.set(piece.id, resolveKit(dex, slot, pick, seed));
     drafted.push({ ...slot, species, type: pick.type });
   }
 

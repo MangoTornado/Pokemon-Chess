@@ -10,7 +10,10 @@ import {
   clearSlot,
   finalizeDraft,
   isDraftComplete,
+  resolveKit,
 } from './draft.ts';
+import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
+import { candidateArts } from './arts.ts';
 
 const dex = await Dex.load();
 
@@ -173,5 +176,102 @@ describe('finalization', () => {
     // The first entry is white's queen-side rook on a1.
     expect(finalized.drafted[0]!.square).toBe(slots[0]!.square);
     expect(finalized.drafted[0]!.side).toBe('white');
+  });
+});
+
+describe('the drafted kit', () => {
+  it('hands a hand-drafted piece the same layers an auto-drafted one gets', () => {
+    // The gap this closes: a draft used to emit only species and type, so a hand-built army fought with no
+    // ability, no held item and no Tera type while a generated one had all three.
+    const finalized = finalizeDraft(dex, fillAllWith(dex, 'garchomp'));
+    for (const [, load] of finalized.loadout) {
+      expect(load.ability).toBeTruthy();
+      expect(load.item).toBeTruthy();
+      expect(load.teraType).toBeTruthy();
+    }
+  });
+
+  it('only ever hands out an ability the species actually has and an item the rules implement', () => {
+    const species = dex.requireSpecies('garchomp');
+    const finalized = finalizeDraft(dex, fillAllWith(dex, 'garchomp'));
+    for (const [, load] of finalized.loadout) {
+      expect(species.abilities).toContain(load.ability);
+      expect(IMPLEMENTED_ITEMS).toContain(load.item);
+    }
+  });
+
+  it('never Teras into the type the piece already fights as, which would be a wasted turn', () => {
+    for (const id of ['garchomp', 'charizard', 'pikachu']) {
+      const finalized = finalizeDraft(dex, fillAllWith(dex, id));
+      for (const [, load] of finalized.loadout) {
+        if (load.teraType) expect(load.teraType).not.toBe(load.type);
+      }
+    }
+  });
+
+  it("carries the player's own choices through untouched, and only fills the rest", () => {
+    let slots = fillAllWith(dex, 'garchomp');
+    slots = applyPick(slots, 0, {
+      species: 'garchomp', type: 'Dragon', ability: 'roughskin', item: 'lifeorb', teraType: 'Steel',
+    });
+    const finalized = finalizeDraft(dex, slots);
+    const first = finalized.loadout.get(finalized.position.pieceAt(slots[0]!.square)!.id)!;
+    expect(first).toMatchObject({ ability: 'roughskin', item: 'lifeorb', teraType: 'Steel' });
+
+    // A neighbouring slot the player left alone still gets a resolved kit rather than nothing.
+    const second = finalized.loadout.get(finalized.position.pieceAt(slots[1]!.square)!.id)!;
+    expect(second.item).toBeTruthy();
+    expect(second.item).not.toBe('lifeorb'); // resolved, not inherited from the edited slot
+  });
+
+  it('resolves the same kit the draft screen previews, so what you see is what you field', () => {
+    // The draft screen calls resolveKit to show a piece's kit before committing; finalizeDraft must agree,
+    // or the preview would be a lie.
+    const slots = fillAllWith(dex, 'gengar');
+    const finalized = finalizeDraft(dex, slots);
+    for (const slot of slots) {
+      const previewed = resolveKit(dex, slot, slot.picked!);
+      const fielded = finalized.loadout.get(finalized.position.pieceAt(slot.square)!.id)!;
+      expect(fielded).toEqual(previewed);
+    }
+  });
+
+  it('is deterministic in the seed, so the same draft reproduces the same army', () => {
+    const slots = fillAllWith(dex, 'lucario');
+    const a = finalizeDraft(dex, slots, 'seed-a');
+    const b = finalizeDraft(dex, slots, 'seed-a');
+    const c = finalizeDraft(dex, slots, 'seed-b');
+    expect([...a.loadout.values()]).toEqual([...b.loadout.values()]);
+    // A different seed varies the kit somewhere — otherwise the seed would be decoration.
+    expect([...a.loadout.values()]).not.toEqual([...c.loadout.values()]);
+  });
+
+  it('offers every art a species can cast, and picks one of them', () => {
+    // Ferrothorn is the clearest case: it can lay Spikes, set Stealth Rock, or raise a screen, and which one
+    // it does is a genuinely different piece.
+    const arts = candidateArts(dex, 'ferrothorn');
+    expect(arts.length).toBeGreaterThan(1);
+    expect(arts.map((a) => a.id)).toContain('spikes');
+    // No duplicates, and every entry really changes field state.
+    expect(new Set(arts.map((a) => a.id)).size).toBe(arts.length);
+
+    const finalized = finalizeDraft(dex, fillAllWith(dex, 'ferrothorn'));
+    for (const [, load] of finalized.loadout) {
+      expect(arts.map((a) => a.id)).toContain(load.art!.id);
+    }
+  });
+
+  it('leaves the art absent for a species that knows no field move at all', () => {
+    // Most Pokémon know none, and an absent art is the honest answer rather than a placeholder.
+    const arts = candidateArts(dex, 'magikarp');
+    expect(arts).toHaveLength(0);
+    const finalized = finalizeDraft(dex, fillAllWith(dex, 'magikarp'));
+    for (const [, load] of finalized.loadout) expect(load.art).toBeUndefined();
+  });
+
+  it('gives pieces on different squares different kits, so an army is not 16 clones', () => {
+    const finalized = finalizeDraft(dex, fillAllWith(dex, 'blaziken'));
+    const items = new Set([...finalized.loadout.values()].map((l) => l.item));
+    expect(items.size).toBeGreaterThan(1);
   });
 });

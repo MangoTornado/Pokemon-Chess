@@ -16,7 +16,7 @@ import type { Dex } from '../data/dex.ts';
 import type { BattleType, SpeciesEntry } from '../data/schema.ts';
 import { squareName } from '../engine/board.ts';
 import { Rng } from '../engine/rng.ts';
-import type { Loadout } from '../engine/variant.ts';
+import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
 import type { Position } from '../engine/position.ts';
 import { typeProfile } from '../engine/typechart.ts';
 import {
@@ -27,7 +27,11 @@ import {
   clearSlot,
   finalizeDraft,
   isDraftComplete,
+  resolveKit,
 } from '../game/draft.ts';
+import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
+import { candidateArts } from '../game/arts.ts';
+import { BATTLE_TYPES } from '../data/schema.ts';
 import type { DraftSlot } from '../game/draft.ts';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { ROLE_GLYPH, ROLE_LABEL, GLYPH_FONT_STACK } from './pieceRoles.ts';
@@ -163,6 +167,167 @@ export function DraftScreen({ dex, onCancel, onReady }: DraftScreenProps) {
           setChosenTypes={setChosenTypes}
           onPick={attemptPick}
         />
+      </div>
+
+      <KitPanel
+        dex={dex}
+        slot={activeSlot ?? null}
+        onChange={(kit) => {
+          if (!activeSlot) return;
+          setSlots(applyPick(slots, active, kit));
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The kit editor for the active slot: ability, held item and Tera type.
+ *
+ * The draft always resolves a full kit (`resolveKit`), so this panel is not filling in blanks — it is
+ * *overriding* choices that have already been made for you, which is why every control shows the value the
+ * piece will actually carry rather than an empty select. That distinction matters: a player who never opens
+ * this panel still fields a coherent army, and a player who does can see exactly what they are changing
+ * from. Team-building depth without a mandatory step.
+ */
+function KitPanel({
+  dex,
+  slot,
+  onChange,
+}: {
+  dex: Dex;
+  slot: DraftSlot | null;
+  onChange: (kit: PokemonLoadout) => void;
+}) {
+  if (!slot?.picked) return null;
+  const pick = slot.picked;
+  const species = dex.getSpecies(pick.species);
+  if (!species) return null;
+
+  // What the piece carries right now, with the auto-draft's choices standing in for anything untouched.
+  const kit = resolveKit(dex, slot, pick);
+  const arts = candidateArts(dex, pick.species);
+  const set = (patch: Partial<PokemonLoadout>) => onChange({ ...kit, ...patch });
+
+  const itemName = (id: string) => dex.getItem(id)?.name ?? id;
+  const items = [...IMPLEMENTED_ITEMS].sort((a, b) => itemName(a).localeCompare(itemName(b)));
+  // Tera into the declared type would be a wasted turn, so it is never offered.
+  const teraChoices = BATTLE_TYPES.filter((t) => t !== pick.type);
+
+  return (
+    <section
+      style={{
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: '0.6rem 0.75rem',
+        display: 'grid',
+        gap: '0.5rem',
+      }}
+    >
+      <h3
+        style={{
+          fontSize: '0.72rem',
+          textTransform: 'uppercase',
+          letterSpacing: '0.06em',
+          color: 'var(--text-dim)',
+        }}
+      >
+        {species.name}'s kit — {ROLE_LABEL[slot.cls].toLowerCase()} on {squareName(slot.square)}
+      </h3>
+
+      <KitRow label="Ability" hint={dex.getAbility(kit.ability ?? '')?.shortDesc ?? ''}>
+        {species.abilities.map((id) => (
+          <PillButton key={id} primary={kit.ability === id} onClick={() => set({ ability: id })}>
+            {dex.getAbility(id)?.name ?? id}
+          </PillButton>
+        ))}
+      </KitRow>
+
+      <KitRow label="Held item" hint={(kit.item ? dex.getItem(kit.item)?.shortDesc : '') ?? ''}>
+        <select
+          value={kit.item ?? ''}
+          onChange={(e) => set({ item: e.target.value })}
+          style={{
+            background: '#0b0e13',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '0.3rem 0.45rem',
+            color: 'inherit',
+            fontSize: '0.8rem',
+          }}
+        >
+          {items.map((id) => (
+            <option key={id} value={id}>{itemName(id)}</option>
+          ))}
+        </select>
+      </KitRow>
+
+      <KitRow
+        label="Art"
+        hint={
+          arts.length === 0
+            ? `${species.name} knows no field move, so it has no art to cast.`
+            : kit.art
+              ? ART_HINT[kit.art.effect.kind]
+              : ''
+        }
+      >
+        {arts.map((art) => (
+          <PillButton key={art.id} primary={kit.art?.id === art.id} onClick={() => set({ art })}>
+            {art.name}
+          </PillButton>
+        ))}
+      </KitRow>
+
+      <KitRow label="Tera type" hint="Once per game, this piece can become this type instead.">
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
+          {teraChoices.map((type) => (
+            <button
+              key={type}
+              type="button"
+              onClick={() => set({ teraType: type })}
+              style={{
+                background: kit.teraType === type ? TYPE_COLORS[type] : 'transparent',
+                color: kit.teraType === type ? textColorOn(type) : 'var(--text-dim)',
+                border: `1px solid ${kit.teraType === type ? TYPE_COLORS[type] : 'var(--border)'}`,
+                borderRadius: 999,
+                padding: '0.1rem 0.4rem',
+                fontSize: '0.68rem',
+                cursor: 'pointer',
+              }}
+            >
+              {type}
+            </button>
+          ))}
+        </div>
+      </KitRow>
+    </section>
+  );
+}
+
+/** What each kind of art does, in one line — the panel explains the choice rather than just naming it. */
+const ART_HINT: Readonly<Record<'weather' | 'hazard' | 'screen', string>> = {
+  weather: 'Casts weather over the whole board instead of moving.',
+  hazard: "Lays hazards on a band of the enemy's side instead of moving.",
+  screen: 'Raises a screen that halves damage to your own army instead of moving.',
+};
+
+function KitRow({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '5.5rem 1fr', gap: '0.5rem', alignItems: 'start' }}>
+      <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', paddingTop: '0.15rem' }}>{label}</div>
+      <div style={{ display: 'grid', gap: '0.2rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>{children}</div>
+        {hint ? <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>{hint}</div> : null}
       </div>
     </div>
   );

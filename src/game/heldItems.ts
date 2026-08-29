@@ -29,7 +29,7 @@ function typeItemFor(type: BattleType): string | undefined {
  * the game for those, and it makes the evolution layer legible), then a role-appropriate offensive or
  * defensive item, with a type-boost item as the broad fallback so almost every piece holds something real.
  */
-export function pickHeldItem(species: SpeciesEntry, cls: PieceClass, type: BattleType, rng: Rng): string | undefined {
+export function pickHeldItem(species: SpeciesEntry, cls: PieceClass, type: BattleType, rng: Rng): string {
   // An unevolved Pokémon holding Eviolite is the single most characteristic item choice in the games.
   if (species.nfe) return 'eviolite';
 
