@@ -41,10 +41,20 @@ describe('batch simulator', () => {
     expect(lastDone).toBe(4);
   });
 
-  it('a deeper-searching AI outscores a shallower one', { timeout: 90000 }, () => {
-    // Fresh armies each game so neither side has a structural board advantage; the deeper searcher (White)
-    // should convert its extra ply of sight into more than an even score. Deterministic given the seed.
-    const report = runBatch(dex, { games: 14, white: DEEP, black: SHALLOW, seed: 'strength', maxPlies: 200, draft: 'fresh' });
-    expect(report.whiteScore).toBeGreaterThan(0.5);
+  /**
+   * The load-bearing balance assertion: extra search depth must actually win games, or the evaluation is
+   * not measuring anything.
+   *
+   * Run in both colours, because White carries a real first-move edge here (~0.54–0.68 in self-play), so a
+   * one-sided result could be colour rather than skill. Thirty games per side is the smallest sample where
+   * the effect is comfortably clear — at 14 it once landed exactly on 0.5 and proved nothing.
+   */
+  it('a deeper-searching AI outscores a shallower one, in either colour', { timeout: 180000 }, () => {
+    const asWhite = runBatch(dex, { games: 30, white: DEEP, black: SHALLOW, seed: 'strength', maxPlies: 200, draft: 'fresh' });
+    expect(asWhite.whiteScore).toBeGreaterThan(0.55);
+
+    // Reversed: the deep searcher now plays Black and gives up the first move, so its score is 1 − White's.
+    const asBlack = runBatch(dex, { games: 30, white: SHALLOW, black: DEEP, seed: 'strength-rev', maxPlies: 200, draft: 'fresh' });
+    expect(1 - asBlack.whiteScore).toBeGreaterThan(0.5);
   });
 });

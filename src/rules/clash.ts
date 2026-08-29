@@ -13,9 +13,8 @@
  *
  * Pure and deterministic: the randomness (accuracy, momentum, crit) is drawn by the caller and passed in,
  * so the same inputs always produce the same Clash, which is what replay, server validation and AI search
- * require. Ability/item hooks (thorns, recoil, survive-once clamps) are not yet wired — this resolves the
- * exchange of blows and its classification, which is the load-bearing core; the hooks compose onto the
- * `blow` step when the compiler that supplies them exists.
+ * require. Survive-once clamps (Focus Sash) are wired; the remaining ability/item hooks (thorns, recoil)
+ * compose onto the same `blow` step as they arrive.
  */
 
 import { computeDamage } from './damage.ts';
@@ -28,6 +27,13 @@ export interface Combatant {
   readonly speed: number;
   /** True until this piece has taken any damage — gates survive-once effects like Focus Sash. */
   pristine: boolean;
+  /**
+   * True when a held item (Focus Sash) should clamp an otherwise-fatal blow to 1 HP.
+   *
+   * Honoured only if the holder entered the Clash `pristine` — a Sash saves a Pokémon at full health and is
+   * spent by any prior damage — and only once per Clash.
+   */
+  readonly surviveOnce?: boolean;
 }
 
 /**
@@ -133,12 +139,32 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
 
   let swings = 0;
 
+  /**
+   * Whether a survive-once item (Focus Sash) protects each side, decided once from the state *entering*
+   * the Clash.
+   *
+   * It holds for the whole exchange rather than for a single blow, and that is deliberate: a Clash is one
+   * capture action from the player's point of view, and the attacker swings up to twice within it, so a
+   * per-blow clamp would let the second swing undo the save and read as the item not working. "Cannot be
+   * knocked out from full health" is the legible rule and the SPEC's CLAMP-to-1 (§13). The holder is left
+   * on 1 HP, so it is no longer pristine and the next capture attempt finishes it.
+   */
+  const sashed = {
+    attacker: attacker.surviveOnce === true && attacker.pristine,
+    defender: defender.surviveOnce === true && defender.pristine,
+  };
+
+  /** Applies a blow, clamping to 1 HP instead of removing a protected target. */
+  const land = (target: Combatant, who: 'attacker' | 'defender', damage: number): void => {
+    target.hp = sashed[who] && damage >= target.hp ? 1 : Math.max(0, target.hp - damage);
+    target.pristine = false;
+  };
+
   const attackerSwing = (): boolean => {
     swings += 1;
     const crit = roll.crit && swings === 1;
     const dmg = computeDamage({ ...setup.attackerBlow, crit, momentum: roll.momentum });
-    defender.hp = Math.max(0, defender.hp - dmg);
-    defender.pristine = false;
+    land(defender, 'defender', dmg);
     blows.push({ by: 'attacker', damage: dmg, crit, targetHpAfter: defender.hp });
     return defender.hp <= 0 || swings >= MAX_ATTACKER_SWINGS;
   };
@@ -147,8 +173,7 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
     if (setup.defenderIncapacitated) return false;
     // The defender never crits on the counter and takes the attacker's momentum band too.
     const dmg = computeDamage({ ...setup.defenderBlow, crit: false, momentum: roll.momentum });
-    attacker.hp = Math.max(0, attacker.hp - dmg);
-    attacker.pristine = false;
+    land(attacker, 'attacker', dmg);
     blows.push({ by: 'defender', damage: dmg, crit: false, targetHpAfter: attacker.hp });
     return attacker.hp <= 0;
   };

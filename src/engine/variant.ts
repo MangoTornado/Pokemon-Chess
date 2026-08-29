@@ -43,6 +43,7 @@ import type { DamageInput } from '../rules/damage.ts';
 import { computeStats } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
 import { WONDER_GUARD, abilityGrantsImmunity, abilityLabel } from '../rules/abilities.ts';
+import { checkupHealFraction, defensiveItemMod, grantsSurviveOnce, offensiveItemMods } from '../rules/items.ts';
 import { buildMoveset } from '../game/moveset.ts';
 import type { Moveset } from '../game/moveset.ts';
 import {
@@ -63,6 +64,8 @@ export interface PokemonLoadout {
   readonly moves?: Moveset;
   /** The ability the piece fights with (an id from the species' real abilities). Grants type immunities. */
   readonly ability?: string;
+  /** The held item (a real dex item id). Scales blows, reduces damage taken, or heals at Checkup. */
+  readonly item?: string;
 }
 
 /** Loadouts keyed by the chess piece's persistent id, which survives movement and promotion. */
@@ -205,6 +208,12 @@ export class PokemonChess {
   readonly position: Position;
   readonly loadout: Loadout;
   readonly rules: VariantRules;
+  /**
+   * The dex, for the static facts an effect needs about a species (whether it is not-fully-evolved, which
+   * gates Eviolite; later, ability and item descriptors). Read-only and shared, so carrying it costs
+   * nothing and every derived game keeps it.
+   */
+  private readonly dex: Dex;
   /** Battle stats per piece id, computed once — pieces do not change species mid-game (yet). */
   private readonly stats: ReadonlyMap<number, PieceStats>;
   /** The four-slot moveset per piece id, so a capture can use coverage, not only the declared type. */
@@ -223,6 +232,7 @@ export class PokemonChess {
     position: Position,
     loadout: Loadout,
     rules: VariantRules,
+    dex: Dex,
     stats: ReadonlyMap<number, PieceStats>,
     movesets: ReadonlyMap<number, Moveset>,
     live: ReadonlyMap<number, LiveState>,
@@ -234,6 +244,7 @@ export class PokemonChess {
     this.position = position;
     this.loadout = loadout;
     this.rules = rules;
+    this.dex = dex;
     this.stats = stats;
     this.movesets = movesets;
     this.live = live;
@@ -268,6 +279,7 @@ export class PokemonChess {
       position,
       options.loadout,
       options.rules ? { ...DEFAULT_RULES, ...options.rules } : DEFAULT_RULES,
+      options.dex,
       stats,
       movesets,
       new Map(),
@@ -471,30 +483,49 @@ export class PokemonChess {
 
     const aPhysical = move.category === 'Physical';
     const dPhysical = dStats.atk >= dStats.spa;
+    const aCategory = aPhysical ? 'Physical' : 'Special';
+    const dCategory = dPhysical ? 'Physical' : 'Special';
+
+    // Held items scale the blow being thrown and reduce the blow being taken (SPEC §5 steps 2/13/14).
+    const aItem = offensiveItemMods(a.item, move.type, aCategory, effectiveness(move.type, d.type) > 1);
+    const dItem = offensiveItemMods(d.item, d.type, dCategory, effectiveness(d.type, a.type) > 1);
+    const aDefend = defensiveItemMod(a.item, dCategory, this.isNfe(a.species));
+    const dDefend = defensiveItemMod(d.item, aCategory, this.isNfe(d.species));
 
     const atk: DamageInput = {
       attackerType: a.type,
       moveType: move.type,
       defenderType: d.type,
-      category: aPhysical ? 'Physical' : 'Special',
+      category: aCategory,
       basePower: move.basePower,
       offensiveStat: aPhysical ? aStats.atk : aStats.spa,
       defensiveStat: aPhysical ? dStats.def : dStats.spd,
       stab: move.type === a.type,
       // A burned piece hits weaker with physical moves — the games' Attack halving, as a Clash penalty.
       burned: this.statusOf(attackerId).burned !== undefined,
+      basePowerMod: aItem.basePowerMod,
+      attackerFinalMod: aItem.attackerFinalMod,
+      defenderFinalMod: dDefend,
     };
     const def: DamageInput = {
       attackerType: d.type,
       moveType: d.type,
       defenderType: a.type,
-      category: dPhysical ? 'Physical' : 'Special',
+      category: dCategory,
       basePower: MELEE_BASE_POWER,
       offensiveStat: dPhysical ? dStats.atk : dStats.spa,
       defensiveStat: dPhysical ? aStats.def : aStats.spd,
       stab: true,
+      basePowerMod: dItem.basePowerMod,
+      attackerFinalMod: dItem.attackerFinalMod,
+      defenderFinalMod: aDefend,
     };
     return { atk, def };
+  }
+
+  /** Whether a species is not-fully-evolved, which is what gates Eviolite. */
+  private isNfe(species: string): boolean {
+    return this.dex.getSpecies(species)?.nfe ?? false;
   }
 
   /**
@@ -517,8 +548,8 @@ export class PokemonChess {
     const { atk, def } = this.clashInputs(attackerId, defenderId, best.slot);
     const aLive = this.liveOf(attackerId);
     const dLive = this.liveOf(defenderId);
-    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.statsOf(attackerId).spe, pristine: aLive.pristine };
-    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: this.statsOf(defenderId).spe, pristine: dLive.pristine };
+    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.statsOf(attackerId).spe, pristine: aLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(attackerId).item) };
+    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: this.statsOf(defenderId).spe, pristine: dLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(defenderId).item) };
     const result = resolveClash(
       {
         attacker: aC,
@@ -608,8 +639,8 @@ export class PokemonChess {
     const dLive = this.liveOf(defenderId);
     const aStats = this.statsOf(attackerId);
     const dStats = this.statsOf(defenderId);
-    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: aStats.spe, pristine: aLive.pristine };
-    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: dStats.spe, pristine: dLive.pristine };
+    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: aStats.spe, pristine: aLive.pristine, surviveOnce: grantsSurviveOnce(attacker.item) };
+    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: dStats.spe, pristine: dLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(defenderId).item) };
     const { atk, def } = this.clashInputs(attackerId, defenderId, slot);
 
     const result = resolveClash(
@@ -722,8 +753,8 @@ export class PokemonChess {
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
-      position, this.loadout, this.rules, this.stats, this.movesets, live, statuses, rngState, pending,
-      [...this.history, resolved],
+      position, this.loadout, this.rules, this.dex, this.stats, this.movesets, live, statuses, rngState,
+      pending, [...this.history, resolved],
     );
   }
 
@@ -754,6 +785,16 @@ export class PokemonChess {
 
     for (const { square, piece } of position.allPieces()) {
       if (piece.side !== side) continue;
+
+      // Held-item healing (Leftovers) happens whether or not the piece is afflicted, and never overheals.
+      const heal = checkupHealFraction(this.loadoutOf(piece.id).item);
+      if (heal > 0) {
+        const l = nlive.get(piece.id) ?? this.liveOf(piece.id);
+        if (l.hp > 0 && l.hp < l.maxHp) {
+          nlive.set(piece.id, { ...l, hp: Math.min(l.maxHp, l.hp + Math.max(1, Math.floor(l.maxHp * heal))) });
+        }
+      }
+
       const st = nstat.get(piece.id);
       if (!st) continue;
       let s: PieceStatus = st;

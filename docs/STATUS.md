@@ -27,7 +27,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Move compiler | ✅ | `content/compileMoves.ts` — all 950, 74% field-derived, 0 accidental fallbacks. |
 | Ability & item compilers | ✅ | `content/compile{Abilities,Items}.ts` — all 311 + 536, faithfulness-reviewed. |
 | Coverage & faithfulness audit | ✅ | tested; an adversarial workflow caught and fixed 13 unfaithful mappings. |
-| **Executing effects inside a live Clash** | ◑ | **The big gap, progressively closing.** Now firing: status riders on moves; coverage-slot choice against the defender's type; and **ability-granted type immunities** (`rules/abilities.ts` — Levitate, Volt Absorb, Flash Fire, Sap Sipper, Wonder Guard…), which extend untouchability from types to individuals and are named in the board's refusal caption. Still not run: item effects, stat stages, hazards, weather, and the wider ISA op set — the remaining frontier. |
+| **Executing effects inside a live Clash** | ◑ | **The big gap, progressively closing.** Now firing: status riders on moves; coverage-slot choice against the defender's type; **ability-granted type immunities** (`rules/abilities.ts` — Levitate, Volt Absorb, Flash Fire, Sap Sipper, Wonder Guard…), named in the board's refusal caption; and **held items** (`rules/items.ts` — Life Orb, the Choice items, Expert Belt, bands, type-boost items, Assault Vest, Eviolite, Focus Sash's survive-once clamp, Leftovers healing at Checkup), wired through the damage pipeline's existing basePower/attackerFinal/defenderFinal hooks. The side panel shows each piece's ability and item, marking honestly which are in effect and which are flavour only. Still not run: stat stages, hazards, weather, recoil/contact effects. |
 | Status conditions (applied + rendered) | ✅ | `engine/status.ts` model is now applied during play: move riders inflict status on a surviving defender, a deterministic end-of-turn **Checkup** ages burn/sleep/paralysis and runs the poison death-clock (R7 clamps a king to 1 HP instead of removing it), a sleeping/paralyzed piece offers no moves, and burn taxes physical damage. Rendered on the board — sprite tilt for rotation-class, counter pips for poison/burn. |
 | Move slots / movesets per piece | ✅ | `game/moveset.ts` — 4-slot auto-picker (§8.2): slot 0 the declared-type STAB melee, 1–3 type-diverse coverage from the real learnset; `bestSlotAgainst` picks the most effective slot per capture. |
 
@@ -76,10 +76,10 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 
 Everything in the original six-tract plan has shipped. What remains, in value order:
 
-1. **The rest of ISA-op execution in the Clash** — the one genuinely large tract left. Ability *immunities*
-   fire today; still to run: item effects, stat stages (Speed decides who swings first, so a Speed drop is
-   the highest-leverage one), hazards, and weather. Each is a slice of the same interpreter over the
-   already-compiled descriptors, so this is incremental rather than a rewrite.
+1. **The rest of ISA-op execution in the Clash** — the one genuinely large tract left. Ability immunities
+   and held items fire today; still to run: **stat stages** (Speed decides who swings first, so a Speed drop
+   is the highest-leverage one), hazards, weather, and recoil/contact effects. Each is a slice of the same
+   interpreter over the already-compiled descriptors, so this is incremental rather than a rewrite.
 2. **Effect animations** — now unblocked for the effects that do fire (status marks land silently today).
 3. **Presence and chat** — a friend list that shows who is online, and a fixed quick-chat vocabulary
    (§17.10 rules out free text between strangers for this audience).

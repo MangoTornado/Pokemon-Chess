@@ -21,7 +21,9 @@ import type { Dex } from '../data/dex.ts';
 import { ALL_SQUARES, rankOf, squareColor, squareName } from '../engine/board.ts';
 import type { Square } from '../engine/board.ts';
 import { PokemonChess } from '../engine/variant.ts';
-import type { ResolvedMove, Side, Verdict, VariantMove } from '../engine/variant.ts';
+import type { PokemonLoadout, ResolvedMove, Side, Verdict, VariantMove } from '../engine/variant.ts';
+import { ABILITY_IMMUNE_TYPE, WONDER_GUARD } from '../rules/abilities.ts';
+import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
 import { chooseMove } from '../ai/search.ts';
@@ -538,6 +540,56 @@ function StatusBar({
 
 // ---------------------------------------------------------------------------
 
+/**
+ * The selected piece's ability and held item.
+ *
+ * Only the ones that currently do something are called out as active; the rest are shown greyed with a
+ * "flavour only" note, which is honest about what the engine runs today rather than implying an effect the
+ * game will not deliver.
+ */
+function KitRow({ dex, pokemon }: { dex: Dex; pokemon: PokemonLoadout }) {
+  const ability = pokemon.ability;
+  const item = pokemon.item;
+  if (!ability && !item) return null;
+
+  const immuneTo = ability ? ABILITY_IMMUNE_TYPE[ability] : undefined;
+  const abilityActive = ability === WONDER_GUARD || immuneTo !== undefined;
+  const itemActive = item !== undefined && IMPLEMENTED_ITEMS.includes(item);
+
+  const chip = (label: string, detail: string, active: boolean) => (
+    <span
+      key={label}
+      title={detail}
+      style={{
+        display: 'inline-flex', gap: '0.3rem', alignItems: 'baseline', fontSize: '0.72rem',
+        padding: '0.15rem 0.4rem', borderRadius: 6,
+        border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+        color: active ? 'var(--text)' : 'var(--text-dim)',
+      }}
+    >
+      <strong>{label}</strong>
+      <span style={{ color: 'var(--text-dim)' }}>{detail}</span>
+    </span>
+  );
+
+  return (
+    <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+      {ability && chip(
+        dex.getAbility(ability)?.name ?? ability,
+        abilityActive
+          ? (ability === WONDER_GUARD ? 'only super-effective hits land' : `immune to ${immuneTo}`)
+          : 'flavour only',
+        abilityActive,
+      )}
+      {item && chip(
+        dex.getItem(item)?.name ?? item,
+        itemActive ? 'in effect' : 'flavour only',
+        itemActive,
+      )}
+    </div>
+  );
+}
+
 function SidePanel({
   dex,
   game,
@@ -576,6 +628,11 @@ function SidePanel({
               </div>
               <TypePill type={selectedPokemon.type} />
             </div>
+
+            {/* Ability and item change how a capture resolves, so they belong on the piece card — an effect
+                the player cannot see is an effect they will read as a bug. */}
+            <KitRow dex={dex} pokemon={selectedPokemon} />
+
             {captureOptions.length > 0 && (
               <div style={{ display: 'grid', gap: '0.25rem' }}>
                 <span style={{ color: 'var(--text-dim)', fontSize: '0.75rem' }}>Captures available</span>

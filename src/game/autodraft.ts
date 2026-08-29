@@ -16,6 +16,7 @@ import type { PieceClass, Side } from '../engine/board.ts';
 import { Position } from '../engine/position.ts';
 import { Rng } from '../engine/rng.ts';
 import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
+import { pickHeldItem } from './heldItems.ts';
 
 /**
  * How wide a net to cast when picking for a role.
@@ -85,10 +86,15 @@ export function autodraft(dex: Dex, seed: string | number): DraftResult {
         const type = rng.pick(species.types);
         const piece = position.pieceAt(square);
         if (!piece) throw new Error(`expected a ${side} ${cls} on square ${square}`);
-        // Each piece fights with one of its species' real abilities (the first non-hidden slot), so
-        // ability effects — type immunities today — are grounded in the actual Pokémon.
+        // Each piece fights with one of its species' real abilities (the first non-hidden slot) and a
+        // role-appropriate held item, so ability and item effects are grounded in the actual Pokémon.
         const ability = species.abilities[0];
-        loadout.set(piece.id, ability ? { species: species.id, type, ability } : { species: species.id, type });
+        const item = pickHeldItem(species, cls, type, rng);
+        loadout.set(piece.id, {
+          species: species.id, type,
+          ...(ability ? { ability } : {}),
+          ...(item ? { item } : {}),
+        });
         drafted.push({ side, cls, square, species, type });
       }
     }

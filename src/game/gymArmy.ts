@@ -15,6 +15,7 @@ import type { PieceClass, Side } from '../engine/board.ts';
 import { Rng } from '../engine/rng.ts';
 import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
 import { autodraft } from './autodraft.ts';
+import { pickHeldItem } from './heldItems.ts';
 
 /** Base-stat-total bands per role — the same shape as the ordinary draft, so a gym pawn is not a legendary. */
 function inBand(species: SpeciesEntry, cls: PieceClass): boolean {
@@ -73,7 +74,12 @@ export function buildGymMatch(dex: Dex, leaderType: BattleType, seed: string | n
       if (!piece) continue;
       const species = pickTyped(dex, pool, cls, rng, taken);
       const ability = species.abilities[0];
-      loadout.set(piece.id, ability ? { species: species.id, type: leaderType, ability } : { species: species.id, type: leaderType });
+      const item = pickHeldItem(species, cls, leaderType, rng);
+      loadout.set(piece.id, {
+        species: species.id, type: leaderType,
+        ...(ability ? { ability } : {}),
+        ...(item ? { item } : {}),
+      });
     }
   }
 
