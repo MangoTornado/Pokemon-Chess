@@ -152,6 +152,32 @@ export function encodeTera(square: Square, cls: PieceClass): EncodedMove {
 export const isTeraMove = (move: EncodedMove): boolean => (move & MOVE_TERA) !== 0;
 
 /**
+ * The other three transformations, each on its own bit for the same reason Tera has one: the action list stays
+ * a list of numbers, so replay, server validation and the online protocol need no new format.
+ *
+ * Mega Evolution and Dynamax swap what a piece *is*; Z-Power charges its next attack. All three are encoded
+ * like an art cast, with `from === to`, which no real chess move produces.
+ */
+export const MOVE_MEGA = 1 << 27;
+export const MOVE_DYNAMAX = 1 << 28;
+export const MOVE_ZPOWER = 1 << 29;
+
+const transformEncoder = (flag: number) => (square: Square, cls: PieceClass): EncodedMove =>
+  square | (square << 6) | (PIECE_CLASSES.indexOf(cls) << 12) | (NO_CLASS << 15) | (NO_CLASS << 18) | flag;
+
+export const encodeMega = transformEncoder(MOVE_MEGA);
+export const encodeDynamax = transformEncoder(MOVE_DYNAMAX);
+export const encodeZPower = transformEncoder(MOVE_ZPOWER);
+
+export const isMegaMove = (move: EncodedMove): boolean => (move & MOVE_MEGA) !== 0;
+export const isDynamaxMove = (move: EncodedMove): boolean => (move & MOVE_DYNAMAX) !== 0;
+export const isZPowerMove = (move: EncodedMove): boolean => (move & MOVE_ZPOWER) !== 0;
+
+/** Whether an encoded action is any of the four transformations. */
+export const isTransformMove = (move: EncodedMove): boolean =>
+  (move & (MOVE_TERA | MOVE_MEGA | MOVE_DYNAMAX | MOVE_ZPOWER)) !== 0;
+
+/**
  * The highest bit any encoded action uses, and the inclusive ceiling that follows from it.
  *
  * Derived rather than written down, because a hand-written ceiling silently falls behind the flag bits: an
@@ -162,6 +188,7 @@ export const isTeraMove = (move: EncodedMove): boolean => (move & MOVE_TERA) !==
 export const MAX_ENCODED_MOVE: number =
   [
     MOVE_DOUBLE_PUSH, MOVE_EN_PASSANT, MOVE_CASTLE_KING, MOVE_CASTLE_QUEEN, MOVE_ART, MOVE_TERA,
+    MOVE_MEGA, MOVE_DYNAMAX, MOVE_ZPOWER,
   ].reduce((acc, flag) => acc | flag, 0)
   | 0x3ffff; // the from/to/class payload below the flags
 

@@ -31,6 +31,7 @@ import {
 } from '../game/draft.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
 import { candidateArts } from '../game/arts.ts';
+import { megaStoneFor, zCrystalFor } from '../game/transform.ts';
 import type { ArtEffect } from '../game/arts.ts';
 import { BATTLE_TYPES } from '../data/schema.ts';
 import type { DraftSlot } from '../game/draft.ts';
@@ -211,7 +212,13 @@ function KitPanel({
   const set = (patch: Partial<PokemonLoadout>) => onChange({ ...kit, ...patch });
 
   const itemName = (id: string) => dex.getItem(id)?.name ?? id;
-  const items = [...IMPLEMENTED_ITEMS].sort((a, b) => itemName(a).localeCompare(itemName(b)));
+  // A mega stone and a Z-crystal do nothing turn to turn, so they are not in IMPLEMENTED_ITEMS — but they are
+  // the only way to reach two of the four transformations, so a piece that could hold one must be offered it.
+  const stone = megaStoneFor(dex, species);
+  const crystal = zCrystalFor(dex, pick.type);
+  const transformItems = [stone?.id, crystal?.id].filter((id): id is string => id !== undefined);
+  const items = [...new Set([...IMPLEMENTED_ITEMS, ...transformItems])]
+    .sort((a, b) => itemName(a).localeCompare(itemName(b)));
   // Tera into the declared type would be a wasted turn, so it is never offered.
   const teraChoices = BATTLE_TYPES.filter((t) => t !== pick.type);
 
@@ -245,7 +252,16 @@ function KitPanel({
         ))}
       </KitRow>
 
-      <KitRow label="Held item" hint={(kit.item ? dex.getItem(kit.item)?.shortDesc : '') ?? ''}>
+      <KitRow
+        label="Held item"
+        hint={
+          kit.item === stone?.id
+            ? `Lets it Mega Evolve mid-game — one transformation per side, so it competes with Tera.`
+            : kit.item === crystal?.id
+              ? `Lets it spend the side's one transformation on a single enormous ${pick.type} attack.`
+              : (kit.item ? dex.getItem(kit.item)?.shortDesc : '') ?? ''
+        }
+      >
         <select
           value={kit.item ?? ''}
           onChange={(e) => set({ item: e.target.value })}

@@ -39,6 +39,9 @@ import { PokemonIcon } from './PokemonIcon.tsx';
 import { TIER_PRESENTATION, VERDICT_PRESENTATION, tierOf, verdictCause } from './outcomes.ts';
 import { ROLE_GLYPH, ROLE_LABEL } from './pieceRoles.ts';
 import { TYPE_COLORS, textColorOn } from './typeColors.ts';
+import { isDynamaxMove, isMegaMove } from '../engine/position.ts';
+import { DYNAMAX_TURNS, isTransformItem } from '../game/transform.ts';
+import { abilityDraws } from '../rules/redirect.ts';
 
 /** How long a resolution animation holds the board before it settles. */
 const EFFECT_MS = 760;
@@ -51,25 +54,59 @@ interface SquareEffect {
   readonly nonce: number;
 }
 
+
 /**
- * The art action offered for a piece, if any.
+ * How each non-board action presents itself: a glyph, an accent colour, and a line on what it does.
  *
- * An art's destination is the caster's own square (it does not move), so it appears in the options map under
- * that square — a key no ordinary move can ever occupy.
+ * Derived from the offer rather than from a switch on the piece, so a new action shows up correctly by being
+ * generated — the UI has no separate list to keep in step.
  */
-function artFor(game: PokemonChess, pieceId: number, options: ReadonlyMap<Square, VariantMove>): VariantMove | null {
-  for (const option of options.values()) {
-    if (option.art && game.position.pieceAt(option.move.from)?.id === pieceId) return option;
+function selfActionLook(option: VariantMove): { glyph: string; color: string; detail: string } {
+  if (option.art) return { glyph: '✦', color: 'var(--accent)', detail: artDescription(option.art) };
+  if (option.tera) {
+    return {
+      glyph: '💠',
+      color: TYPE_COLORS[option.tera],
+      detail: 'Changes what it resists and what it hits hard — your one transformation.',
+    };
   }
-  return null;
+  if (isMegaMove(option.move.encoded)) {
+    return {
+      glyph: '🗿',
+      color: '#c792ea',
+      detail: 'Becomes its Mega forme for the rest of the game: new stats, ability, sometimes typing.',
+    };
+  }
+  if (isDynamaxMove(option.move.encoded)) {
+    return {
+      glyph: '🔴',
+      color: '#e05561',
+      detail: `Doubles its HP for ${DYNAMAX_TURNS} turns — long enough that it cannot be traded off.`,
+    };
+  }
+  return { glyph: '⚡', color: '#f0c000', detail: 'Charges its next attack of that type to enormous power.' };
 }
 
-/** The Terastallisation offered for a piece, if any. Like an art, its destination is its own square. */
-function teraFor(game: PokemonChess, pieceId: number, options: ReadonlyMap<Square, VariantMove>): VariantMove | null {
-  for (const option of options.values()) {
-    if (option.tera && game.position.pieceAt(option.move.from)?.id === pieceId) return option;
-  }
-  return null;
+function SelfActionButton({ option, onCast }: { option: VariantMove; onCast: (m: VariantMove) => void }) {
+  const look = selfActionLook(option);
+  return (
+    <button
+      type="button"
+      onClick={() => onCast(option)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '0.4rem', textAlign: 'left',
+        background: `linear-gradient(90deg, ${look.color}33, var(--bg))`,
+        border: `1px solid ${look.color}`,
+        borderRadius: 8, padding: '0.4rem 0.55rem', cursor: 'pointer', color: 'var(--text)', fontSize: '0.78rem',
+      }}
+    >
+      <span aria-hidden>{look.glyph}</span>
+      <span style={{ display: 'grid' }}>
+        <strong>{option.moveName ?? option.art?.name ?? 'Act'}</strong>
+        <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>{look.detail}</span>
+      </span>
+    </button>
+  );
 }
 
 /** One line on what casting this art will do. */
@@ -242,13 +279,23 @@ export function GameBoard({
     }
   }, [over, result, onGameOver]);
 
+  // Board destinations only. Every non-board action (an art cast, any of the four transformations) encodes
+  // `from === to`, so keying those by destination would collide them all onto the piece's own square and show
+  // only whichever the generator happened to emit last — which is exactly what used to hide a piece's
+  // Terastallise button whenever it also had an art.
   const options = useMemo(() => {
     const map = new Map<Square, VariantMove>();
     if (selected === null) return map;
     for (const option of legal) {
-      if (option.move.from === selected) map.set(option.move.to, option);
+      if (option.move.from === selected && option.move.to !== option.move.from) map.set(option.move.to, option);
     }
     return map;
+  }, [legal, selected]);
+
+  /** The selected piece's non-board actions, in offer order, each shown as its own button. */
+  const selfActions = useMemo(() => {
+    if (selected === null) return [] as VariantMove[];
+    return legal.filter((o) => o.move.from === selected && o.move.to === o.move.from);
   }, [legal, selected]);
 
   const denied = useMemo(() => {
@@ -418,7 +465,7 @@ export function GameBoard({
               const tier = option?.effectiveness != null ? tierOf(option.effectiveness) : null;
 
               const label = piece && pokemon && live
-                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(pokemon.species)?.name ?? pokemon.species}, ${game.battleTypeOf(piece.id)} type, ${live.hp} of ${live.maxHp} HP${
+                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(game.speciesOf(piece.id))?.name ?? pokemon.species}, ${game.battleTypeOf(piece.id)} type, ${live.hp} of ${live.maxHp} HP${
                     tier ? `. Capture forecast: ${TIER_PRESENTATION[tier].label}` : ''
                   }${denial ? `. Cannot be captured: ${denial}` : ''}`
                 : `${squareName(square)}: empty${canMoveHere ? '. Legal move' : ''}`;
@@ -446,7 +493,9 @@ export function GameBoard({
                 >
                   {piece && pokemon && live && (
                     <BoardPiece
-                      species={dex.requireSpecies(pokemon.species)}
+                      // The species it currently *is*: a Mega Evolution swaps the sprite, which is the most
+                      // legible signal on the board that the piece changed.
+                      species={dex.requireSpecies(game.speciesOf(piece.id))}
                       // The type it *fights* as, so a Terastallised piece's ring reads its new type.
                       type={game.battleTypeOf(piece.id)}
                       cls={piece.cls}
@@ -497,6 +546,32 @@ export function GameBoard({
                       }}
                     >
                       ⛨
+                    </span>
+                  )}
+
+                  {/* Dynamax and a charged Z-Power: both are invisible in the stats, so they need a mark. */}
+                  {piece && game.dynamaxTurnsLeft(piece.id) > 0 && (
+                    <span
+                      aria-hidden
+                      title={`Dynamaxed — ${game.dynamaxTurnsLeft(piece.id)} turn(s) of doubled HP left`}
+                      style={{
+                        position: 'absolute', top: '2%', right: '4%', fontSize: '8cqmin', lineHeight: 1,
+                        color: '#e05561', textShadow: '0 0 0.6cqmin rgba(0,0,0,0.9)', zIndex: 2,
+                      }}
+                    >
+                      {'\u25CF'.repeat(game.dynamaxTurnsLeft(piece.id))}
+                    </span>
+                  )}
+                  {piece && game.hasZPower(piece.id) && (
+                    <span
+                      aria-hidden
+                      title="Z-Power charged — its next attack of that type hits enormously"
+                      style={{
+                        position: 'absolute', bottom: '2%', right: '4%', fontSize: '9cqmin', lineHeight: 1,
+                        color: '#f0c000', textShadow: '0 0 0.6cqmin rgba(0,0,0,0.9)', zIndex: 2,
+                      }}
+                    >
+                      {'\u26A1'}
                     </span>
                   )}
 
@@ -555,7 +630,10 @@ export function GameBoard({
           <FxLayer fx={fx} />
         </div>
 
-        <SidePanel dex={dex} game={game} last={last} selected={selected} options={options} onCast={play} />
+        <SidePanel
+          dex={dex} game={game} last={last} selected={selected}
+          options={options} selfActions={selfActions} onCast={play}
+        />
       </div>
     </div>
   );
@@ -707,14 +785,25 @@ function StatusBar({
  * "flavour only" note, which is honest about what the engine runs today rather than implying an effect the
  * game will not deliver.
  */
-function KitRow({ dex, pokemon }: { dex: Dex; pokemon: PokemonLoadout }) {
-  const ability = pokemon.ability;
+function KitRow({
+  dex,
+  pokemon,
+  ability,
+}: {
+  dex: Dex;
+  pokemon: PokemonLoadout;
+  /** The ability the piece has *now* — a Mega forme brings its own, replacing the drafted one. */
+  ability: string | undefined;
+}) {
   const item = pokemon.item;
   if (!ability && !item) return null;
 
   const immuneTo = ability ? ABILITY_IMMUNE_TYPE[ability] : undefined;
-  const abilityActive = ability === WONDER_GUARD || immuneTo !== undefined;
-  const itemActive = item !== undefined && IMPLEMENTED_ITEMS.includes(item);
+  const abilityActive = ability === WONDER_GUARD || immuneTo !== undefined || abilityDraws(ability) !== null;
+  // A mega stone and a Z-crystal have no turn-to-turn effect, so they are absent from IMPLEMENTED_ITEMS — but
+  // calling them "flavour only" would be wrong twice over: they are the only route to two transformations.
+  const itemActive = item !== undefined
+    && (IMPLEMENTED_ITEMS.includes(item) || isTransformItem(dex, item));
 
   const chip = (label: string, detail: string, active: boolean) => (
     <span
@@ -756,6 +845,7 @@ function SidePanel({
   last,
   selected,
   options,
+  selfActions,
   onCast,
 }: {
   dex: Dex;
@@ -763,7 +853,9 @@ function SidePanel({
   last: ResolvedMove | null;
   selected: Square | null;
   options: ReadonlyMap<Square, VariantMove>;
-  /** Plays an action from the panel — used by the art cast, which has no board destination to click. */
+  /** The selected piece's actions with no board destination: an art cast, and each transformation. */
+  selfActions: readonly VariantMove[];
+  /** Plays an action from the panel — the only route for an action that has no square to click. */
   onCast: (option: VariantMove) => void;
 }) {
   const selectedPiece = selected === null ? null : game.position.pieceAt(selected);
@@ -779,10 +871,10 @@ function SidePanel({
         {selectedPiece && selectedPokemon && selectedLive ? (
           <div style={{ display: 'grid', gap: '0.5rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <PokemonIcon species={dex.requireSpecies(selectedPokemon.species)} />
+              <PokemonIcon species={dex.requireSpecies(game.speciesOf(selectedPiece.id))} />
               <div style={{ display: 'grid' }}>
                 <strong style={{ fontSize: '0.9rem' }}>
-                  {dex.getSpecies(selectedPokemon.species)?.name ?? selectedPokemon.species}
+                  {dex.getSpecies(game.speciesOf(selectedPiece.id))?.name ?? selectedPokemon.species}
                 </strong>
                 <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
                   {ROLE_GLYPH[selectedPiece.cls]} {ROLE_LABEL[selectedPiece.cls]} · {selectedLive.hp}/
@@ -794,52 +886,13 @@ function SidePanel({
 
             {/* Ability and item change how a capture resolves, so they belong on the piece card — an effect
                 the player cannot see is an effect they will read as a bug. */}
-            <KitRow dex={dex} pokemon={selectedPokemon} />
+            <KitRow dex={dex} pokemon={selectedPokemon} ability={game.abilityOf(selectedPiece.id)} />
 
-            {/* The selected piece's art, if it has one that would change the field. Offered as a button rather
-                than a board square, because a cast has no destination — the piece stays where it is. */}
-            {artFor(game, selectedPiece.id, options) && (
-              <button
-                type="button"
-                onClick={() => { const a = artFor(game, selectedPiece.id, options); if (a) onCast(a); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.4rem', textAlign: 'left',
-                  background: 'var(--bg)', border: '1px solid var(--accent)', borderRadius: 8,
-                  padding: '0.4rem 0.55rem', cursor: 'pointer', color: 'var(--text)', fontSize: '0.78rem',
-                }}
-              >
-                <span aria-hidden>✦</span>
-                <span style={{ display: 'grid' }}>
-                  <strong>{artFor(game, selectedPiece.id, options)!.art!.name}</strong>
-                  <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>
-                    {artDescription(artFor(game, selectedPiece.id, options)!.art!)}
-                  </span>
-                </span>
-              </button>
-            )}
-
-            {/* Terastallisation — one per side per game, so the panel says so plainly. */}
-            {teraFor(game, selectedPiece.id, options) && (
-              <button
-                type="button"
-                onClick={() => { const t = teraFor(game, selectedPiece.id, options); if (t) onCast(t); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.4rem', textAlign: 'left',
-                  background: `linear-gradient(90deg, ${TYPE_COLORS[teraFor(game, selectedPiece.id, options)!.tera!]}44, var(--bg))`,
-                  border: `1px solid ${TYPE_COLORS[teraFor(game, selectedPiece.id, options)!.tera!]}`,
-                  borderRadius: 8, padding: '0.4rem 0.55rem', cursor: 'pointer', color: 'var(--text)',
-                  fontSize: '0.78rem',
-                }}
-              >
-                <span aria-hidden>💠</span>
-                <span style={{ display: 'grid' }}>
-                  <strong>Terastallise → {teraFor(game, selectedPiece.id, options)!.tera}</strong>
-                  <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>
-                    Changes what it resists and what it hits hard — once per game.
-                  </span>
-                </span>
-              </button>
-            )}
+            {/* Every action that has no destination — an art cast, and each transformation the piece can
+                reach. Rendered from one list so a piece with several never silently loses one. */}
+            {selfActions.map((option) => (
+              <SelfActionButton key={option.move.encoded} option={option} onCast={onCast} />
+            ))}
 
             {game.hasTerastallised(selectedPiece.id) && (
               <span style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>

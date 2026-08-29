@@ -13,6 +13,7 @@ import {
   resolveKit,
 } from './draft.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
+import { isTransformItem } from './transform.ts';
 import { candidateArts } from './arts.ts';
 
 const dex = await Dex.load();
@@ -196,7 +197,8 @@ describe('the drafted kit', () => {
     const finalized = finalizeDraft(dex, fillAllWith(dex, 'garchomp'));
     for (const [, load] of finalized.loadout) {
       expect(species.abilities).toContain(load.ability);
-      expect(IMPLEMENTED_ITEMS).toContain(load.item);
+      // Either an item with a combat effect, or one of the transformation items (a mega stone, a Z-crystal).
+      expect(IMPLEMENTED_ITEMS.includes(load.item!) || isTransformItem(dex, load.item!)).toBe(true);
     }
   });
 

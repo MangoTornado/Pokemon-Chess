@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Dex } from '../data/dex.ts';
+import { isTransformItem } from '../game/transform.ts';
 import type { BattleType } from '../data/schema.ts';
 import { parseSquare, squareName } from '../engine/board.ts';
 import { Position } from '../engine/position.ts';
@@ -240,7 +241,10 @@ describe('items in a live game', () => {
       if (!entry.item) continue;
       held += 1;
       expect(dex.getItem(entry.item), `${entry.item} should be a real item`).toBeDefined();
-      expect(IMPLEMENTED_ITEMS, `${entry.item} should be implemented`).toContain(entry.item);
+      // A drafted item must do *something*: either a turn-to-turn combat effect this module implements, or a
+      // transformation (a mega stone, a Z-crystal), which is implemented in game/transform.ts instead.
+      const implemented = IMPLEMENTED_ITEMS.includes(entry.item!) || isTransformItem(dex, entry.item!);
+      expect(implemented, `${entry.item} should be implemented`).toBe(true);
     }
     expect(held).toBe(32); // every piece holds something
   });

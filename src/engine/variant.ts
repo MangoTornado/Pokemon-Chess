@@ -34,7 +34,11 @@ import type { Dex } from '../data/dex.ts';
 import { KING_MOVES, fileOf, squareName } from './board.ts';
 import type { PieceClass, Side, Square } from './board.ts';
 import { Position } from './position.ts';
-import { encodeArt, encodeTera, isArtMove, isTeraMove } from './position.ts';
+import {
+  encodeArt, encodeDynamax, encodeMega, encodeTera, encodeZPower,
+  isArtMove, isDynamaxMove, isMegaMove, isTeraMove, isTransformMove, isZPowerMove,
+} from './position.ts';
+import type { EncodedMove } from './position.ts';
 import type { Move, Piece } from './position.ts';
 import { Rng } from './rng.ts';
 import type { RngState } from './rng.ts';
@@ -64,6 +68,10 @@ import {
 import type { Field } from './field.ts';
 import { pickArt } from '../game/arts.ts';
 import { DRAW_BOOST, GUARD_TURNS, abilityDraws } from '../rules/redirect.ts';
+import {
+  DYNAMAX_HP_MULTIPLIER, DYNAMAX_TURNS, megaBattleType, megaFormeFor, zBasePower, zSlotFor,
+} from '../game/transform.ts';
+import type { TransformKind } from '../game/transform.ts';
 import type { Interception } from '../rules/redirect.ts';
 import type { Art } from '../game/arts.ts';
 import type { StatStages } from './stages.ts';
@@ -148,6 +156,27 @@ export interface VariantMove {
   readonly art?: Art;
   /** Set when this action Terastallises the piece — changing the type it fights and defends as. */
   readonly tera?: BattleType;
+}
+
+/**
+ * What a piece has transformed into, if anything.
+ *
+ * One record per piece rather than three parallel maps, because a side only ever spends one transformation, so
+ * at most one of these fields is ever set on the whole board.
+ */
+export interface TransformState {
+  /** The mega forme this piece became: it is genuinely a different Pokemon now. */
+  readonly mega?: {
+    readonly species: string;
+    readonly ability: string;
+    readonly type: BattleType;
+    /** Recomputed from the forme's base stats, which is the point of Mega Evolving. */
+    readonly stats: PieceStats;
+  };
+  /** Turns of Dynamax remaining, while its doubled HP holds. */
+  readonly dynamaxTurns?: number;
+  /** A charged Z-Power waiting on this piece's next attack. */
+  readonly zCharged?: boolean;
 }
 
 /**
@@ -318,6 +347,9 @@ export class PokemonChess {
    * one a real commitment rather than a square-bound trap.
    */
   private readonly guards: ReadonlyMap<number, number>;
+
+  /** What each transformed piece has become. At most one side's worth, since a side transforms once. */
+  private readonly transforms: ReadonlyMap<number, TransformState>;
   /**
    * The field move each piece can cast, or null — computed once at creation.
    *
@@ -347,6 +379,7 @@ export class PokemonChess {
     field: Field,
     tera: ReadonlySet<number>,
     guards: ReadonlyMap<number, number>,
+    transforms: ReadonlyMap<number, TransformState>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -364,6 +397,7 @@ export class PokemonChess {
     this.field = field;
     this.tera = tera;
     this.guards = guards;
+    this.transforms = transforms;
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -415,6 +449,7 @@ export class PokemonChess {
         : EMPTY_FIELD,
       new Set(), // nobody has Terastallised yet
       new Map(), // nobody is guarding yet
+      new Map(), // nobody has transformed yet
       new Rng(options.seed).state,
       null,
       [],
@@ -439,10 +474,96 @@ export class PokemonChess {
     return entry;
   }
 
+  /** A piece's stats — the mega forme's, once it has Mega Evolved, which is what the stone buys. */
   statsOf(pieceId: number): PieceStats {
+    const mega = this.transforms.get(pieceId)?.mega;
+    if (mega) return mega.stats;
     const s = this.stats.get(pieceId);
     if (!s) throw new Error(`no stats for piece ${pieceId}`);
     return s;
+  }
+
+  /** The species a piece currently *is*, which a Mega Evolution changes for the rest of the game. */
+  speciesOf(pieceId: number): string {
+    return this.transforms.get(pieceId)?.mega?.species ?? this.loadoutOf(pieceId).species;
+  }
+
+  /**
+   * The ability a piece currently has.
+   *
+   * Every ability read goes through here rather than through the loadout, because a mega forme brings its own —
+   * a Gyarados that Megas trades Intimidate for Mold Breaker, and an immunity check against the stale loadout
+   * would answer for a Pokemon that no longer exists.
+   */
+  abilityOf(pieceId: number): string | undefined {
+    return this.transforms.get(pieceId)?.mega?.ability ?? this.loadoutOf(pieceId).ability;
+  }
+
+  /**
+   * Whether a piece is in a fight: it can capture something this turn, or an enemy stands beside it.
+   *
+   * `generated` is the move list built so far, which already contains every capture, so the offensive half
+   * costs a scan rather than a second generation pass.
+   */
+  private inContact(square: Square, side: Side, generated: readonly VariantMove[]): boolean {
+    for (const m of generated) {
+      if (m.move.captured && m.move.from === square) return true;
+    }
+    for (const neighbour of KING_MOVES[square] ?? []) {
+      const other = this.position.pieceAt(neighbour);
+      if (other && other.side !== side) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The mega forme a piece could reach right now, or null.
+   *
+   * Null once it has already Mega Evolved: a forme has no forme of its own, and the stone is spent.
+   */
+  megaFormeOf(pieceId: number): SpeciesEntry | null {
+    if (this.transforms.get(pieceId)?.mega) return null;
+    const species = this.dex.getSpecies(this.loadoutOf(pieceId).species);
+    if (!species) return null;
+    return megaFormeFor(this.dex, species, this.loadoutOf(pieceId).item);
+  }
+
+  /** What a piece has transformed into, if anything. */
+  transformOf(pieceId: number): TransformState | null {
+    return this.transforms.get(pieceId) ?? null;
+  }
+
+  /** Turns of Dynamax left on a piece, 0 if it is not Dynamaxed. */
+  dynamaxTurnsLeft(pieceId: number): number {
+    return this.transforms.get(pieceId)?.dynamaxTurns ?? 0;
+  }
+
+  /** Whether a piece is holding a charged Z-Power for its next attack. */
+  hasZPower(pieceId: number): boolean {
+    return this.transforms.get(pieceId)?.zCharged === true;
+  }
+
+  /** The transform map with a fired Z-Power charge removed, or the current one if none fired. */
+  private spendZPower(attackerId: number, slot: number): ReadonlyMap<number, TransformState> {
+    if (!this.zPowerAppliesTo(attackerId, slot)) return this.transforms;
+    const next = new Map(this.transforms);
+    const state = { ...next.get(attackerId)! };
+    delete (state as { zCharged?: boolean }).zCharged;
+    if (Object.keys(state).length === 0) next.delete(attackerId);
+    else next.set(attackerId, state);
+    return next;
+  }
+
+  /**
+   * Whether a charged Z-Power fires on this particular blow.
+   *
+   * The crystal powers one type, so a charged piece attacking with the wrong slot throws an ordinary blow and
+   * keeps the charge. That is the games' rule and it makes a Z-crystal a commitment to a *matchup*, not just to
+   * a piece.
+   */
+  private zPowerAppliesTo(attackerId: number, slot: number): boolean {
+    if (!this.hasZPower(attackerId)) return false;
+    return zSlotFor(this.dex, this.loadoutOf(attackerId).item, this.movesetOf(attackerId)) === slot;
   }
 
   /** Live HP state for a piece, defaulting to full HP for one never yet damaged. */
@@ -570,6 +691,42 @@ export class PokemonChess {
       }
     }
 
+    // The other three transformations, sharing the same one-per-side budget as Tera. Each is offered only to a
+    // piece that can actually reach it: a mega stone that names its species, a Z-crystal matching one of its
+    // moves, and — for Dynamax, which needs nothing held — any piece at all.
+    if (pending === null && this.transformAvailable(this.position.turn)) {
+      for (const { square, piece } of this.position.allPieces()) {
+        if (piece.side !== this.position.turn) continue;
+        if (movementLock(this.statusOf(piece.id)) !== null) continue;
+        const load = this.loadoutOf(piece.id);
+        const offer = (encoded: EncodedMove, moveName: string) => {
+          out.push({
+            move: this.pseudoMoveFor(square, piece.cls, encoded),
+            attacker: load,
+            defender: null,
+            effectiveness: null,
+            forecast: 'quiet',
+            slot: 0,
+            moveName,
+            isExtraMove: false,
+          });
+        };
+
+        const forme = this.megaFormeOf(piece.id);
+        if (forme) offer(encodeMega(square, piece.cls), `Mega Evolve → ${forme.name}`);
+
+        // Dynamax needs nothing held, so unlike the other three it has no natural gate — and offered to every
+        // piece it was a quarter of the opening's whole move list, sixteen near-identical options that cost the
+        // search real depth and told a player nothing. The gate is what Dynamax is actually *for*: doubling HP
+        // matters when a piece is in a fight, so it is offered to a piece that can capture this turn or stands
+        // next to an enemy. Spending it on a quiet piece in an empty quarter of the board was never the move.
+        if (this.inContact(square, piece.side, out)) offer(encodeDynamax(square, piece.cls), 'Dynamax');
+
+        const zSlot = zSlotFor(this.dex, load.item, this.movesetOf(piece.id));
+        if (zSlot !== null) offer(encodeZPower(square, piece.cls), `Z-Power → ${this.movesetOf(piece.id)[zSlot]!.name}`);
+      }
+    }
+
     // Art casts: a piece may spend its turn shaping the field instead of moving. Never offered as a bonus
     // move, because the bonus exists to continue an assault, and never while the caster is incapacitated.
     if (pending === null) {
@@ -686,7 +843,9 @@ export class PokemonChess {
       moveType: move.type,
       defenderType: dType,
       category: aCategory,
-      basePower: move.basePower,
+      // A charged Z-Power converts this one blow's base power through the games' own table, which compresses
+      // hard at the top — so it is not "your best move, doubled", and it is worth most on a weak move.
+      basePower: this.zPowerAppliesTo(attackerId, slot) ? zBasePower(move.basePower) : move.basePower,
       offensiveStat: aPhysical ? aStats.atk : aStats.spa,
       defensiveStat: aPhysical ? dStats.def : dStats.spd,
       offensiveStage: stageOf(aStages, aPhysical ? 'atk' : 'spa'),
@@ -819,6 +978,13 @@ export class PokemonChess {
 
     // Terastallisation: the piece changes the type it fights as and the turn passes. No board change, and no
     // Clash, so it cannot hurt anyone by itself — its whole effect is on every exchange afterwards.
+    // The other three transformations. Each spends the side's single use, costs the turn, and moves nothing —
+    // the same grammar as Terastallisation, which is what makes them comparable choices rather than a
+    // collection of special cases.
+    if (isMegaMove(move.encoded) || isDynamaxMove(move.encoded) || isZPowerMove(move.encoded)) {
+      return this.playTransform(move, side, attackerId, attacker, roll, nextRngState);
+    }
+
     if (isTeraMove(move.encoded)) {
       const nextTera = new Set(this.tera);
       nextTera.add(attackerId);
@@ -840,7 +1006,7 @@ export class PokemonChess {
       return {
         game: this.next({
           position: up.position, live: up.live, statuses: up.statuses, field: up.field, tera: nextTera,
-          guards: up.guards, rngState: nextRngState, pending: null,
+          guards: up.guards, transforms: up.transforms, rngState: nextRngState, pending: null,
         }, resolved),
         resolved,
       };
@@ -871,7 +1037,7 @@ export class PokemonChess {
       return {
         game: this.next({
           position: up.position, live: up.live, statuses: up.statuses, field: up.field,
-          guards: nextGuards, rngState: nextRngState, pending: null,
+          guards: nextGuards, transforms: up.transforms, rngState: nextRngState, pending: null,
         }, resolved),
         resolved,
       };
@@ -898,7 +1064,7 @@ export class PokemonChess {
       return {
         game: this.next({
           position: up.position, live: up.live, statuses: up.statuses, stages: arrival.stages,
-          field: up.field, guards: up.guards, rngState: nextRngState, pending: null,
+          field: up.field, guards: up.guards, transforms: up.transforms, rngState: nextRngState, pending: null,
         }, resolved),
         resolved,
       };
@@ -1083,19 +1249,28 @@ export class PokemonChess {
       kingCaptured,
     };
 
+    // A Z-Power that fired is spent. Cleared here rather than at the Checkup because a super-effective
+    // knockout grants a bonus move and no Checkup runs — without this the same charge would power every blow of
+    // the chain, and then the rest of the game.
+    const nextTransforms = this.spendZPower(attackerId, slot);
+
     // When the turn passes (no bonus, game not decided), the mover's side takes its end-of-turn Checkup.
     if (pending === null && !kingCaptured) {
       const up = this.checkup(side, posForNext, nextLive, nextStatus, this.field);
       return {
         game: this.next({
           position: up.position, live: up.live, statuses: up.statuses, stages: nextStages, field: up.field,
-          guards: up.guards, rngState: nextRngState, pending: null,
+          guards: up.guards, transforms: mergeTransforms(up.transforms, nextTransforms),
+          rngState: nextRngState, pending: null,
         }, resolved),
         resolved,
       };
     }
     return {
-      game: this.next({ position: posForNext, live: nextLive, statuses: nextStatus, stages: nextStages, rngState: nextRngState, pending }, resolved),
+      game: this.next({
+        position: posForNext, live: nextLive, statuses: nextStatus, stages: nextStages,
+        transforms: nextTransforms, rngState: nextRngState, pending,
+      }, resolved),
       resolved,
     };
   }
@@ -1118,6 +1293,7 @@ export class PokemonChess {
       readonly field?: Field;
       readonly tera?: ReadonlySet<number>;
       readonly guards?: ReadonlyMap<number, number>;
+      readonly transforms?: ReadonlyMap<number, TransformState>;
       readonly rngState: RngState;
       readonly pending: PendingExtraMove | null;
     },
@@ -1132,6 +1308,7 @@ export class PokemonChess {
       patch.field ?? this.field,
       patch.tera ?? this.tera,
       patch.guards ?? this.guards,
+      patch.transforms ?? this.transforms,
       patch.rngState,
       patch.pending,
       [...this.history, resolved],
@@ -1326,7 +1503,10 @@ export class PokemonChess {
    */
   battleTypeOf(pieceId: number): BattleType {
     const loadout = this.loadoutOf(pieceId);
-    return this.tera.has(pieceId) && loadout.teraType ? loadout.teraType : loadout.type;
+    // Tera outranks a mega forme's typing: the crystal is a deliberate declaration and does not care what forme
+    // the piece is in, whereas a mega's typing is a consequence of the forme it happens to be.
+    if (this.tera.has(pieceId) && loadout.teraType) return loadout.teraType;
+    return this.transforms.get(pieceId)?.mega?.type ?? loadout.type;
   }
 
   /** Whether this piece has Terastallised. */
@@ -1336,12 +1516,34 @@ export class PokemonChess {
 
   /** Whether a side still has its one Terastallisation available. */
   teraAvailable(side: Side): boolean {
-    for (const id of this.tera) {
-      if (this.pieceById(id)?.side === side) return false;
-    }
-    // A piece that Terastallised and then fell still spent the side's use, so check the history too.
-    return !this.history.some((h) => h.side === side && isTeraMove(h.move.encoded));
+    return this.transformAvailable(side);
   }
+
+  /**
+   * Whether a side still has its one transformation.
+   *
+   * One budget for all four, because that is the rule the games actually have: Mega Evolution, Z-Moves,
+   * Dynamax and Terastallisation are generation-exclusive, so a trainer never has two in the same battle.
+   * Reproducing it turns four buttons into one decision a side makes once and cannot take back.
+   *
+   * Read from the history rather than from live state, because a piece that transformed and then fell still
+   * spent the side's use — and the history is the only record that survives it.
+   */
+  transformAvailable(side: Side): boolean {
+    return !this.history.some((h) => h.side === side && isTransformMove(h.move.encoded));
+  }
+
+  /** Which transformation a side spent, or null if it still has one. */
+  transformSpent(side: Side): TransformKind | null {
+    const used = this.history.find((h) => h.side === side && isTransformMove(h.move.encoded));
+    if (!used) return null;
+    const e = used.move.encoded;
+    if (isMegaMove(e)) return 'mega';
+    if (isDynamaxMove(e)) return 'dynamax';
+    if (isZPowerMove(e)) return 'zpower';
+    return 'tera';
+  }
+
 
   /** The stat stages a piece is carrying, defaulting to all zero. */
   stagesOf(pieceId: number): StatStages {
@@ -1380,6 +1582,7 @@ export class PokemonChess {
     statuses: ReadonlyMap<number, PieceStatus>;
     field: Field;
     guards: ReadonlyMap<number, number>;
+    transforms: ReadonlyMap<number, TransformState>;
   } {
     let pos = position;
     const nlive = new Map(live);
@@ -1474,6 +1677,37 @@ export class PokemonChess {
       ? tickWeather(field.weather)
       : field.weather;
 
+    // Dynamax ages on its owner's own Checkup, so three turns means three of its own moves. When it lapses the
+    // HP pool halves back, keeping the same *share* of it: a piece that Dynamaxed at full health and spent half
+    // the doubled pool comes back at full health of the normal one, which is exactly what the games do and why
+    // Dynamax is a real heal as well as a wall.
+    const ntransforms = new Map(this.transforms);
+    for (const [id, state] of this.transforms) {
+      if (state.dynamaxTurns === undefined) continue;
+      if (this.pieceById(id)?.side !== side) continue;
+      const left = state.dynamaxTurns - 1;
+      if (left > 0) {
+        ntransforms.set(id, { ...state, dynamaxTurns: left });
+        continue;
+      }
+      const rest: TransformState = { ...state };
+      delete (rest as { dynamaxTurns?: number }).dynamaxTurns;
+      if (Object.keys(rest).length === 0) ntransforms.delete(id);
+      else ntransforms.set(id, rest);
+
+      const l = nlive.get(id) ?? this.liveOf(id);
+      const maxHp = Math.max(1, Math.round(l.maxHp / DYNAMAX_HP_MULTIPLIER));
+      nlive.set(id, {
+        hp: Math.max(1, Math.min(maxHp, Math.round(l.hp / DYNAMAX_HP_MULTIPLIER))),
+        maxHp,
+        pristine: l.pristine,
+      });
+    }
+    // A transform record whose piece has left the board is dropped, so nothing accumulates across a game.
+    for (const id of [...ntransforms.keys()]) {
+      if (!pos.allPieces().some((p) => p.piece.id === id)) ntransforms.delete(id);
+    }
+
     // A guard lapses at the end of the *opponent's* turn, not its caster's.
     //
     // That is the whole reason it is worth a tempo: Follow Me cast by White has to still be standing when
@@ -1499,6 +1733,86 @@ export class PokemonChess {
         screens: { ...field.screens, [side]: tickScreens(field.screens[side]) },
       },
       guards: nguards,
+      transforms: ntransforms,
+    };
+  }
+
+  /**
+   * Mega Evolution, Dynamax or a Z-Power charge.
+   *
+   * All three cost the turn and move nothing, so they share one path; what differs is the state each writes.
+   * Mega recomputes the piece's stats from the new forme's base stats and takes its ability and typing, which
+   * is the forme swap the rest of the engine reads through {@link statsOf}, {@link abilityOf} and
+   * {@link battleTypeOf}. Dynamax doubles live HP and sets a timer. A Z-Power charge only arms the next attack.
+   */
+  private playTransform(
+    move: Move,
+    side: Side,
+    attackerId: number,
+    attacker: PokemonLoadout,
+    roll: ClashRoll,
+    nextRngState: RngState,
+  ): { game: PokemonChess; resolved: ResolvedMove } {
+    const transforms = new Map(this.transforms);
+    const current = transforms.get(attackerId) ?? {};
+    let live: ReadonlyMap<number, LiveState> = this.live;
+    let label = 'Transform';
+
+    if (isMegaMove(move.encoded)) {
+      const forme = this.megaFormeOf(attackerId);
+      if (!forme) throw new Error(`piece ${attackerId} cannot Mega Evolve`);
+      transforms.set(attackerId, {
+        ...current,
+        mega: {
+          species: forme.id,
+          ability: forme.abilities[0] ?? attacker.ability ?? '',
+          type: megaBattleType(forme, this.battleTypeOf(attackerId)),
+          stats: computeStats(forme),
+        },
+      });
+      label = `Mega Evolve → ${forme.name}`;
+    } else if (isDynamaxMove(move.encoded)) {
+      transforms.set(attackerId, { ...current, dynamaxTurns: DYNAMAX_TURNS });
+      // Current and maximum HP both double, as in the games, so the piece is not merely harder to finish — it
+      // is *healthier*, and reverting later gives back the same share of a smaller pool.
+      const l = this.liveOf(attackerId);
+      const next = new Map(this.live);
+      next.set(attackerId, {
+        hp: l.hp * DYNAMAX_HP_MULTIPLIER,
+        maxHp: l.maxHp * DYNAMAX_HP_MULTIPLIER,
+        pristine: l.pristine,
+      });
+      live = next;
+      label = 'Dynamax';
+    } else {
+      transforms.set(attackerId, { ...current, zCharged: true });
+      label = 'Z-Power charged';
+    }
+
+    const l = live.get(attackerId) ?? this.liveOf(attackerId);
+    const resolved: ResolvedMove = {
+      move, side, attacker, defender: null, effectiveness: null,
+      verdict: 'quiet',
+      attackerHpAfter: l.hp,
+      defenderHpAfter: 0,
+      attackerMaxHp: l.maxHp,
+      defenderMaxHp: null,
+      crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
+      moveName: label, moveType: null, statusInflicted: null, boostsInflicted: null, recoilTaken: 0,
+      grantsBonus: false, removed: [], kingCaptured: false,
+    };
+
+    const nextPos = this.position.withTurnReturned();
+    const up = this.checkup(side, nextPos, live, this.statuses, this.field);
+    return {
+      game: this.next({
+        position: up.position, live: up.live, statuses: up.statuses, field: up.field, guards: up.guards,
+        // Merged onto the Checkup's map rather than replacing it: the Checkup ages Dynamax and drops records
+        // for pieces that have left the board, and a cast made now has to survive both.
+        transforms: new Map(up.transforms).set(attackerId, transforms.get(attackerId)!),
+        rngState: nextRngState, pending: null,
+      }, resolved),
+      resolved,
     };
   }
 
@@ -1548,7 +1862,7 @@ export class PokemonChess {
     return {
       game: this.next({
         position: up.position, live: up.live, statuses: up.statuses, stages: nextStages, field: up.field,
-        guards: up.guards, rngState: nextRngState, pending: null,
+        guards: up.guards, transforms: up.transforms, rngState: nextRngState, pending: null,
       }, resolved),
       resolved,
     };
@@ -1589,8 +1903,9 @@ export class PokemonChess {
       // Only an ally of the attacked piece can step in, and never the attacked piece itself.
       if (!piece || piece.side !== defenderPiece.side || piece.id === defenderId) continue;
 
-      if (abilityDraws(this.loadoutOf(piece.id).ability) === moveType) {
-        return { pieceId: piece.id, square: neighbour, kind: 'draw', ability: this.loadoutOf(piece.id).ability! };
+      const neighbourAbility = this.abilityOf(piece.id);
+      if (abilityDraws(neighbourAbility) === moveType) {
+        return { pieceId: piece.id, square: neighbour, kind: 'draw', ability: neighbourAbility! };
       }
       // Remember the first guard, but keep looking for a drawer, which outranks it.
       if (guard === null && this.guardTurnsLeft(piece.id) > 0) {
@@ -1625,11 +1940,10 @@ export class PokemonChess {
    */
   bestSlotAgainst(attackerId: number, defenderId: number): { slot: number; type: BattleType; multiplier: number } | null {
     const moves = this.movesetOf(attackerId);
-    const defender = this.loadoutOf(defenderId);
     const isKing = this.pieceById(defenderId)?.cls === 'king';
     const defenderType = this.battleTypeOf(defenderId);
     // A king is never immune (R6), so its ability grants no immunity as a defender either.
-    const ability = isKing ? undefined : defender.ability;
+    const ability = isKing ? undefined : this.abilityOf(defenderId);
     const wonderGuard = ability === WONDER_GUARD;
     let best: { slot: number; type: BattleType; multiplier: number } | null = null;
     for (let slot = 0; slot < moves.length; slot++) {
@@ -1664,7 +1978,7 @@ export class PokemonChess {
     }
     if (this.bestSlotAgainst(attackerId, defenderId) !== null) return null;
     const defender = this.loadoutOf(defenderId);
-    const ability = defender.ability;
+    const ability = this.abilityOf(defenderId);
     if (ability === WONDER_GUARD) {
       return `${defender.species}'s Wonder Guard blocks all but a super-effective hit`;
     }
@@ -1748,3 +2062,21 @@ export type { SpeciesEntry };
 export type { Side } from './board.ts';
 export type { PieceStatus } from './status.ts';
 export type { StatStages, StatKey } from './stages.ts';
+
+/**
+ * Combines a Checkup's transform map with one an action produced.
+ *
+ * The Checkup ages Dynamax and drops records for departed pieces; an action may have spent a Z-Power. Both
+ * edits matter and neither map is a superset of the other, so the aged map is the base and only the action's
+ * removals are replayed onto it — taking its *values* would undo the aging.
+ */
+function mergeTransforms(
+  aged: ReadonlyMap<number, TransformState>,
+  afterAction: ReadonlyMap<number, TransformState>,
+): ReadonlyMap<number, TransformState> {
+  const out = new Map(aged);
+  for (const id of aged.keys()) {
+    if (!afterAction.has(id)) out.delete(id);
+  }
+  return out;
+}

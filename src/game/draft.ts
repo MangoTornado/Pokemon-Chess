@@ -190,7 +190,7 @@ export function resolveKit(
   const key = `${seed}:${slot.square}`;
   const moveset = buildMoveset(dex, species, pick.type, key);
   const ability = pick.ability ?? species.abilities[0];
-  const item = pick.item ?? pickHeldItem(species, slot.cls, pick.type, new Rng(`kit:${key}`));
+  const item = pick.item ?? pickHeldItem(species, slot.cls, pick.type, new Rng(`kit:${key}`), dex);
   const teraType = pick.teraType ?? pickTeraType(species, pick.type, moveset);
   // Most species know no field move at all, so an absent art is a real answer rather than a gap.
   const art = pick.art ?? pickArt(dex, pick.species, key);

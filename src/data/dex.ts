@@ -216,6 +216,16 @@ export class Dex {
     return this.items.filter((i) => i.megaStone && Object.hasOwn(i.megaStone, baseName));
   }
 
+  /**
+   * Z-crystals that power up a given attacking type.
+   *
+   * Matched on the crystal's own `zMoveType`, so the eighteen type crystals are found and the species-specific
+   * ones (Pikanium Z and friends, which name a single move) are not.
+   */
+  zCrystalsFor(type: BattleType): ItemEntry[] {
+    return this.items.filter((i) => i.zMove === true && i.zMoveType === type);
+  }
+
   /** Formes reachable from this one by holding an item (Mega Evolution and equivalents). */
   itemFormesOf(species: SpeciesEntry): SpeciesEntry[] {
     return this.formesOf(species.num).filter(

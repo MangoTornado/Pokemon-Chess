@@ -91,7 +91,7 @@ export function autodraft(dex: Dex, seed: string | number): DraftResult {
         // Each piece fights with one of its species' real abilities (the first non-hidden slot) and a
         // role-appropriate held item, so ability and item effects are grounded in the actual Pokémon.
         const ability = species.abilities[0];
-        const item = pickHeldItem(species, cls, type, rng);
+        const item = pickHeldItem(species, cls, type, rng, dex);
         // The Tera type is derived from the kit the piece will actually carry, so Terastallising turns its
         // best coverage move into STAB. The moveset is built with the same seed the engine will use.
         const moveset = buildMoveset(dex, species, type, `${seed}:${piece.id}`);
