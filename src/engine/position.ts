@@ -151,6 +151,25 @@ export function encodeTera(square: Square, cls: PieceClass): EncodedMove {
 /** Whether an encoded action is a Terastallisation. */
 export const isTeraMove = (move: EncodedMove): boolean => (move & MOVE_TERA) !== 0;
 
+/**
+ * The highest bit any encoded action uses, and the inclusive ceiling that follows from it.
+ *
+ * Derived rather than written down, because a hand-written ceiling silently falls behind the flag bits: an
+ * earlier `0xffffff` bound predated `MOVE_CASTLE_QUEEN`, `MOVE_ART` and `MOVE_TERA`, so the server rejected
+ * queen-side castling, every art cast and every Terastallisation as malformed. Anything that adds a flag bit
+ * must widen this by construction, so keep the fold below covering every flag.
+ */
+export const MAX_ENCODED_MOVE: number =
+  [
+    MOVE_DOUBLE_PUSH, MOVE_EN_PASSANT, MOVE_CASTLE_KING, MOVE_CASTLE_QUEEN, MOVE_ART, MOVE_TERA,
+  ].reduce((acc, flag) => acc | flag, 0)
+  | 0x3ffff; // the from/to/class payload below the flags
+
+/** Whether a number could be an encoded action at all — the cheap shape check a server does before replay. */
+export function isPlausibleEncodedMove(move: number): boolean {
+  return Number.isInteger(move) && move >= 0 && move <= MAX_ENCODED_MOVE;
+}
+
 export const moveFrom = (move: EncodedMove): Square => move & 63;
 export const moveTo = (move: EncodedMove): Square => (move >>> 6) & 63;
 

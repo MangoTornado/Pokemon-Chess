@@ -17,6 +17,7 @@
  */
 
 import type { EngineOps } from './gameValidator.ts';
+import { isPlausibleEncodedMove } from '../src/engine/position.ts';
 
 /** How long a room survives its last activity before being pruned. */
 const ROOM_TTL_MS = 30 * 60 * 1000;
@@ -246,9 +247,7 @@ export class Matches {
     if (!Number.isInteger(ply) || ply !== room.actions.length) {
       return fail('Out-of-date move; refresh and retry.', 409);
     }
-    if (!Number.isInteger(encoded) || encoded < 0 || encoded > 0xffffff) {
-      return fail('Malformed move.', 400);
-    }
+    if (!isPlausibleEncodedMove(encoded)) return fail('Malformed move.', 400);
     // A player who has run out of time loses before their move is considered.
     if (this.chargeClock(room) && room.status !== 'playing') return ok(this.view(room, accountId));
 

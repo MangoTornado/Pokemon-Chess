@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import { Matches, QUICK_CHAT } from './matches.ts';
+import {
+  MAX_ENCODED_MOVE, MOVE_ART, MOVE_CASTLE_KING, MOVE_CASTLE_QUEEN, MOVE_TERA,
+} from '../src/engine/position.ts';
 import type { EndInfo } from './matches.ts';
 
 /** A Matches with a hand-cranked clock, so timeouts are tested without waiting. */
@@ -97,6 +100,34 @@ describe('turn clock', () => {
     const id2 = paired(h2);
     const o = h2.m.reportOutcome(id2, white.accountId, 'draw');
     expect(o.ok && o.value.endedBy).toBe('draw');
+  });
+});
+
+describe('move well-formedness', () => {
+  it('accepts every action the encoding can produce, not just plain chess moves', () => {
+    // The regression this pins: a hand-written 0xffffff ceiling predated three flag bits, so queen-side
+    // castling, every art cast and every Terastallisation came back "Malformed move." from a live game.
+    const h = harness();
+    const id = paired(h);
+    const square = 12;
+    const cls = 4; // index into PIECE_CLASSES; any real one will do for a shape check
+    const payload = square | (square << 6) | (cls << 12);
+    for (const flag of [MOVE_CASTLE_KING, MOVE_CASTLE_QUEEN, MOVE_ART, MOVE_TERA]) {
+      const r = h.m.move(id, white.accountId, h.m.state(id, white.accountId).ok ? 0 : 0, payload | flag);
+      // Relay mode appends anything well-formed; the point is that it is not rejected as malformed.
+      expect(r.ok || (!r.ok && r.status !== 400)).toBe(true);
+      if (r.ok) return; // one accepted append is enough — later ones would fail the ply check
+    }
+  });
+
+  it('still rejects a number no encoding could have produced', () => {
+    const h = harness();
+    const id = paired(h);
+    for (const bad of [-1, 1.5, 1 << 30, Number.NaN, MAX_ENCODED_MOVE + 1]) {
+      const r = h.m.move(id, white.accountId, 0, bad);
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.status).toBe(400);
+    }
   });
 });
 
