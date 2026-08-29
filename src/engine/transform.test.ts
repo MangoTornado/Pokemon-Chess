@@ -16,7 +16,9 @@ import { Dex } from '../data/dex.ts';
 import type { BattleType } from '../data/schema.ts';
 import { parseSquare, squareName } from './board.ts';
 import { Position } from './position.ts';
-import { isDynamaxMove, isMegaMove, isTransformMove, isZPowerMove } from './position.ts';
+import { isDynamaxMove, isMegaMove, isPlausibleEncodedMove, isTransformMove, isZPowerMove } from './position.ts';
+import { autodraft } from '../game/autodraft.ts';
+import { replay } from '../game/replay.ts';
 import { PokemonChess } from './variant.ts';
 import type { Loadout, PokemonLoadout } from './variant.ts';
 import type { MoveSlot } from '../game/moveset.ts';
@@ -393,5 +395,59 @@ describe('a Z-Move', () => {
     // offer at all — which is the honest form of "dead weight".
     const { offer } = charged('Water', 'Fire');
     expect(offer).toBeUndefined();
+  });
+});
+
+describe('replay and server validation', () => {
+  it('reproduces a transformed game from the seed and the action list alone', () => {
+    // This is the property online play and the server validator both rest on: a game *is* a seed plus a list
+    // of numbers. A transformation that could not be replayed would be a transformation that could not be
+    // played online, and would be rejected as an illegal move by the server's own engine.
+    const setup = autodraft(dex, 'replay-transform');
+    const seed = 'replay-transform';
+    let g = PokemonChess.create({ dex, ...setup, seed });
+
+    const actions: number[] = [];
+    // Play until some transformation has been spent by each side, or the game runs long.
+    for (let i = 0; i < 60; i++) {
+      const moves = g.legalMoves();
+      if (moves.length === 0) break;
+      const transform = moves.find((m) => isTransformMove(m.move.encoded));
+      const chosen = transform ?? moves[i % moves.length]!;
+      actions.push(chosen.move.encoded);
+      const next = g.play(chosen.move);
+      g = next.game;
+      if (next.resolved.kingCaptured) break;
+      if (!g.transformAvailable('white') && !g.transformAvailable('black')) break;
+    }
+    expect(actions.length).toBeGreaterThan(0);
+    expect(g.history.some((h) => isTransformMove(h.move.encoded))).toBe(true);
+
+    const replayed = replay(dex, setup, seed, actions);
+    expect(replayed.game.history).toHaveLength(g.history.length);
+    expect(replayed.game.position.toFen()).toBe(g.position.toFen());
+    // And the transformed state itself survives, not just the board.
+    for (const { piece } of g.position.allPieces()) {
+      expect(replayed.game.speciesOf(piece.id)).toBe(g.speciesOf(piece.id));
+      expect(replayed.game.battleTypeOf(piece.id)).toBe(g.battleTypeOf(piece.id));
+      expect(replayed.game.dynamaxTurnsLeft(piece.id)).toBe(g.dynamaxTurnsLeft(piece.id));
+      expect(replayed.game.hasZPower(piece.id)).toBe(g.hasZPower(piece.id));
+    }
+  });
+
+  it('encodes every transformation inside the bound the server accepts', () => {
+    // The server shape-checks an action before spending a replay on it. A flag bit above that ceiling is
+    // rejected as malformed — which is exactly how queen-side castling, arts and Tera were once broken.
+    const g = gameFrom(FEN, {
+      d4: { species: 'charizard', type: 'Fire', item: 'charizarditex' },
+      d6: { species: 'gyarados', type: 'Water' },
+    });
+    const transforms = g.legalMoves().filter((m) => isTransformMove(m.move.encoded));
+    expect(transforms.length).toBeGreaterThan(1);
+    for (const m of transforms) {
+      expect(isPlausibleEncodedMove(m.move.encoded), m.moveName ?? '').toBe(true);
+      // Still an Int32Array-safe value, which the packed move encoding depends on.
+      expect(m.move.encoded).toBeLessThan(2 ** 31);
+    }
   });
 });

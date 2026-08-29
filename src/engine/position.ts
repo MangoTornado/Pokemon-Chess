@@ -581,9 +581,31 @@ export class Position {
     next.xorPiece(side, cls, square);
     next.board[square] = 0;
     next.pieceIds[square] = -1;
+    next.revalidateEnPassant();
     next.ply = 0;
     if (next.kings[next.stm] !== -1) next.computeCheckInfo();
     return next;
+  }
+
+  /**
+   * Drops an en passant square whose pawn is no longer there.
+   *
+   * Ordinary chess never needs this: the pawn that creates an en passant square cannot leave before the one
+   * chance to capture it. The Pokémon layer can remove a piece *outside* a move — Sandstorm chip, poison, a
+   * hazard on arrival — so a pawn can double-push and then die at the Checkup, leaving a target behind it that
+   * nothing occupies. The generator would then offer an en passant capture of an empty square, and the captured
+   * piece's identity would read back as the empty-square sentinel.
+   */
+  private revalidateEnPassant(): void {
+    if (this.ep === -1) return;
+    // The victim stands on the square the capturing pawn passes over, on the far side of the target.
+    const victimSquare = this.stm === WHITE ? this.ep - 8 : this.ep + 8;
+    const victim = this.board[victimSquare];
+    const stillThere = victim !== undefined && victim !== 0
+      && (victim & 7) - 1 === PAWN && victim >> 3 !== this.stm;
+    if (stillThere) return;
+    this.xorEp(this.ep);
+    this.ep = -1;
   }
 
   /**
