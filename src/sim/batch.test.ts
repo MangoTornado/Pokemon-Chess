@@ -9,7 +9,17 @@ const dex = await Dex.load();
 const SIGHTED: Difficulty = { name: 'Sighted', depth: 1, typeBlindness: 0 };
 const BLIND: Difficulty = { name: 'Blind', depth: 1, typeBlindness: 0.85 };
 
-describe('batch simulator', () => {
+/**
+ * A simulation budget, not a unit-test one.
+ *
+ * Each of these plays five or six complete games, so the file needs seconds rather than the 5 ms-to-ms scale
+ * vitest's 5 s default is sized for. It used to fit by luck; the game has since grown deeper (more actions per
+ * turn, so longer games), the file drifted to ~8-10 s of test time, and whichever test happened to be slowest
+ * on a given run tipped over the default — a coin-flip failure in about half of runs, which is worse than an
+ * honest failure because it reads as noise. The assertions here are bookkeeping invariants and do not depend on
+ * how long a game runs, so the fix is the budget, not the sample.
+ */
+describe('batch simulator', { timeout: 60_000 }, () => {
   it('aggregates outcomes that sum to the game count', () => {
     const report = runBatch(dex, { games: 6, white: SIGHTED, black: SIGHTED, seed: 'sum', maxPlies: 200 });
     expect(report.whiteWins + report.blackWins + report.draws).toBe(6);
