@@ -58,8 +58,8 @@ import {
 import type { PieceStatus } from './status.ts';
 import { applyBoosts, hasAnyStage, stageOf } from './stages.ts';
 import {
-  EMPTY_FIELD, WEATHER_TURNS, addHazardLayer, hazardToll, hazardZone, tickWeather, weatherChipFraction,
-  weatherDamageMod,
+  EMPTY_FIELD, SCREEN_TURNS, WEATHER_TURNS, addHazardLayer, hazardToll, hazardZone, screenMod, tickScreens,
+  tickWeather, weatherChipFraction, weatherDamageMod,
 } from './field.ts';
 import type { Field } from './field.ts';
 import { pickArt } from '../game/arts.ts';
@@ -378,7 +378,9 @@ export class PokemonChess {
       new Map(), // live HP
       new Map(), // statuses
       new Map(), // stat stages
-      options.weather ? { weather: { kind: options.weather, turns: Infinity }, hazards: new Map() } : EMPTY_FIELD,
+      options.weather
+        ? { ...EMPTY_FIELD, weather: { kind: options.weather, turns: Infinity } }
+        : EMPTY_FIELD,
       new Set(), // nobody has Terastallised yet
       new Rng(options.seed).state,
       null,
@@ -632,8 +634,14 @@ export class PokemonChess {
     // Held items scale the blow being thrown and reduce the blow being taken (SPEC §5 steps 2/13/14).
     const aItem = offensiveItemMods(a.item, move.type, aCategory, effectiveness(move.type, d.type) > 1);
     const dItem = offensiveItemMods(d.item, dType, dCategory, effectiveness(dType, aType) > 1);
-    const aDefend = defensiveItemMod(a.item, dCategory, this.isNfe(a.species));
-    const dDefend = defensiveItemMod(d.item, aCategory, this.isNfe(d.species));
+    // A side's screen halves the damage its own pieces take of that category, folded into the same
+    // defender hook as a defensive item — the pipeline requires such a hook to be <= 1, and both are.
+    const aSide = this.pieceById(attackerId)?.side ?? 'white';
+    const dSide = this.pieceById(defenderId)?.side ?? 'black';
+    const aDefend = defensiveItemMod(a.item, dCategory, this.isNfe(a.species))
+      * screenMod(this.field.screens[aSide], dCategory);
+    const dDefend = defensiveItemMod(d.item, aCategory, this.isNfe(d.species))
+      * screenMod(this.field.screens[dSide], aCategory);
 
     // Stat stages feed the pipeline's existing stage inputs, so a −1 Defence drop shows up as more damage
     // taken on every later exchange — a lasting wound, since nothing resets here.
@@ -731,6 +739,7 @@ export class PokemonChess {
     let roll: ClashRoll = { hits: true, crit: false, momentum: 100 };
     let riderHits = false;
     let boostHits = false;
+    let hitRoll = 0;
     if (move.captured) {
       const momentum = 85 + rng.below(16); // uniform 85..100
       let crit = this.rules.critCoins > 0;
@@ -743,8 +752,10 @@ export class PokemonChess {
       if (slot?.rider) riderHits = rng.chance(slot.rider.chance);
       // The target's stage change is its own draw, taken in a fixed order so a replay reproduces it.
       if (slot?.targetBoosts) boostHits = rng.chance(slot.targetBoosts.chance);
+      // A ranged multi-hit move's strike count, drawn from the same stream.
+      if (slot?.hits !== undefined && typeof slot.hits !== 'number') hitRoll = rng.below(64);
     }
-    const { game, resolved } = this.applyResolved(move, roll, rng.state, riderHits, boostHits);
+    const { game, resolved } = this.applyResolved(move, roll, rng.state, riderHits, boostHits, hitRoll);
     return { game, resolved };
   }
 
@@ -760,6 +771,7 @@ export class PokemonChess {
     nextRngState: RngState = this.rngState,
     riderHits = false,
     boostHits = false,
+    hitRoll = 0,
   ): { game: PokemonChess; resolved: ResolvedMove } {
     const moverPiece = this.position.pieceAt(move.from)!;
     const side = moverPiece.side;
@@ -858,7 +870,7 @@ export class PokemonChess {
       {
         attacker: aC, defender: dC, attackerBlow: atk, defenderBlow: def,
         attackerSuperEffective: mult > 1,
-        ...this.recoilInputs(attackerId, defenderId, slot),
+        ...this.recoilInputs(attackerId, defenderId, slot, hitRoll),
       },
       roll,
     );
@@ -1015,14 +1027,23 @@ export class PokemonChess {
   /** The field after an art is cast: fresh weather, or another layer across the enemy hazard band. */
   private fieldAfterArt(art: Art, side: Side, square: Square): Field {
     if (art.effect.kind === 'weather') {
-      return { weather: { kind: art.effect.weather, turns: WEATHER_TURNS }, hazards: this.field.hazards };
+      return { ...this.field, weather: { kind: art.effect.weather, turns: WEATHER_TURNS } };
+    }
+    if (art.effect.kind === 'screen') {
+      return {
+        ...this.field,
+        screens: {
+          ...this.field.screens,
+          [side]: { ...this.field.screens[side], [art.effect.screen]: SCREEN_TURNS },
+        },
+      };
     }
     const hazards = new Map(this.field.hazards);
     for (const sq of hazardZone(side, fileOf(square))) {
       const next = addHazardLayer(hazards.get(sq) ?? {}, art.effect.hazard);
       hazards.set(sq, next);
     }
-    return { weather: this.field.weather, hazards };
+    return { ...this.field, hazards };
   }
 
   /**
@@ -1099,10 +1120,12 @@ export class PokemonChess {
    * Life Orb's tenth and a recoil move's share of the damage dealt both fall on the attacker; Rocky Helmet
    * charges it for touching. Shared by the forecast and the real resolution so the preview cannot lie.
    */
-  private recoilInputs(attackerId: number, defenderId: number, slot: number): {
+  private recoilInputs(attackerId: number, defenderId: number, slot: number, hitRoll = 0): {
     attackerRecoil?: { ofDamage?: number; ofMaxHp?: number };
     defenderContact?: { ofAttackerMaxHp: number };
     attackerMakesContact?: boolean;
+    priority?: number;
+    attackerHits?: number;
   } {
     const move = this.movesetOf(attackerId)[slot];
     const ofDamage = move?.recoil;
@@ -1114,10 +1137,20 @@ export class PokemonChess {
       ? { ...(ofDamage !== undefined ? { ofDamage } : {}), ...(ofMaxHp > 0 ? { ofMaxHp } : {}) }
       : undefined;
 
+    // A ranged multi-hit count is rolled by the caller and passed in, so the same action always resolves the
+    // same way on a replay.
+    const hits = move?.hits === undefined
+      ? undefined
+      : typeof move.hits === 'number'
+        ? move.hits
+        : move.hits[0] + (hitRoll % (move.hits[1] - move.hits[0] + 1));
+
     return {
       ...(recoil ? { attackerRecoil: recoil } : {}),
       ...(punish > 0 ? { defenderContact: { ofAttackerMaxHp: punish } } : {}),
       ...(contact ? { attackerMakesContact: true } : {}),
+      ...(move?.priority !== undefined ? { priority: move.priority } : {}),
+      ...(hits !== undefined ? { attackerHits: hits } : {}),
     };
   }
 
@@ -1143,6 +1176,10 @@ export class PokemonChess {
   private artWouldChangeAnything(art: Art, side: Side, square: Square): boolean {
     if (art.effect.kind === 'weather') {
       return this.field.weather?.kind !== art.effect.weather;
+    }
+    if (art.effect.kind === 'screen') {
+      // Re-raising a screen that is already up would waste the turn.
+      return (this.field.screens[side][art.effect.screen] ?? 0) === 0;
     }
     const zone = hazardZone(side, fileOf(square));
     return zone.some((sq) => {
@@ -1311,7 +1348,17 @@ export class PokemonChess {
       ? tickWeather(field.weather)
       : field.weather;
 
-    return { position: pos, live: nlive, statuses: nstat, field: { ...field, weather: nextWeather } };
+    // The mover's own screens age on its Checkup, so five turns means five of its own.
+    return {
+      position: pos,
+      live: nlive,
+      statuses: nstat,
+      field: {
+        ...field,
+        weather: nextWeather,
+        screens: { ...field.screens, [side]: tickScreens(field.screens[side]) },
+      },
+    };
   }
 
   /** The four-slot moveset a piece fights with. */

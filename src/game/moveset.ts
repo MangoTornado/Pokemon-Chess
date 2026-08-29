@@ -50,6 +50,18 @@ export interface MoveSlot {
   readonly selfBoosts?: Readonly<Record<string, number>>;
   /** Recoil as a fraction of damage dealt (Double-Edge's third), if the move has any. */
   readonly recoil?: number;
+  /**
+   * Move priority. Positive strikes before Speed is consulted (Quick Attack), negative strikes last
+   * (Avalanche). In this variant that is unusually strong, because swinging first is what decides an exchange.
+   */
+  readonly priority?: number;
+  /**
+   * How many times the move hits, for a multi-hit move.
+   *
+   * A fixed count (Double Kick's 2) or a range (Bullet Seed's 2–5). Each hit is a separate, smaller blow, so
+   * a multi-hit move breaks a Focus Sash where a single big one would not.
+   */
+  readonly hits?: number | readonly [number, number];
   /** True when the move makes contact, which is what a contact-punishing item reacts to. */
   readonly contact?: boolean;
 }
@@ -102,6 +114,10 @@ function toSlot(move: MoveEntry): MoveSlot {
   // `recoil: [33, 100]` is the games' own "a third of the damage dealt".
   const recoil = move.recoil ? move.recoil[0] / move.recoil[1] : undefined;
   const contact = move.flags.includes('contact') ? true : undefined;
+  const priority = move.priority !== 0 ? move.priority : undefined;
+  const hits = Array.isArray(move.multihit)
+    ? ([move.multihit[0], move.multihit[1]] as [number, number])
+    : typeof move.multihit === 'number' ? move.multihit : undefined;
   return {
     id: move.id,
     name: move.name,
@@ -115,6 +131,8 @@ function toSlot(move: MoveEntry): MoveSlot {
     ...(selfBoosts ? { selfBoosts } : {}),
     ...(recoil !== undefined ? { recoil } : {}),
     ...(contact ? { contact } : {}),
+    ...(priority !== undefined ? { priority } : {}),
+    ...(hits !== undefined ? { hits } : {}),
   };
 }
 

@@ -25,7 +25,7 @@ import type { PokemonLoadout, ResolvedMove, Side, Verdict, VariantMove } from '.
 import { ABILITY_IMMUNE_TYPE, WONDER_GUARD } from '../rules/abilities.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
 import { describeStages, hasAnyStage } from '../engine/stages.ts';
-import { HAZARD_LABEL, WEATHER_LABEL } from '../engine/field.ts';
+import { HAZARD_LABEL, SCREEN_LABEL, WEATHER_LABEL } from '../engine/field.ts';
 import type { Art } from '../game/arts.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
@@ -75,6 +75,10 @@ function teraFor(game: PokemonChess, pieceId: number, options: ReadonlyMap<Squar
 /** One line on what casting this art will do. */
 function artDescription(art: Art): string {
   if (art.effect.kind === 'weather') return `Sets ${WEATHER_LABEL[art.effect.weather].toLowerCase()} over the board`;
+  if (art.effect.kind === 'screen') {
+    const halves = art.effect.screen === 'reflect' ? 'physical' : 'special';
+    return `${SCREEN_LABEL[art.effect.screen]} — halves ${halves} damage your army takes`;
+  }
   return `Lays ${HAZARD_LABEL[art.effect.hazard]} across the enemy's third rank`;
 }
 
@@ -613,6 +617,23 @@ function StatusBar({
               {WEATHER_ICON[game.field.weather.kind]} {WEATHER_LABEL[game.field.weather.kind]}
               {Number.isFinite(game.field.weather.turns) ? ` · ${game.field.weather.turns}` : ''}
             </span>
+          )}
+          {(['white', 'black'] as const).flatMap((side) =>
+            (Object.entries(game.field.screens[side]) as [keyof typeof SCREEN_LABEL, number][])
+              .filter(([, turns]) => turns > 0)
+              .map(([kind, turns]) => (
+                <span
+                  key={`${side}-${kind}`}
+                  title={`${SCREEN_LABEL[kind]} halves ${kind === 'reflect' ? 'physical' : 'special'} damage for ${side}`}
+                  style={{
+                    fontSize: '0.76rem', padding: '0.12rem 0.5rem', borderRadius: 999,
+                    border: '1px solid var(--border)', color: 'var(--text-dim)',
+                    background: side === 'white' ? 'rgba(246,244,239,0.12)' : 'rgba(21,23,28,0.5)',
+                  }}
+                >
+                  🛡 {SCREEN_LABEL[kind]} · {side === 'white' ? 'W' : 'B'} {turns}
+                </span>
+              )),
           )}
           {kingInDanger && (
             <span

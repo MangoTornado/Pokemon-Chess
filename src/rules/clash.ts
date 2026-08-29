@@ -126,6 +126,14 @@ export interface ClashSetup {
   readonly defenderContact?: { readonly ofAttackerMaxHp: number };
   /** True when the attacker's move makes contact, which is what a contact-punishing item reacts to. */
   readonly attackerMakesContact?: boolean;
+  /**
+   * How many times the attacker's move lands per swing (Double Kick's 2, Bullet Seed's rolled 2–5).
+   *
+   * Each strike is its own smaller blow against the same target, which is why a multi-hit move breaks through
+   * a Focus Sash that a single large blow cannot: the first strike spends the clamp and the next finishes.
+   * Resolved by the caller so the count stays part of the replayable roll.
+   */
+  readonly attackerHits?: number;
 }
 
 const MAX_ATTACKER_SWINGS = 2;
@@ -171,14 +179,27 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
    * knocked out from full health" is the legible rule and the SPEC's CLAMP-to-1 (§13). The holder is left
    * on 1 HP, so it is no longer pristine and the next capture attempt finishes it.
    */
-  const sashed = {
+  const sashed: { attacker: boolean; defender: boolean } = {
     attacker: attacker.surviveOnce === true && attacker.pristine,
     defender: defender.surviveOnce === true && defender.pristine,
   };
 
-  /** Applies a blow, clamping to 1 HP instead of removing a protected target. */
-  const land = (target: Combatant, who: 'attacker' | 'defender', damage: number): void => {
-    target.hp = sashed[who] && damage >= target.hp ? 1 : Math.max(0, target.hp - damage);
+  /**
+   * Applies a blow, clamping to 1 HP instead of removing a protected target.
+   *
+   * `spends` distinguishes the two kinds of repeated blow, and the distinction is the whole reason the clamp
+   * behaves as it does. The exchange's own two swings are an *abstraction* of one capture action, so they must
+   * not undo the save — a Sash that failed to save you from the attack you saw would read as broken. But a
+   * multi-hit move's strikes are explicitly several hits, in the games too, and there a Sash genuinely falls
+   * to Bullet Seed. So a multi-hit strike spends the clamp; an ordinary swing does not.
+   */
+  const land = (target: Combatant, who: 'attacker' | 'defender', damage: number, spends = false): void => {
+    if (sashed[who] && damage >= target.hp) {
+      target.hp = 1;
+      if (spends) sashed[who] = false;
+    } else {
+      target.hp = Math.max(0, target.hp - damage);
+    }
     target.pristine = false;
   };
 
@@ -201,11 +222,19 @@ export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
 
   const attackerSwing = (): boolean => {
     swings += 1;
-    const crit = roll.crit && swings === 1;
-    const dmg = computeDamage({ ...setup.attackerBlow, crit, momentum: roll.momentum });
-    land(defender, 'defender', dmg);
-    blows.push({ by: 'attacker', damage: dmg, crit, targetHpAfter: defender.hp });
-    chargeAttacker(dmg);
+    // A multi-hit move divides its power across strikes, as in the games — so it is not simply more damage,
+    // it is the same damage delivered in pieces, which is what makes it good against a clamp and bad against
+    // a damage reduction.
+    const strikes = Math.max(1, setup.attackerHits ?? 1);
+    for (let strike = 0; strike < strikes; strike++) {
+      const crit = roll.crit && swings === 1 && strike === 0;
+      const full = computeDamage({ ...setup.attackerBlow, crit, momentum: roll.momentum });
+      const dmg = strikes === 1 ? full : Math.max(1, Math.floor(full / strikes));
+      land(defender, 'defender', dmg, strikes > 1);
+      blows.push({ by: 'attacker', damage: dmg, crit, targetHpAfter: defender.hp });
+      chargeAttacker(dmg);
+      if (defender.hp <= 0 || attacker.hp <= 0) break;
+    }
     // Recoil can fell the attacker on its own swing, which ends the exchange there.
     return defender.hp <= 0 || attacker.hp <= 0 || swings >= MAX_ATTACKER_SWINGS;
   };

@@ -12,14 +12,15 @@
 
 import type { Dex } from '../data/dex.ts';
 import type { MoveEntry } from '../data/schema.ts';
-import { hazardFromSideCondition, weatherFromMoveField } from '../engine/field.ts';
-import type { HazardKind, WeatherKind } from '../engine/field.ts';
+import { hazardFromSideCondition, screenFromSideCondition, weatherFromMoveField } from '../engine/field.ts';
+import type { HazardKind, ScreenKind, WeatherKind } from '../engine/field.ts';
 import { Rng } from '../engine/rng.ts';
 
 /** What casting an art does. */
 export type ArtEffect =
   | { readonly kind: 'weather'; readonly weather: WeatherKind }
-  | { readonly kind: 'hazard'; readonly hazard: HazardKind };
+  | { readonly kind: 'hazard'; readonly hazard: HazardKind }
+  | { readonly kind: 'screen'; readonly screen: ScreenKind };
 
 /** A castable field move: what it is called, and what it does. */
 export interface Art {
@@ -34,6 +35,8 @@ export function artOfMove(move: MoveEntry): Art | null {
   if (weather) return { id: move.id, name: move.name, effect: { kind: 'weather', weather } };
   const hazard = hazardFromSideCondition(move.sideCondition);
   if (hazard) return { id: move.id, name: move.name, effect: { kind: 'hazard', hazard } };
+  const screen = screenFromSideCondition(move.sideCondition);
+  if (screen) return { id: move.id, name: move.name, effect: { kind: 'screen', screen } };
   return null;
 }
 
@@ -41,8 +44,8 @@ export function artOfMove(move: MoveEntry): Art | null {
  * The art a piece fights with, or null if its species knows no field move.
  *
  * Most Pokémon know none, and that is the point: a rain team is built, not stumbled into, so the pieces that
- * *can* shape the field are a real asset in the draft. A hazard layer is preferred over a weather setter
- * when a species knows both, because hazards are the more positional (and so more chess-like) of the two.
+ * *can* shape the field are a real asset in the draft. A hazard layer is preferred over a weather setter or a
+ * screen when a species knows several, because hazards are the most positional — and so the most chess-like.
  */
 export function pickArt(dex: Dex, speciesId: string, seed: string | number): Art | null {
   const candidates = dex

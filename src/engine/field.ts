@@ -97,6 +97,51 @@ export function tickWeather(weather: Weather | null): Weather | null {
 // Hazards
 // ---------------------------------------------------------------------------
 
+/**
+ * Screens — a side's own defensive wards, as opposed to hazards laid on the enemy's.
+ *
+ * Reflect halves physical damage and Light Screen halves special damage for the side that raised it, which is
+ * the games' behaviour and a genuinely different kind of art: every other art shapes the opponent's ground,
+ * while a screen protects your own army.
+ */
+export type ScreenKind = 'reflect' | 'lightscreen';
+
+export const SCREEN_KINDS: readonly ScreenKind[] = ['reflect', 'lightscreen'];
+
+export const SCREEN_LABEL: Readonly<Record<ScreenKind, string>> = {
+  reflect: 'Reflect', lightscreen: 'Light Screen',
+};
+
+/** How long a screen lasts, in its owner's turns — the games' five. */
+export const SCREEN_TURNS = 5;
+
+/** Showdown's `sideCondition` id → our screen, or null. */
+export function screenFromSideCondition(raw: string | undefined): ScreenKind | null {
+  if (!raw) return null;
+  const id = raw.toLowerCase();
+  return (SCREEN_KINDS as readonly string[]).includes(id) ? (id as ScreenKind) : null;
+}
+
+/** The damage multiplier a side's screens apply to a blow of this category — never above 1. */
+export function screenMod(screens: SideScreens | undefined, category: 'Physical' | 'Special'): number {
+  if (!screens) return 1;
+  const kind: ScreenKind = category === 'Physical' ? 'reflect' : 'lightscreen';
+  return (screens[kind] ?? 0) > 0 ? 0.5 : 1;
+}
+
+/** Turns remaining on each of a side's screens. An absent key means no screen. */
+export type SideScreens = Readonly<Partial<Record<ScreenKind, number>>>;
+
+/** Ages a side's screens by one of its turns, dropping any that expire. */
+export function tickScreens(screens: SideScreens): SideScreens {
+  const next: Partial<Record<ScreenKind, number>> = {};
+  for (const kind of SCREEN_KINDS) {
+    const left = (screens[kind] ?? 0) - 1;
+    if (left > 0) next[kind] = left;
+  }
+  return next;
+}
+
 export type HazardKind = 'spikes' | 'stealthrock' | 'toxicspikes' | 'stickyweb';
 
 export const HAZARD_KINDS: readonly HazardKind[] = ['spikes', 'stealthrock', 'toxicspikes', 'stickyweb'];
@@ -195,11 +240,20 @@ export function hazardZone(caster: Side, casterFile: number): Square[] {
 export interface Field {
   readonly weather: Weather | null;
   readonly hazards: Hazards;
+  /** Each side's own screens. */
+  readonly screens: Readonly<Record<Side, SideScreens>>;
 }
 
-export const EMPTY_FIELD: Field = { weather: null, hazards: new Map() };
+export const EMPTY_FIELD: Field = {
+  weather: null,
+  hazards: new Map(),
+  screens: { white: {}, black: {} },
+};
 
 /** Whether a field has anything on it at all — the cheap test the UI uses before rendering. */
 export function fieldIsEmpty(field: Field): boolean {
-  return field.weather === null && field.hazards.size === 0;
+  return field.weather === null
+    && field.hazards.size === 0
+    && Object.keys(field.screens.white).length === 0
+    && Object.keys(field.screens.black).length === 0;
 }
