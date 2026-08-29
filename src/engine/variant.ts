@@ -31,8 +31,10 @@
 
 import type { BattleType, SpeciesEntry } from '../data/schema.ts';
 import type { Dex } from '../data/dex.ts';
+import { fileOf } from './board.ts';
 import type { PieceClass, Side, Square } from './board.ts';
 import { Position } from './position.ts';
+import { encodeArt, isArtMove } from './position.ts';
 import type { Move, Piece } from './position.ts';
 import { Rng } from './rng.ts';
 import type { RngState } from './rng.ts';
@@ -52,6 +54,13 @@ import {
 } from './status.ts';
 import type { PieceStatus } from './status.ts';
 import { applyBoosts, hasAnyStage, stageOf } from './stages.ts';
+import {
+  EMPTY_FIELD, WEATHER_TURNS, addHazardLayer, hazardToll, hazardZone, tickWeather, weatherChipFraction,
+  weatherDamageMod,
+} from './field.ts';
+import type { Field } from './field.ts';
+import { pickArt } from '../game/arts.ts';
+import type { Art } from '../game/arts.ts';
 import type { StatStages } from './stages.ts';
 
 // ---------------------------------------------------------------------------
@@ -68,6 +77,13 @@ export interface PokemonLoadout {
   readonly ability?: string;
   /** The held item (a real dex item id). Scales blows, reduces damage taken, or heals at Checkup. */
   readonly item?: string;
+  /**
+   * The field move this piece can cast instead of moving (weather, or a band of hazards).
+   *
+   * Absent for most pieces, which is the point: a team that can shape the field is built deliberately.
+   * Auto-picked from the species' learnset when the loadout does not name one.
+   */
+  readonly art?: Art;
 }
 
 /** Loadouts keyed by the chess piece's persistent id, which survives movement and promotion. */
@@ -109,6 +125,13 @@ export interface VariantMove {
   readonly moveName: string | null;
   /** True when this action must be played by the piece that just earned a bonus move. */
   readonly isExtraMove: boolean;
+  /**
+   * Set when this action is an art cast (a field effect) rather than a board move.
+   *
+   * The UI offers it separately, the AI treats it as any other action, and the encoded form carries the
+   * `MOVE_ART` flag so a replay reproduces it.
+   */
+  readonly art?: Art;
 }
 
 export interface ResolvedMove {
@@ -240,6 +263,17 @@ export class PokemonChess {
   private readonly statuses: ReadonlyMap<number, PieceStatus>;
   /** Stat stages per piece id. Absent means all stage 0, so a fresh game stores nothing. */
   private readonly stages: ReadonlyMap<number, StatStages>;
+  /** Weather over the board and hazards laid on it — the battlefield's own state. */
+  readonly field: Field;
+  /**
+   * The field move each piece can cast, or null — computed once at creation.
+   *
+   * Static per piece, exactly like its stats and its moveset, so it is built in `create` and carried
+   * forward. Deriving it lazily instead was a real performance bug: `rawMoves` asks for every piece's art on
+   * every call, and every `play` makes a new game, so a lazy cache re-scanned 32 learnsets per node of AI
+   * search.
+   */
+  private readonly arts: ReadonlyMap<number, Art | null>;
   private readonly rngState: RngState;
   private readonly pending: PendingExtraMove | null;
   readonly history: readonly ResolvedMove[];
@@ -253,9 +287,11 @@ export class PokemonChess {
     dex: Dex,
     stats: ReadonlyMap<number, PieceStats>,
     movesets: ReadonlyMap<number, Moveset>,
+    arts: ReadonlyMap<number, Art | null>,
     live: ReadonlyMap<number, LiveState>,
     statuses: ReadonlyMap<number, PieceStatus>,
     stages: ReadonlyMap<number, StatStages>,
+    field: Field,
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -266,9 +302,11 @@ export class PokemonChess {
     this.dex = dex;
     this.stats = stats;
     this.movesets = movesets;
+    this.arts = arts;
     this.live = live;
     this.statuses = statuses;
     this.stages = stages;
+    this.field = field;
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -281,10 +319,18 @@ export class PokemonChess {
     seed: string | number;
     /** Any subset of the rules; unspecified fields take their `DEFAULT_RULES` value. */
     rules?: Partial<VariantRules>;
+    /**
+     * Weather the match starts in and never loses — a battlefield condition rather than a cast effect.
+     *
+     * A Rain match rewards a Water army and punishes a Fire one, so this is a real drafting decision, and
+     * it is how a themed arena (or a Gym Leader's home turf) is expressed.
+     */
+    weather?: import('./field.ts').WeatherKind;
   }): PokemonChess {
     const position = options.position ?? Position.fromStartingPosition();
     const stats = new Map<number, PieceStats>();
     const movesets = new Map<number, Moveset>();
+    const arts = new Map<number, Art | null>();
     for (const { piece } of position.allPieces()) {
       const entry = options.loadout.get(piece.id);
       if (!entry) throw new Error(`no Pokémon assigned to piece ${piece.id}`);
@@ -294,6 +340,7 @@ export class PokemonChess {
       // A loadout may carry a hand-picked moveset (from the draft); otherwise auto-pick one from the
       // species' learnset, keyed on the piece id so the kit is stable for the game.
       movesets.set(piece.id, entry.moves ?? buildMoveset(options.dex, species, entry.type, `${options.seed}:${piece.id}`));
+      arts.set(piece.id, entry.art ?? pickArt(options.dex, species.id, `${options.seed}:${piece.id}`));
     }
     return new PokemonChess(
       position,
@@ -302,9 +349,11 @@ export class PokemonChess {
       options.dex,
       stats,
       movesets,
+      arts,
       new Map(), // live HP
       new Map(), // statuses
       new Map(), // stat stages
+      options.weather ? { weather: { kind: options.weather, turns: Infinity }, hazards: new Map() } : EMPTY_FIELD,
       new Rng(options.seed).state,
       null,
       [],
@@ -439,6 +488,29 @@ export class PokemonChess {
       });
     }
 
+    // Art casts: a piece may spend its turn shaping the field instead of moving. Never offered as a bonus
+    // move, because the bonus exists to continue an assault, and never while the caster is incapacitated.
+    if (pending === null) {
+      for (const { square, piece } of this.position.allPieces()) {
+        if (piece.side !== this.position.turn) continue;
+        if (movementLock(this.statusOf(piece.id)) !== null) continue;
+        const art = this.artOf(piece.id);
+        if (!art) continue;
+        if (!this.artWouldChangeAnything(art, piece.side, square)) continue;
+        out.push({
+          move: this.artMoveFor(square, piece.cls),
+          attacker: this.loadoutOf(piece.id),
+          defender: null,
+          effectiveness: null,
+          forecast: 'quiet',
+          slot: 0,
+          moveName: art.name,
+          isExtraMove: false,
+          art,
+        });
+      }
+    }
+
     return out;
   }
 
@@ -534,6 +606,7 @@ export class PokemonChess {
       basePowerMod: aItem.basePowerMod,
       attackerFinalMod: aItem.attackerFinalMod,
       defenderFinalMod: dDefend,
+      weatherMod: weatherDamageMod(this.field.weather, move.type),
     };
     const def: DamageInput = {
       attackerType: d.type,
@@ -549,6 +622,7 @@ export class PokemonChess {
       basePowerMod: dItem.basePowerMod,
       attackerFinalMod: dItem.attackerFinalMod,
       defenderFinalMod: aDefend,
+      weatherMod: weatherDamageMod(this.field.weather, d.type),
     };
     return { atk, def };
   }
@@ -641,8 +715,11 @@ export class PokemonChess {
     const attackerId = moverPiece.id;
     const attacker = this.loadoutOf(attackerId);
 
-    if (!move.captured) {
-      const nextPos = this.position.withMove(move);
+    // An art cast: the piece stays put and shapes the field instead. No board change, so the turn is passed
+    // explicitly, exactly as the REPEL verdict does.
+    if (isArtMove(move.encoded)) {
+      const art = this.artOf(attackerId);
+      const nextField = art ? this.fieldAfterArt(art, side, move.from) : this.field;
       const resolved: ResolvedMove = {
         move, side, attacker, defender: null, effectiveness: null,
         verdict: 'quiet',
@@ -651,13 +728,37 @@ export class PokemonChess {
         attackerMaxHp: this.liveOf(attackerId).maxHp,
         defenderMaxHp: null,
         crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
-        moveName: null, moveType: null, statusInflicted: null, boostsInflicted: null,
+        moveName: art?.name ?? null, moveType: null, statusInflicted: null, boostsInflicted: null,
         grantsBonus: false, removed: [], kingCaptured: false,
       };
-      // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
-      const up = this.checkup(side, nextPos, this.live, this.statuses);
+      const nextPos = this.position.withTurnReturned();
+      const up = this.checkup(side, nextPos, this.live, this.statuses, nextField);
       return {
-        game: this.next(up.position, up.live, up.statuses, this.stages, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, this.stages, up.field, nextRngState, null, resolved),
+        resolved,
+      };
+    }
+
+    if (!move.captured) {
+      const nextPos = this.position.withMove(move);
+      // Arriving on a hazardous square exacts its toll before anything else — that is what hazards are for.
+      const arrival = this.applyHazards(attackerId, move.to, this.live, this.statuses, this.stages, nextPos);
+      const resolved: ResolvedMove = {
+        move, side, attacker, defender: null, effectiveness: null,
+        verdict: 'quiet',
+        attackerHpAfter: arrival.live.get(attackerId)?.hp ?? this.liveOf(attackerId).hp,
+        defenderHpAfter: 0,
+        attackerMaxHp: this.liveOf(attackerId).maxHp,
+        defenderMaxHp: null,
+        crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
+        moveName: null, moveType: null,
+        statusInflicted: arrival.status, boostsInflicted: arrival.boosts,
+        grantsBonus: false, removed: arrival.removed, kingCaptured: false,
+      };
+      // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
+      const up = this.checkup(side, arrival.position, arrival.live, arrival.statuses, this.field);
+      return {
+        game: this.next(up.position, up.live, up.statuses, arrival.stages, up.field, nextRngState, null, resolved),
         resolved,
       };
     }
@@ -795,14 +896,14 @@ export class PokemonChess {
 
     // When the turn passes (no bonus, game not decided), the mover's side takes its end-of-turn Checkup.
     if (pending === null && !kingCaptured) {
-      const up = this.checkup(side, posForNext, nextLive, nextStatus);
+      const up = this.checkup(side, posForNext, nextLive, nextStatus, this.field);
       return {
-        game: this.next(up.position, up.live, up.statuses, nextStages, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, nextStages, up.field, nextRngState, null, resolved),
         resolved,
       };
     }
     return {
-      game: this.next(posForNext, nextLive, nextStatus, nextStages, nextRngState, pending, resolved),
+      game: this.next(posForNext, nextLive, nextStatus, nextStages, this.field, nextRngState, pending, resolved),
       resolved,
     };
   }
@@ -812,19 +913,133 @@ export class PokemonChess {
     live: ReadonlyMap<number, LiveState>,
     statuses: ReadonlyMap<number, PieceStatus>,
     stages: ReadonlyMap<number, StatStages>,
+    field: Field,
     rngState: RngState,
     pending: PendingExtraMove | null,
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
-      position, this.loadout, this.rules, this.dex, this.stats, this.movesets, live, statuses, stages,
-      rngState, pending, [...this.history, resolved],
+      position, this.loadout, this.rules, this.dex, this.stats, this.movesets, this.arts, live, statuses,
+      stages, field, rngState, pending, [...this.history, resolved],
     );
   }
 
   /** The status a piece is carrying, defaulting to healthy. */
   statusOf(pieceId: number): PieceStatus {
     return this.statuses.get(pieceId) ?? {};
+  }
+
+  /** The field after an art is cast: fresh weather, or another layer across the enemy hazard band. */
+  private fieldAfterArt(art: Art, side: Side, square: Square): Field {
+    if (art.effect.kind === 'weather') {
+      return { weather: { kind: art.effect.weather, turns: WEATHER_TURNS }, hazards: this.field.hazards };
+    }
+    const hazards = new Map(this.field.hazards);
+    for (const sq of hazardZone(side, fileOf(square))) {
+      const next = addHazardLayer(hazards.get(sq) ?? {}, art.effect.hazard);
+      hazards.set(sq, next);
+    }
+    return { weather: this.field.weather, hazards };
+  }
+
+  /**
+   * The toll a piece pays for arriving on a hazardous square.
+   *
+   * Damage first (and a non-king may fall to it, exactly as poison can), then Toxic Spikes' poison and Sticky
+   * Web's Speed drop. A king clamps to 1 HP rather than dying, the same mercy the Regicide rule R7 gives it
+   * against residual damage — a game should not end because a king stepped on a spike.
+   */
+  private applyHazards(
+    pieceId: number,
+    square: Square,
+    live: ReadonlyMap<number, LiveState>,
+    statuses: ReadonlyMap<number, PieceStatus>,
+    stages: ReadonlyMap<number, StatStages>,
+    position: Position,
+  ): {
+    position: Position;
+    live: ReadonlyMap<number, LiveState>;
+    statuses: ReadonlyMap<number, PieceStatus>;
+    stages: ReadonlyMap<number, StatStages>;
+    removed: number[];
+    status: string | null;
+    boosts: Readonly<Record<string, number>> | null;
+  } {
+    const at = this.field.hazards.get(square);
+    const none = { position, live, statuses, stages, removed: [] as number[], status: null, boosts: null };
+    if (!at) return none;
+
+    const loadout = this.loadoutOf(pieceId);
+    const toll = hazardToll(at, loadout.type);
+    if (toll.damageFraction === 0 && !toll.status && !toll.boosts) return none;
+
+    const nlive = new Map(live);
+    const nstat = new Map(statuses);
+    const nstages = new Map(stages);
+    const removed: number[] = [];
+    let pos = position;
+
+    const current = nlive.get(pieceId) ?? this.liveOf(pieceId);
+    if (toll.damageFraction > 0) {
+      const damage = Math.max(1, Math.floor(current.maxHp * toll.damageFraction));
+      const isKing = this.pieceById(pieceId)?.cls === 'king';
+      const hp = current.hp - damage;
+      if (hp <= 0 && isKing) {
+        nlive.set(pieceId, { ...current, hp: 1, pristine: false });
+      } else if (hp <= 0) {
+        pos = pos.withPieceRemoved(square, false);
+        nlive.delete(pieceId);
+        nstat.delete(pieceId);
+        nstages.delete(pieceId);
+        removed.push(pieceId);
+        return { position: pos, live: nlive, statuses: nstat, stages: nstages, removed, status: null, boosts: null };
+      } else {
+        nlive.set(pieceId, { ...current, hp, pristine: false });
+      }
+    }
+
+    if (toll.status) nstat.set(pieceId, applyRider(nstat.get(pieceId) ?? {}, toll.status));
+    if (toll.boosts) {
+      const next = applyBoosts(nstages.get(pieceId) ?? {}, toll.boosts);
+      if (hasAnyStage(next)) nstages.set(pieceId, next);
+      else nstages.delete(pieceId);
+    }
+
+    return {
+      position: pos, live: nlive, statuses: nstat, stages: nstages, removed,
+      status: toll.status, boosts: toll.boosts,
+    };
+  }
+
+  /** A synthetic `Move` describing an art cast, so the action list stays a list of encoded numbers. */
+  private artMoveFor(square: Square, cls: PieceClass): Move {
+    return {
+      from: square, to: square, cls, captured: null, capturedSquare: null, promotion: null,
+      isCapture: false, isEnPassant: false, isDoublePush: false, castle: null,
+      encoded: encodeArt(square, cls),
+    };
+  }
+
+  /**
+   * Whether casting this art would actually change the field.
+   *
+   * An action that does nothing must never be offered: re-setting the weather already blowing, or adding a
+   * fourth layer of Spikes to a saturated band, would waste a turn and read as a bug.
+   */
+  private artWouldChangeAnything(art: Art, side: Side, square: Square): boolean {
+    if (art.effect.kind === 'weather') {
+      return this.field.weather?.kind !== art.effect.weather;
+    }
+    const zone = hazardZone(side, fileOf(square));
+    return zone.some((sq) => {
+      const at = this.field.hazards.get(sq) ?? {};
+      return addHazardLayer(at, art.effect.kind === 'hazard' ? art.effect.hazard : 'spikes') !== at;
+    });
+  }
+
+  /** The field move a piece can cast, or null. Auto-picked from its species when the loadout omits one. */
+  artOf(pieceId: number): Art | null {
+    return this.loadoutOf(pieceId).art ?? this.arts.get(pieceId) ?? null;
   }
 
   /** The stat stages a piece is carrying, defaulting to all zero. */
@@ -857,13 +1072,40 @@ export class PokemonChess {
     position: Position,
     live: ReadonlyMap<number, LiveState>,
     statuses: ReadonlyMap<number, PieceStatus>,
-  ): { position: Position; live: ReadonlyMap<number, LiveState>; statuses: ReadonlyMap<number, PieceStatus> } {
+    field: Field = this.field,
+  ): {
+    position: Position;
+    live: ReadonlyMap<number, LiveState>;
+    statuses: ReadonlyMap<number, PieceStatus>;
+    field: Field;
+  } {
     let pos = position;
     const nlive = new Map(live);
     const nstat = new Map(statuses);
 
     for (const { square, piece } of position.allPieces()) {
       if (piece.side !== side) continue;
+
+      // Sandstorm scratches everything that does not resist it — the field's own upkeep, before items heal.
+      const chip = weatherChipFraction(field.weather, this.loadoutOf(piece.id).type);
+      if (chip > 0) {
+        const l = nlive.get(piece.id) ?? this.liveOf(piece.id);
+        if (l.hp > 0) {
+          const damage = Math.max(1, Math.floor(l.maxHp * chip));
+          const isKing = piece.cls === 'king';
+          const hp = l.hp - damage;
+          if (hp <= 0 && isKing) {
+            nlive.set(piece.id, { ...l, hp: 1, pristine: false });
+          } else if (hp <= 0) {
+            pos = pos.withPieceRemoved(square, false);
+            nlive.delete(piece.id);
+            nstat.delete(piece.id);
+            continue;
+          } else {
+            nlive.set(piece.id, { ...l, hp, pristine: false });
+          }
+        }
+      }
 
       // Held-item healing (Leftovers) happens whether or not the piece is afflicted, and never overheals.
       const heal = checkupHealFraction(this.loadoutOf(piece.id).item);
@@ -924,7 +1166,13 @@ export class PokemonChess {
       else nstat.set(piece.id, s);
     }
 
-    return { position: pos, live: nlive, statuses: nstat };
+    // Weather is timed and ages on the side-to-move's Checkup, so five turns means five of its own turns.
+    // A match-condition weather (turns Infinity) never runs out.
+    const nextWeather = field.weather && Number.isFinite(field.weather.turns)
+      ? tickWeather(field.weather)
+      : field.weather;
+
+    return { position: pos, live: nlive, statuses: nstat, field: { ...field, weather: nextWeather } };
   }
 
   /** The four-slot moveset a piece fights with. */

@@ -25,6 +25,8 @@ import type { PokemonLoadout, ResolvedMove, Side, Verdict, VariantMove } from '.
 import { ABILITY_IMMUNE_TYPE, WONDER_GUARD } from '../rules/abilities.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
 import { describeStages, hasAnyStage } from '../engine/stages.ts';
+import { HAZARD_LABEL, WEATHER_LABEL } from '../engine/field.ts';
+import type { Art } from '../game/arts.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
 import { chooseMove } from '../ai/search.ts';
@@ -46,6 +48,58 @@ interface SquareEffect {
   readonly square: Square;
   readonly kind: EffectKind;
   readonly nonce: number;
+}
+
+/**
+ * The art action offered for a piece, if any.
+ *
+ * An art's destination is the caster's own square (it does not move), so it appears in the options map under
+ * that square — a key no ordinary move can ever occupy.
+ */
+function artFor(game: PokemonChess, pieceId: number, options: ReadonlyMap<Square, VariantMove>): VariantMove | null {
+  for (const option of options.values()) {
+    if (option.art && game.position.pieceAt(option.move.from)?.id === pieceId) return option;
+  }
+  return null;
+}
+
+/** One line on what casting this art will do. */
+function artDescription(art: Art): string {
+  if (art.effect.kind === 'weather') return `Sets ${WEATHER_LABEL[art.effect.weather].toLowerCase()} over the board`;
+  return `Lays ${HAZARD_LABEL[art.effect.hazard]} across the enemy's third rank`;
+}
+
+const WEATHER_TINT: Record<string, string> = {
+  sun: '#f5c451', rain: '#6aa9f5', sand: '#d8c59a', snow: '#cfe6f5',
+};
+const WEATHER_ICON: Record<string, string> = { sun: '☀', rain: '🌧', sand: '🌪', snow: '❄' };
+
+/** Colours for hazard pips, so a band of Spikes reads differently from Stealth Rock at a glance. */
+const HAZARD_PIP: Record<string, string> = {
+  spikes: '#b0b7c3', stealthrock: '#b6a136', toxicspikes: '#a33ea1', stickyweb: '#7c9c3f',
+};
+
+function hazardsAt(game: PokemonChess, square: Square): boolean {
+  const at = game.field.hazards.get(square);
+  return at !== undefined && Object.values(at).some((n) => (n ?? 0) > 0);
+}
+
+/** One pip per layer, so three layers of Spikes look worse than one. */
+function hazardPips(game: PokemonChess, square: Square): string[] {
+  const at = game.field.hazards.get(square) ?? {};
+  const out: string[] = [];
+  for (const [kind, layers] of Object.entries(at)) {
+    for (let i = 0; i < (layers ?? 0); i++) out.push(HAZARD_PIP[kind] ?? '#e6edf3');
+  }
+  return out;
+}
+
+function hazardTitle(game: PokemonChess, square: Square): string {
+  const at = game.field.hazards.get(square) ?? {};
+  return Object.entries(at)
+    .filter(([, n]) => (n ?? 0) > 0)
+    .map(([kind, n]) => `${HAZARD_LABEL[kind as keyof typeof HAZARD_LABEL] ?? kind}${(n ?? 0) > 1 ? ` ×${n}` : ''}`)
+    .join(', ');
 }
 
 /** The board-effect class for a resolved verdict; the CSS animations are keyed on it. */
@@ -405,6 +459,25 @@ export function GameBoard({
                     />
                   )}
 
+                  {/* Hazards on this square: a small band of pips so the ground itself is readable. */}
+                  {hazardsAt(game, square) && (
+                    <span
+                      aria-hidden
+                      title={hazardTitle(game, square)}
+                      style={{
+                        position: 'absolute', bottom: '2%', left: '4%', display: 'flex', gap: '1.5cqmin',
+                        zIndex: 2,
+                      }}
+                    >
+                      {hazardPips(game, square).map((c, i) => (
+                        <span
+                          key={i}
+                          style={{ width: '7cqmin', height: '7cqmin', background: c, borderRadius: '1cqmin', boxShadow: '0 0 0 0.7cqmin rgba(0,0,0,0.55)' }}
+                        />
+                      ))}
+                    </span>
+                  )}
+
                   {denial && (
                     <span
                       aria-hidden
@@ -441,7 +514,7 @@ export function GameBoard({
           <FxLayer fx={fx} />
         </div>
 
-        <SidePanel dex={dex} game={game} last={last} selected={selected} options={options} />
+        <SidePanel dex={dex} game={game} last={last} selected={selected} options={options} onCast={play} />
       </div>
     </div>
   );
@@ -506,6 +579,19 @@ function StatusBar({
               }}
             >
               ↻ Super effective — move again
+            </span>
+          )}
+          {game.field.weather && (
+            <span
+              title="Weather scales Fire and Water damage; a sandstorm scratches anything that does not resist it."
+              style={{
+                background: WEATHER_TINT[game.field.weather.kind],
+                color: '#0d1117', fontWeight: 750, padding: '0.15rem 0.55rem',
+                borderRadius: 999, fontSize: '0.8rem',
+              }}
+            >
+              {WEATHER_ICON[game.field.weather.kind]} {WEATHER_LABEL[game.field.weather.kind]}
+              {Number.isFinite(game.field.weather.turns) ? ` · ${game.field.weather.turns}` : ''}
             </span>
           )}
           {kingInDanger && (
@@ -612,12 +698,15 @@ function SidePanel({
   last,
   selected,
   options,
+  onCast,
 }: {
   dex: Dex;
   game: PokemonChess;
   last: ResolvedMove | null;
   selected: Square | null;
   options: ReadonlyMap<Square, VariantMove>;
+  /** Plays an action from the panel — used by the art cast, which has no board destination to click. */
+  onCast: (option: VariantMove) => void;
 }) {
   const selectedPiece = selected === null ? null : game.position.pieceAt(selected);
   const selectedPokemon = selectedPiece ? game.loadoutOf(selectedPiece.id) : null;
@@ -648,6 +737,28 @@ function SidePanel({
             {/* Ability and item change how a capture resolves, so they belong on the piece card — an effect
                 the player cannot see is an effect they will read as a bug. */}
             <KitRow dex={dex} pokemon={selectedPokemon} />
+
+            {/* The selected piece's art, if it has one that would change the field. Offered as a button rather
+                than a board square, because a cast has no destination — the piece stays where it is. */}
+            {artFor(game, selectedPiece.id, options) && (
+              <button
+                type="button"
+                onClick={() => { const a = artFor(game, selectedPiece.id, options); if (a) onCast(a); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.4rem', textAlign: 'left',
+                  background: 'var(--bg)', border: '1px solid var(--accent)', borderRadius: 8,
+                  padding: '0.4rem 0.55rem', cursor: 'pointer', color: 'var(--text)', fontSize: '0.78rem',
+                }}
+              >
+                <span aria-hidden>✦</span>
+                <span style={{ display: 'grid' }}>
+                  <strong>{artFor(game, selectedPiece.id, options)!.art!.name}</strong>
+                  <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>
+                    {artDescription(artFor(game, selectedPiece.id, options)!.art!)}
+                  </span>
+                </span>
+              </button>
+            )}
 
             {/* Stat stages, with the effective Speed spelled out: Speed decides who swings first, so a drop
                 is the difference between winning and losing the next exchange. */}

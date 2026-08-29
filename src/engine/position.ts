@@ -116,6 +116,24 @@ export const MOVE_DOUBLE_PUSH = 1 << 21;
 export const MOVE_EN_PASSANT = 1 << 22;
 export const MOVE_CASTLE_KING = 1 << 23;
 export const MOVE_CASTLE_QUEEN = 1 << 24;
+/**
+ * Not a chess move: the Pokémon layer's "art" action, where a piece spends its turn casting a field effect
+ * (weather, or a band of hazards) instead of moving.
+ *
+ * It rides in the move encoding so that a game remains a seed plus a list of numbers — the property replay,
+ * server validation and the online protocol all depend on. `from === to` is the caster's own square, which
+ * no real chess move ever produces, so the two can never be confused. The chess core never generates one
+ * and `withMove` is never asked to apply one; the variant layer owns it entirely.
+ */
+export const MOVE_ART = 1 << 25;
+
+/** Encodes an art cast by the piece on `square`. */
+export function encodeArt(square: Square, cls: PieceClass): EncodedMove {
+  return square | (square << 6) | (PIECE_CLASSES.indexOf(cls) << 12) | (NO_CLASS << 15) | (NO_CLASS << 18) | MOVE_ART;
+}
+
+/** Whether an encoded action is an art cast rather than a chess move. */
+export const isArtMove = (move: EncodedMove): boolean => (move & MOVE_ART) !== 0;
 
 export const moveFrom = (move: EncodedMove): Square => move & 63;
 export const moveTo = (move: EncodedMove): Square => (move >>> 6) & 63;
