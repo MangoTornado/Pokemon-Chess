@@ -31,6 +31,12 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Status conditions (applied + rendered) | ✅ | `engine/status.ts` model is now applied during play: move riders inflict status on a surviving defender, a deterministic end-of-turn **Checkup** ages burn/sleep/paralysis and runs the poison death-clock (R7 clamps a king to 1 HP instead of removing it), a sleeping/paralyzed piece offers no moves, and burn taxes physical damage. Rendered on the board — sprite tilt for rotation-class, counter pips for poison/burn. |
 | Move slots / movesets per piece | ✅ | `game/moveset.ts` — 4-slot auto-picker (§8.2): slot 0 the declared-type STAB melee, 1–3 type-diverse coverage from the real learnset; `bestSlotAgainst` picks the most effective slot per capture. |
 
+## Redirection
+
+| Area | State | Notes |
+|---|---|---|
+| Move redirection | ✅ | `src/rules/redirect.ts` — the last mechanic with no home in the Clash, and the reason was structural: a Clash is an exchange between exactly two pieces, so redirection needs a *third* to step into it. Resolved before a Clash begins by choosing who the defender actually is; the Clash never learns a substitution happened. Two sources, both read off real data: **a drawn type** (Lightning Rod, Storm Drain — the only two abilities whose own text says they *draw* a type, and they already grant immunity to it, so an intercepted attack is absorbed outright for +1 Sp. Atk and a wasted enemy turn), and **a cast guard** (Follow Me, Rage Powder, Spotlight, recognised by their `volatileStatus` and surfaced as a new kind of art) which answers for its neighbours until the opponent has replied. On a board it is a bodyguard, and it trades material for position: a guard can rout an attacker it never fought, but neither side gains ground, because the square attacked was never contested. The forecast previews the exchange that will *actually* be fought, and `blockedReason` names the neighbour that drew the attack rather than blaming the target's typing. |
+
 ## Transformations & progression mechanics
 
 | Area | State | Notes |
@@ -39,7 +45,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Evolution as progression | ✅ | **Evolution through play (§17.8).** Each owned individual trains as your team wins (a win grants team XP, gym or ranked online); once trained (`EVOLVE_XP`) the Collection screen offers its evolution(s) — a branching line like Eevee lets you choose. Server-validated against the species' real `evos`. |
 | Terastallisation | ✅ | `src/game/tera.ts` + the `MOVE_TERA` action — one per side per game, changing the type a piece **fights and defends as**, which is the most consequential transformation available because type is what everything else is priced against. The Tera type is drafted to turn the piece's best coverage move into STAB (or, failing that, into a dual-typed species' other type). Ground 2× becomes 0× on a Charizard that Teras to Flying — a genuine escape. Board shows the new ring colour plus a crystal. |
 | Draft-time control over the kit | ✅ | `resolveKit` in `game/draft.ts` + the kit panel in `ui/DraftScreen.tsx` — a slot records only what the player actually decided, and everything they left alone resolves to the auto-draft's choice, so a hand-built army is never quietly weaker than a generated one. The panel then lets them override all four layers per piece: ability (the species' real ones), held item (every item the rules implement, with its effect shown), **art** (each field move the species can cast — a Ferrothorn laying Spikes, setting Stealth Rock or raising a screen is three different pieces), and Tera type (never the type it already fights as). Team-building depth without a mandatory step: a player who never opens the panel still fields a coherent army. |
-| Mega / Z-Move / Dynamax | ○ | data is present (mega stones, etc.). These are forme/stat swaps rather than type changes, so they need forme-swap plumbing (a piece changing species mid-game) that nothing else needs yet. |
+| Mega / Z-Move / Dynamax | ✅ | `src/game/transform.ts` + `MOVE_MEGA`/`MOVE_DYNAMAX`/`MOVE_ZPOWER`. **All four transformations share one per-side use**, which is the rule the games actually have (they are generation-exclusive), so four buttons become one decision a side makes once. `transformAvailable` reads the history, so a piece that transformed and then fell cannot refund it. **Mega** genuinely swaps species — `statsOf`, `abilityOf` and `battleTypeOf` read through the forme, so a Gyarados that Megas fights as Mold Breaker with the forme's stats; ten of the 47 formes change typing, and a declared type the forme lost falls to the forme's first. No mega forme changes the HP base stat (a real fact of the games, asserted), which is why max HP needed no plumbing. **Dynamax** doubles current and max HP for 3 turns and returns the same share on lapse; it is offered only to a piece in contact, because sixteen identical "Dynamax this piece" options were a quarter of the opening's move list and cost the search real depth. **Z-Power** converts one blow through the gen-7 table (which compresses at the top, so it is worth most on a weak move), fires only on the crystal's type, and is spent when it lands. Each side's auto-draft gets exactly **one** stone or crystal: more would replace real items with dead weight, which measurably drained the game's damage. |
 
 ## The opponent
 
@@ -76,14 +82,37 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 
 ## What remains
 
-Everything in the plan, and everything the owner has since asked for, has shipped. What is genuinely left:
+Everything in the plan, and everything the owner has since asked for, has shipped, and the two items that were
+deferred with a rationale are now done too — including the forme-swap plumbing that was the real blocker.
 
-1. **Mega / Z-Move / Dynamax** — unlike Tera (a type change), these are forme and stat swaps, so they need a
-   piece to change *species* mid-game. That is plumbing nothing else currently needs, which is why it is the
-   one deliberate omission rather than an oversight.
-2. **Move redirection** (Follow Me, Storm Drain, and the like) — the last ISA op with no home. A Clash is an
-   exchange between exactly two pieces, so redirection needs a *third* piece to be able to intercept it, and
-   that is a change to what a Clash is rather than another op over the existing descriptors.
+Nothing is knowingly missing. What is worth knowing rather than doing:
+
+1. **Games are longer than they were.** Against the same seeds, a self-play batch that averaged 224 plies now
+   averages around 411, and more games reach the length cap. The added depth is the cause — there are more ways
+   to spend a turn that do not change the board (arts, four transformations), and the AI at a fixed depth uses
+   them. The skill signal survives it (a deeper search still outscores a shallower one in both colours), but if
+   games start feeling like they meander, the first thing to look at is how often the AI re-casts an art whose
+   effect has just expired.
+2. **The AI does not value a transformation.** It will spend one, because it is a legal action that its search
+   sometimes likes, but the evaluation has no term for "this piece is now permanently stronger" or "this piece
+   cannot be traded for three turns". A human will use them better, which is fine, but it means the sandbox
+   under-measures how strong they are.
 
 Balance, as measured by the sandbox: White scores ~0.54 (Trainer) to ~0.68 (Ace) in self-play — normal for a
 chess-like game. Worth re-measuring if the bonus-move rule changes.
+
+Two engine bugs were found while finishing this work, both pre-existing and both now fixed with regression
+tests:
+
+- **The server rejected castling, arts and Tera as malformed.** `server/matches.ts` bounded an encoded action
+  at `0xffffff`, a ceiling written when the widest flag was `MOVE_CASTLE_KING`. Three flag bits had been added
+  above it since, so online play refused every queen-side castle, every art cast and every Terastallisation
+  before the engine was consulted. The bound is now folded out of the flags themselves (`MAX_ENCODED_MOVE`), so
+  adding a flag widens it by construction. The test that was supposed to catch this had encoded the bug: it
+  asserted `0xffffff + 1` must be rejected, which is exactly `MOVE_CASTLE_QUEEN`.
+- **A phantom en passant capture.** Ordinary chess never needs the check, because the pawn that creates an en
+  passant square cannot leave before the one turn it can be captured — but this game removes pieces *between*
+  moves (Sandstorm chip, poison, a hazard on arrival), so a pawn can double-push and then die at the Checkup.
+  The generator then offered an en passant capture of an empty square and crashed on the victim's identity.
+  Found by fuzzing 400 seeded games; revalidation lives in `withPieceRemoved` so every route that kills a piece
+  is covered.
