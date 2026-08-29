@@ -24,6 +24,7 @@ import { PokemonChess } from '../engine/variant.ts';
 import type { PokemonLoadout, ResolvedMove, Side, Verdict, VariantMove } from '../engine/variant.ts';
 import { ABILITY_IMMUNE_TYPE, WONDER_GUARD } from '../rules/abilities.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
+import { describeStages, hasAnyStage } from '../engine/stages.ts';
 import type { Position } from '../engine/position.ts';
 import type { Loadout } from '../engine/variant.ts';
 import { chooseMove } from '../ai/search.ts';
@@ -329,6 +330,7 @@ export function GameBoard({
               const pokemon = piece ? game.loadoutOf(piece.id) : null;
               const live = piece ? game.liveOf(piece.id) : null;
               const status = piece ? game.statusOf(piece.id) : null;
+              const stages = piece ? game.stagesOf(piece.id) : null;
               const option = options.get(square);
               const isSelected = square === selected;
               const denial = denied.get(square);
@@ -372,6 +374,7 @@ export function GameBoard({
                       hp={live.hp}
                       maxHp={live.maxHp}
                       {...(status ? { status } : {})}
+                      {...(stages ? { stages } : {})}
                       {...(motion.get(square) ? { motion: motion.get(square)! } : {})}
                     />
                   )}
@@ -645,6 +648,18 @@ function SidePanel({
             {/* Ability and item change how a capture resolves, so they belong on the piece card — an effect
                 the player cannot see is an effect they will read as a bug. */}
             <KitRow dex={dex} pokemon={selectedPokemon} />
+
+            {/* Stat stages, with the effective Speed spelled out: Speed decides who swings first, so a drop
+                is the difference between winning and losing the next exchange. */}
+            {hasAnyStage(game.stagesOf(selectedPiece.id)) && (
+              <div style={{ display: 'grid', gap: '0.15rem', fontSize: '0.76rem' }}>
+                <span style={{ color: 'var(--text-dim)' }}>Stat changes</span>
+                <strong style={{ color: '#f0883e' }}>{describeStages(game.stagesOf(selectedPiece.id))}</strong>
+                <span style={{ color: 'var(--text-dim)' }}>
+                  Speed now {game.effectiveSpeed(selectedPiece.id)} (base {game.statsOf(selectedPiece.id).spe})
+                </span>
+              </div>
+            )}
 
             {captureOptions.length > 0 && (
               <div style={{ display: 'grid', gap: '0.25rem' }}>

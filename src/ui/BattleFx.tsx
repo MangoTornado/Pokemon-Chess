@@ -30,6 +30,7 @@ export type Fx =
   | { readonly id: string; readonly kind: 'damage'; readonly square: Square; readonly amount: number; readonly crit: boolean; readonly color: string }
   | { readonly id: string; readonly kind: 'impact'; readonly square: Square; readonly color: string }
   | { readonly id: string; readonly kind: 'status'; readonly square: Square; readonly mark: string }
+  | { readonly id: string; readonly kind: 'stage'; readonly square: Square; readonly text: string; readonly drop: boolean }
   | { readonly id: string; readonly kind: 'heal'; readonly square: Square; readonly amount: number }
   | { readonly id: string; readonly kind: 'callout'; readonly text: string; readonly color: string; readonly crit: boolean };
 
@@ -107,11 +108,24 @@ export function buildTimeline(resolved: ResolvedMove): Step[] {
     });
   });
 
+  const afterBlows = FIRST_BLOW_MS + resolved.blows.length * BLOW_GAP_MS;
+
   if (resolved.statusInflicted) {
     steps.push({
-      at: FIRST_BLOW_MS + resolved.blows.length * BLOW_GAP_MS,
+      at: afterBlows,
       fx: { id: 'status', kind: 'status', square: defenderSquare, mark: resolved.statusInflicted },
     });
+  }
+
+  // A stage change — a Speed drop above all — decides who swings first next time, so it is announced.
+  if (resolved.boostsInflicted) {
+    const text = describeBoosts(resolved.boostsInflicted);
+    if (text) {
+      steps.push({
+        at: afterBlows + (resolved.statusInflicted ? 220 : 0),
+        fx: { id: 'stage', kind: 'stage', square: defenderSquare, text, drop: isDrop(resolved.boostsInflicted) },
+      });
+    }
   }
 
   return steps;
@@ -177,6 +191,27 @@ export function useBattleFx(resolved: ResolvedMove | null, nonce: number): { fx:
 
   return { fx, motion };
 }
+
+/** `{ spe: -1 }` → `Spe fell!`; `{ atk: 2 }` → `Atk rose sharply!` — the games' own phrasing. */
+function describeBoosts(boosts: Readonly<Record<string, number>>): string {
+  const parts: string[] = [];
+  for (const [key, delta] of Object.entries(boosts)) {
+    const label = STAGE_STAT_LABEL[key];
+    if (!label || delta === 0) continue;
+    const magnitude = Math.abs(delta) >= 3 ? ' drastically' : Math.abs(delta) === 2 ? ' sharply' : '';
+    parts.push(`${label} ${delta < 0 ? 'fell' : 'rose'}${magnitude}!`);
+  }
+  return parts.join(' ');
+}
+
+/** Whether a set of boosts is (predominantly) a drop, for colouring. */
+function isDrop(boosts: Readonly<Record<string, number>>): boolean {
+  return Object.values(boosts).reduce((a, b) => a + b, 0) < 0;
+}
+
+const STAGE_STAT_LABEL: Record<string, string> = {
+  atk: 'Atk', def: 'Def', spa: 'SpA', spd: 'SpD', spe: 'Speed', accuracy: 'Accuracy', evasion: 'Evasion',
+};
 
 const STATUS_LABEL: Record<string, { text: string; color: string }> = {
   burned: { text: 'Burned!', color: '#ee8130' },
@@ -264,6 +299,23 @@ export function FxLayer({ fx }: { fx: readonly Fx[] }) {
               }}
             >
               +{f.amount}
+            </span>
+          );
+        }
+
+        if (f.kind === 'stage') {
+          return (
+            <span
+              key={f.id}
+              className="pc-status-pop"
+              style={{
+                position: 'absolute', ...pos, whiteSpace: 'nowrap',
+                fontWeight: 800, fontSize: 'clamp(0.58rem, 1.6cqw, 0.78rem)',
+                color: f.drop ? '#f0883e' : '#58a6ff',
+                textShadow: '0 1px 2px rgba(0,0,0,0.95)',
+              }}
+            >
+              {f.text}
             </span>
           );
         }

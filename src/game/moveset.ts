@@ -23,6 +23,14 @@ export interface MoveRider {
   readonly chance: number;
 }
 
+/** A stage change a move applies, and how often it lands. */
+export interface MoveBoosts {
+  /** Stat keys to deltas, e.g. `{ spe: -1 }`. */
+  readonly boosts: Readonly<Record<string, number>>;
+  /** Chance in percent (100 for a guaranteed effect). */
+  readonly chance: number;
+}
+
 /** A resolved slot: the move id and the facts the Clash needs, so it need not re-look-up per action. */
 export interface MoveSlot {
   readonly id: string;
@@ -32,6 +40,28 @@ export interface MoveSlot {
   readonly basePower: number;
   /** A status this move can inflict, if any — so the engine applies it without a dex lookup. */
   readonly rider?: MoveRider;
+  /**
+   * Stage changes this move inflicts on the target (Icy Wind's −1 Speed, Crunch's −1 Defence).
+   *
+   * A Speed drop is the sharpest effect in this variant, because Speed decides who swings first.
+   */
+  readonly targetBoosts?: MoveBoosts;
+  /** Stage changes the move costs its own user (Close Combat's −1 Def/SpD, Leaf Storm's −2 SpA). */
+  readonly selfBoosts?: Readonly<Record<string, number>>;
+}
+
+/** Extracts the stage change a move lands on its target: a guaranteed `boosts`, or a boost secondary. */
+function targetBoostsOf(move: MoveEntry): MoveBoosts | undefined {
+  // On a damaging move, a top-level `boosts` applies to the target.
+  if (move.boosts && Object.keys(move.boosts).length > 0) {
+    return { boosts: move.boosts, chance: 100 };
+  }
+  for (const sec of move.secondaries ?? []) {
+    if (sec.boosts && Object.keys(sec.boosts).length > 0) {
+      return { boosts: sec.boosts, chance: sec.chance ?? 100 };
+    }
+  }
+  return undefined;
 }
 
 const STATUS_MARK: Record<string, string> = {
@@ -62,6 +92,9 @@ function struggle(type: BattleType): MoveSlot {
 
 function toSlot(move: MoveEntry): MoveSlot {
   const rider = riderOf(move);
+  const targetBoosts = targetBoostsOf(move);
+  // `self.boosts` is what the move costs its user — a real trade-off the player should feel.
+  const selfBoosts = move.self?.boosts && Object.keys(move.self.boosts).length > 0 ? move.self.boosts : undefined;
   return {
     id: move.id,
     name: move.name,
@@ -71,6 +104,8 @@ function toSlot(move: MoveEntry): MoveSlot {
     category: move.category === 'Special' ? 'Special' : 'Physical',
     basePower: move.basePower || 60,
     ...(rider ? { rider } : {}),
+    ...(targetBoosts ? { targetBoosts } : {}),
+    ...(selfBoosts ? { selfBoosts } : {}),
   };
 }
 

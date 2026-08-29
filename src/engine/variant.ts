@@ -40,7 +40,7 @@ import { effectiveness } from './typechart.ts';
 import { resolveClash } from '../rules/clash.ts';
 import type { BlowRecord, ClashRoll, ClashVerdict, Combatant } from '../rules/clash.ts';
 import type { DamageInput } from '../rules/damage.ts';
-import { computeStats } from '../rules/stats.ts';
+import { computeStats, stageMultiplier } from '../rules/stats.ts';
 import type { PieceStats } from '../rules/stats.ts';
 import { WONDER_GUARD, abilityGrantsImmunity, abilityLabel } from '../rules/abilities.ts';
 import { checkupHealFraction, defensiveItemMod, grantsSurviveOnce, offensiveItemMods } from '../rules/items.ts';
@@ -51,6 +51,8 @@ import {
   POISON_LETHAL_COUNT, POISON_RATE, SLEEP_TURN_CAP,
 } from './status.ts';
 import type { PieceStatus } from './status.ts';
+import { applyBoosts, hasAnyStage, stageOf } from './stages.ts';
+import type { StatStages } from './stages.ts';
 
 // ---------------------------------------------------------------------------
 // Loadouts and live state
@@ -137,6 +139,8 @@ export interface ResolvedMove {
   readonly moveType: BattleType | null;
   /** A status mark this action inflicted on the surviving defender, if any (`burned`, `poisoned`, …). */
   readonly statusInflicted: string | null;
+  /** Stage changes this action landed on the surviving defender, e.g. `{ spe: -1 }` — null if none. */
+  readonly boostsInflicted: Readonly<Record<string, number>> | null;
   readonly grantsBonus: boolean;
   /** Ids removed from the board. */
   readonly removed: readonly number[];
@@ -234,6 +238,8 @@ export class PokemonChess {
   private readonly live: ReadonlyMap<number, LiveState>;
   /** Status conditions per piece id. Absent means healthy, so a fresh game stores nothing. */
   private readonly statuses: ReadonlyMap<number, PieceStatus>;
+  /** Stat stages per piece id. Absent means all stage 0, so a fresh game stores nothing. */
+  private readonly stages: ReadonlyMap<number, StatStages>;
   private readonly rngState: RngState;
   private readonly pending: PendingExtraMove | null;
   readonly history: readonly ResolvedMove[];
@@ -249,6 +255,7 @@ export class PokemonChess {
     movesets: ReadonlyMap<number, Moveset>,
     live: ReadonlyMap<number, LiveState>,
     statuses: ReadonlyMap<number, PieceStatus>,
+    stages: ReadonlyMap<number, StatStages>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -261,6 +268,7 @@ export class PokemonChess {
     this.movesets = movesets;
     this.live = live;
     this.statuses = statuses;
+    this.stages = stages;
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -294,8 +302,9 @@ export class PokemonChess {
       options.dex,
       stats,
       movesets,
-      new Map(),
-      new Map(),
+      new Map(), // live HP
+      new Map(), // statuses
+      new Map(), // stat stages
       new Rng(options.seed).state,
       null,
       [],
@@ -504,6 +513,11 @@ export class PokemonChess {
     const aDefend = defensiveItemMod(a.item, dCategory, this.isNfe(a.species));
     const dDefend = defensiveItemMod(d.item, aCategory, this.isNfe(d.species));
 
+    // Stat stages feed the pipeline's existing stage inputs, so a −1 Defence drop shows up as more damage
+    // taken on every later exchange — a lasting wound, since nothing resets here.
+    const aStages = this.stagesOf(attackerId);
+    const dStages = this.stagesOf(defenderId);
+
     const atk: DamageInput = {
       attackerType: a.type,
       moveType: move.type,
@@ -512,6 +526,8 @@ export class PokemonChess {
       basePower: move.basePower,
       offensiveStat: aPhysical ? aStats.atk : aStats.spa,
       defensiveStat: aPhysical ? dStats.def : dStats.spd,
+      offensiveStage: stageOf(aStages, aPhysical ? 'atk' : 'spa'),
+      defensiveStage: stageOf(dStages, aPhysical ? 'def' : 'spd'),
       stab: move.type === a.type,
       // A burned piece hits weaker with physical moves — the games' Attack halving, as a Clash penalty.
       burned: this.statusOf(attackerId).burned !== undefined,
@@ -527,6 +543,8 @@ export class PokemonChess {
       basePower: MELEE_BASE_POWER,
       offensiveStat: dPhysical ? dStats.atk : dStats.spa,
       defensiveStat: dPhysical ? aStats.def : aStats.spd,
+      offensiveStage: stageOf(dStages, dPhysical ? 'atk' : 'spa'),
+      defensiveStage: stageOf(aStages, dPhysical ? 'def' : 'spd'),
       stab: true,
       basePowerMod: dItem.basePowerMod,
       attackerFinalMod: dItem.attackerFinalMod,
@@ -560,8 +578,8 @@ export class PokemonChess {
     const { atk, def } = this.clashInputs(attackerId, defenderId, best.slot);
     const aLive = this.liveOf(attackerId);
     const dLive = this.liveOf(defenderId);
-    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.statsOf(attackerId).spe, pristine: aLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(attackerId).item) };
-    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: this.statsOf(defenderId).spe, pristine: dLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(defenderId).item) };
+    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.effectiveSpeed(attackerId), pristine: aLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(attackerId).item) };
+    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: this.effectiveSpeed(defenderId), pristine: dLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(defenderId).item) };
     const result = resolveClash(
       {
         attacker: aC,
@@ -587,6 +605,7 @@ export class PokemonChess {
     const rng = new Rng(this.rngState);
     let roll: ClashRoll = { hits: true, crit: false, momentum: 100 };
     let riderHits = false;
+    let boostHits = false;
     if (move.captured) {
       const momentum = 85 + rng.below(16); // uniform 85..100
       let crit = this.rules.critCoins > 0;
@@ -595,10 +614,12 @@ export class PokemonChess {
       // Whether the chosen move's status rider lands, drawn from the same stream so it is replayable.
       const mover = this.position.pieceAt(move.from);
       const best = mover ? this.bestSlotAgainst(mover.id, move.captured.id) : null;
-      const rider = best ? this.movesetOf(mover!.id)[best.slot]?.rider : undefined;
-      if (rider) riderHits = rng.chance(rider.chance);
+      const slot = best ? this.movesetOf(mover!.id)[best.slot] : undefined;
+      if (slot?.rider) riderHits = rng.chance(slot.rider.chance);
+      // The target's stage change is its own draw, taken in a fixed order so a replay reproduces it.
+      if (slot?.targetBoosts) boostHits = rng.chance(slot.targetBoosts.chance);
     }
-    const { game, resolved } = this.applyResolved(move, roll, rng.state, riderHits);
+    const { game, resolved } = this.applyResolved(move, roll, rng.state, riderHits, boostHits);
     return { game, resolved };
   }
 
@@ -613,6 +634,7 @@ export class PokemonChess {
     roll: ClashRoll,
     nextRngState: RngState = this.rngState,
     riderHits = false,
+    boostHits = false,
   ): { game: PokemonChess; resolved: ResolvedMove } {
     const moverPiece = this.position.pieceAt(move.from)!;
     const side = moverPiece.side;
@@ -629,13 +651,13 @@ export class PokemonChess {
         attackerMaxHp: this.liveOf(attackerId).maxHp,
         defenderMaxHp: null,
         crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
-        moveName: null, moveType: null, statusInflicted: null,
+        moveName: null, moveType: null, statusInflicted: null, boostsInflicted: null,
         grantsBonus: false, removed: [], kingCaptured: false,
       };
       // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
       const up = this.checkup(side, nextPos, this.live, this.statuses);
       return {
-        game: this.next(up.position, up.live, up.statuses, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, this.stages, nextRngState, null, resolved),
         resolved,
       };
     }
@@ -650,10 +672,8 @@ export class PokemonChess {
 
     const aLive = this.liveOf(attackerId);
     const dLive = this.liveOf(defenderId);
-    const aStats = this.statsOf(attackerId);
-    const dStats = this.statsOf(defenderId);
-    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: aStats.spe, pristine: aLive.pristine, surviveOnce: grantsSurviveOnce(attacker.item) };
-    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: dStats.spe, pristine: dLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(defenderId).item) };
+    const aC: Combatant = { hp: aLive.hp, maxHp: aLive.maxHp, speed: this.effectiveSpeed(attackerId), pristine: aLive.pristine, surviveOnce: grantsSurviveOnce(attacker.item) };
+    const dC: Combatant = { hp: dLive.hp, maxHp: dLive.maxHp, speed: this.effectiveSpeed(defenderId), pristine: dLive.pristine, surviveOnce: grantsSurviveOnce(this.loadoutOf(defenderId).item) };
     const { atk, def } = this.clashInputs(attackerId, defenderId, slot);
 
     const result = resolveClash(
@@ -721,6 +741,24 @@ export class PokemonChess {
       }
     }
 
+    // Stat stages. A target's drop needs the target alive to matter; the move's cost to its own user
+    // (Close Combat's −1 Def/SpD) applies whenever the attacker survives to carry it.
+    const nextStages = new Map(this.stages);
+    for (const id of removed) nextStages.delete(id);
+    let boostsApplied: Readonly<Record<string, number>> | null = null;
+    if (defenderSurvives && boostHits && usedMove?.targetBoosts) {
+      const next = applyBoosts(this.stagesOf(defenderId), usedMove.targetBoosts.boosts);
+      if (hasAnyStage(next)) nextStages.set(defenderId, next);
+      else nextStages.delete(defenderId);
+      boostsApplied = usedMove.targetBoosts.boosts;
+    }
+    const attackerSurvives = aC.hp > 0 && !removed.includes(attackerId);
+    if (attackerSurvives && usedMove?.selfBoosts) {
+      const next = applyBoosts(this.stagesOf(attackerId), usedMove.selfBoosts);
+      if (hasAnyStage(next)) nextStages.set(attackerId, next);
+      else nextStages.delete(attackerId);
+    }
+
     // A bonus move is granted only by ADVANTAGE, only while the cap is unspent, and only if the piece can
     // actually continue — otherwise the turn passes.
     const used = this.pending?.used ?? 0;
@@ -749,6 +787,7 @@ export class PokemonChess {
       moveName: usedMove?.name ?? null,
       moveType: usedMove?.type ?? null,
       statusInflicted: inflicted,
+      boostsInflicted: boostsApplied,
       grantsBonus: pending !== null,
       removed,
       kingCaptured,
@@ -758,12 +797,12 @@ export class PokemonChess {
     if (pending === null && !kingCaptured) {
       const up = this.checkup(side, posForNext, nextLive, nextStatus);
       return {
-        game: this.next(up.position, up.live, up.statuses, nextRngState, null, resolved),
+        game: this.next(up.position, up.live, up.statuses, nextStages, nextRngState, null, resolved),
         resolved,
       };
     }
     return {
-      game: this.next(posForNext, nextLive, nextStatus, nextRngState, pending, resolved),
+      game: this.next(posForNext, nextLive, nextStatus, nextStages, nextRngState, pending, resolved),
       resolved,
     };
   }
@@ -772,19 +811,35 @@ export class PokemonChess {
     position: Position,
     live: ReadonlyMap<number, LiveState>,
     statuses: ReadonlyMap<number, PieceStatus>,
+    stages: ReadonlyMap<number, StatStages>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
-      position, this.loadout, this.rules, this.dex, this.stats, this.movesets, live, statuses, rngState,
-      pending, [...this.history, resolved],
+      position, this.loadout, this.rules, this.dex, this.stats, this.movesets, live, statuses, stages,
+      rngState, pending, [...this.history, resolved],
     );
   }
 
   /** The status a piece is carrying, defaulting to healthy. */
   statusOf(pieceId: number): PieceStatus {
     return this.statuses.get(pieceId) ?? {};
+  }
+
+  /** The stat stages a piece is carrying, defaulting to all zero. */
+  stagesOf(pieceId: number): StatStages {
+    return this.stages.get(pieceId) ?? {};
+  }
+
+  /**
+   * A piece's effective Speed, after its stages.
+   *
+   * This is the one the Clash orders blows by, which is what makes a Speed drop the sharpest effect in the
+   * game: it can flip who swings first, and therefore who survives.
+   */
+  effectiveSpeed(pieceId: number): number {
+    return Math.max(1, Math.round(this.statsOf(pieceId).spe * stageMultiplier(stageOf(this.stagesOf(pieceId), 'spe'))));
   }
 
   /**
@@ -985,6 +1040,7 @@ export class PokemonChess {
     pokemon: PokemonLoadout;
     live: LiveState;
     status: PieceStatus;
+    stages: StatStages;
   }[] {
     return this.position.allPieces().map(({ square, piece }) => ({
       square,
@@ -993,6 +1049,7 @@ export class PokemonChess {
       pokemon: this.loadoutOf(piece.id),
       live: this.liveOf(piece.id),
       status: this.statusOf(piece.id),
+      stages: this.stagesOf(piece.id),
     }));
   }
 }
@@ -1001,3 +1058,4 @@ export class PokemonChess {
 export type { SpeciesEntry };
 export type { Side } from './board.ts';
 export type { PieceStatus } from './status.ts';
+export type { StatStages, StatKey } from './stages.ts';

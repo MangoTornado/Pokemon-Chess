@@ -13,7 +13,8 @@ import type { CSSProperties } from 'react';
 import type { SpeciesEntry } from '../data/schema.ts';
 import type { BattleType } from '../data/schema.ts';
 import type { PieceClass, Side } from '../engine/board.ts';
-import type { PieceStatus } from '../engine/variant.ts';
+import type { PieceStatus, StatStages } from '../engine/variant.ts';
+import { describeStages, hasAnyStage } from '../engine/stages.ts';
 import type { Motion } from './BattleFx.tsx';
 import { PokemonIcon } from './PokemonIcon.tsx';
 import { GLYPH_FONT_STACK, ROLE_GLYPH, ROLE_RING_WEIGHT, ROLE_SPRITE_SCALE } from './pieceRoles.ts';
@@ -30,6 +31,8 @@ export interface BoardPieceProps {
   maxHp?: number;
   /** Status condition, for the rotation and counter-pip markers. */
   status?: PieceStatus;
+  /** Stat stages, shown as a small ▲/▼ marker — a Speed drop changes who swings first, so it must be visible. */
+  stages?: StatStages;
   /**
    * Transient battle motion — the attacker's lunge at its target, or a recoil from a blow that just landed.
    *
@@ -45,6 +48,12 @@ const ROTATION_DEGREES: Record<string, number> = { asleep: -20, paralyzed: 20, c
 /** Colour of each counter-class status pip. */
 const PIP_COLOR: Record<'poisoned' | 'burned', string> = { poisoned: '#a33ea1', burned: '#ee8130' };
 
+/** The net direction of a piece's stages, for choosing one marker when several stats have moved. */
+function netStage(stages: StatStages | undefined): number {
+  if (!stages) return 0;
+  return (stages.atk ?? 0) + (stages.def ?? 0) + (stages.spa ?? 0) + (stages.spd ?? 0) + (stages.spe ?? 0);
+}
+
 /** Green when healthy, amber when bloodied, red when nearly gone — the standard HP-bar reading. */
 function hpColor(fraction: number): string {
   if (fraction > 0.5) return '#3fb950';
@@ -52,7 +61,7 @@ function hpColor(fraction: number): string {
   return '#f85149';
 }
 
-export function BoardPiece({ species, type, cls, side, hp, maxHp, status, motion }: BoardPieceProps) {
+export function BoardPiece({ species, type, cls, side, hp, maxHp, status, stages, motion }: BoardPieceProps) {
   const typeColor = TYPE_COLORS[type];
   const isWhite = side === 'white';
   const showHp = hp !== undefined && maxHp !== undefined && maxHp > 0;
@@ -164,6 +173,27 @@ export function BoardPiece({ species, type, cls, side, hp, maxHp, status, motion
               transition: 'width 220ms ease, background 220ms ease',
             }}
           />
+        </span>
+      )}
+
+      {/* Stat stages: one chevron for the net direction, with the detail in the tooltip. Speed order is
+          decided by these, so a staged piece must never look like a fresh one. */}
+      {hasAnyStage(stages) && (
+        <span
+          title={describeStages(stages)}
+          style={{
+            position: 'absolute',
+            top: '3%',
+            right: '4%',
+            zIndex: 3,
+            fontSize: '16cqmin',
+            fontWeight: 900,
+            lineHeight: 1,
+            color: netStage(stages) < 0 ? '#f0883e' : '#58a6ff',
+            textShadow: '0 1px 2px rgba(0,0,0,0.95)',
+          }}
+        >
+          {netStage(stages) < 0 ? '▼' : '▲'}
         </span>
       )}
 

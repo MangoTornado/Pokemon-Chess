@@ -35,6 +35,7 @@ function resolution(over: Partial<ResolvedMove> = {}): ResolvedMove {
     moveName: 'Flamethrower',
     moveType: 'Fire',
     statusInflicted: null,
+    boostsInflicted: null,
     grantsBonus: false,
     removed: [2],
     kingCaptured: false,
