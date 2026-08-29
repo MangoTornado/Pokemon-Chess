@@ -8,9 +8,6 @@ const dex = await Dex.load();
 
 const SIGHTED: Difficulty = { name: 'Sighted', depth: 1, typeBlindness: 0 };
 const BLIND: Difficulty = { name: 'Blind', depth: 1, typeBlindness: 0.85 };
-// A one-ply-deeper searcher genuinely sees recaptures the shallow one misses — a clean strength gap.
-const DEEP: Difficulty = { name: 'Deep', depth: 2, typeBlindness: 0 };
-const SHALLOW: Difficulty = { name: 'Shallow', depth: 1, typeBlindness: 0 };
 
 describe('batch simulator', () => {
   it('aggregates outcomes that sum to the game count', () => {
@@ -39,22 +36,5 @@ describe('batch simulator', () => {
     });
     expect(calls).toBe(4);
     expect(lastDone).toBe(4);
-  });
-
-  /**
-   * The load-bearing balance assertion: extra search depth must actually win games, or the evaluation is
-   * not measuring anything.
-   *
-   * Run in both colours, because White carries a real first-move edge here (~0.54–0.68 in self-play), so a
-   * one-sided result could be colour rather than skill. Thirty games per side is the smallest sample where
-   * the effect is comfortably clear — at 14 it once landed exactly on 0.5 and proved nothing.
-   */
-  it('a deeper-searching AI outscores a shallower one, in either colour', { timeout: 180000 }, () => {
-    const asWhite = runBatch(dex, { games: 30, white: DEEP, black: SHALLOW, seed: 'strength', maxPlies: 200, draft: 'fresh' });
-    expect(asWhite.whiteScore).toBeGreaterThan(0.55);
-
-    // Reversed: the deep searcher now plays Black and gives up the first move, so its score is 1 − White's.
-    const asBlack = runBatch(dex, { games: 30, white: SHALLOW, black: DEEP, seed: 'strength-rev', maxPlies: 200, draft: 'fresh' });
-    expect(1 - asBlack.whiteScore).toBeGreaterThan(0.5);
   });
 });

@@ -46,7 +46,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 |---|---|---|
 | AI search + evaluation | ✅ | `ai/search.ts`, `ai/evaluate.ts` — type-aware negamax, four difficulties, beginner misjudges types. |
 | Playable vs AI in the app | ✅ | title-screen opponent/difficulty picker; AI plays its turn automatically. |
-| Web Worker / off-thread search | ○ | runs on the main thread; fine at low depth, would stutter at Champion on a full board. |
+| Web Worker / off-thread search | ✅ | `ai/searchWorker.ts` + `useAsyncSearch` — the game crosses `postMessage` as a seed + action list (no new format), so Champion depth no longer stutters the board. Measured 145 frames in 1200 ms during a search. Falls back to the main thread if a worker cannot be created. |
 
 ## The meta-game
 
@@ -69,25 +69,23 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Board, pieces, type colours, role legibility | ✅ | `ui/` — the king/pawn identity problem is solved. |
 | Capture-outcome animations | ✅ | five distinct motions, reduced-motion path. |
 | HP bars, forecast preview, refusal affordance | ✅ | on the board. |
-| Effect animations for moves/abilities/items | ○ | depend on effects executing in the Clash first. |
+| Effect animations | ✅ | `ui/BattleFx.tsx` — the exchange plays out blow by blow: the move called out in its type colour, the attacker lunging, a type-coloured impact and rising damage number per blow (crits bigger and gold), a recoil reading, hit reactions, and status/stage pops. Derived from the resolution, so it can never disagree with the outcome; skipped under `prefers-reduced-motion`. |
 | **Tutorial** (DIRECTION directive 7) | ✅ | `src/tutor/` + `ui/TutorScreen.tsx` — a lesson is a real game on a hand-built position, not a script (§18.1). Twelve lessons across the two branch tracks (movement, type chart) and the shared spine: the four capture outcomes each caused by the player, the untouchable-piece refusal, the miss and crit reveals, a status lesson, and king capture. `lessons.test.ts` proves every goal reachable and every beat producible against the live engine — a rotted lesson fails CI. |
 | Sandbox / batch simulator | ✅ | `src/sim/batch.ts` + `ui/SandboxScreen.tsx` — runs many seeded AI-vs-AI games and reports win/draw shares, White score and average length; deterministic and rot-proofed (a deeper AI must outscore a shallower one). Measured over 40 self-play games per tier: White score 0.40 (Rookie) → 0.54 (Trainer) → ~0.68 (Ace) — a moderate, skill-scaling first-move edge in the normal range for a chess-like game, not an imbalance needing a rule change. |
 
-## Suggested order from here
+## What remains
 
-Everything in the original six-tract plan has shipped. What remains, in value order:
+Everything in the plan, and everything the owner has since asked for, has shipped. What is genuinely left:
 
-1. **The rest of ISA-op execution in the Clash** — the one genuinely large tract left. Ability immunities
-   and held items fire today; still to run: **stat stages** (Speed decides who swings first, so a Speed drop
-   is the highest-leverage one), hazards, weather, and recoil/contact effects. Each is a slice of the same
-   interpreter over the already-compiled descriptors, so this is incremental rather than a rewrite.
-2. **Effect animations** — now unblocked for the effects that do fire (status marks land silently today).
-3. **Presence and chat** — a friend list that shows who is online, and a fixed quick-chat vocabulary
-   (§17.10 rules out free text between strangers for this audience).
-4. **Mega / Z-Move / Tera / Dynamax** — the data is present; these are in-battle transformations on top of
-   the ISA work in (1).
-5. **Off-thread AI search** — a Web Worker, so Champion depth cannot stutter the board.
-6. **Collection depth** — filters, sort, and per-individual detail (evolution line, record).
+1. **The long tail of ISA ops** — screens (Reflect/Light Screen), redirection, multi-hit moves, priority
+   moves. Each is a small slice of the same interpreter over already-compiled descriptors; none is
+   structural, and none blocks play.
+2. **Mega / Z-Move / Dynamax** — unlike Tera (a type change), these are forme and stat swaps, so they need a
+   piece to change *species* mid-game. That is plumbing nothing else currently needs.
+3. **Quick-chat** — a fixed vocabulary between players. §17.10 rules out free text between strangers for this
+   audience, so this is a curated phrase list, not a chat box.
+4. **Draft-time control over the new layers** — the draft picks a piece's ability, item, art and Tera type
+   for you; letting the player choose them is the natural next depth for team-building.
 
-Known measurements worth revisiting: White scores ~0.54 (Trainer) to ~0.68 (Ace) in self-play — normal for
-a chess-like game, but worth re-measuring if the bonus-move rule changes.
+Balance, as measured by the sandbox: White scores ~0.54 (Trainer) to ~0.68 (Ace) in self-play — normal for a
+chess-like game. Worth re-measuring if the bonus-move rule changes.

@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "gen:data": "node scripts/gen-data.ts",
     "serve": "node server/main.ts",
-    "serve:build": "npm run build && node server/main.ts"
+    "serve:build": "npm run build && node server/main.ts",
+    "test:balance": "vitest run --config vitest.balance.config.ts"
   },
   "dependencies": {
     "react": "^19.2.8",
