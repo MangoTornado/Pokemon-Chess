@@ -31,6 +31,7 @@ import {
 } from '../game/draft.ts';
 import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
 import { candidateArts } from '../game/arts.ts';
+import type { ArtEffect } from '../game/arts.ts';
 import { BATTLE_TYPES } from '../data/schema.ts';
 import type { DraftSlot } from '../game/draft.ts';
 import { PokemonIcon } from './PokemonIcon.tsx';
@@ -307,10 +308,11 @@ function KitPanel({
 }
 
 /** What each kind of art does, in one line — the panel explains the choice rather than just naming it. */
-const ART_HINT: Readonly<Record<'weather' | 'hazard' | 'screen', string>> = {
+const ART_HINT: Readonly<Record<ArtEffect['kind'], string>> = {
   weather: 'Casts weather over the whole board instead of moving.',
   hazard: "Lays hazards on a band of the enemy's side instead of moving.",
   screen: 'Raises a screen that halves damage to your own army instead of moving.',
+  guard: 'Stands in for the pieces around it, answering attacks aimed at them.',
 };
 
 function KitRow({

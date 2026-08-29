@@ -79,6 +79,9 @@ function artDescription(art: Art): string {
     const halves = art.effect.screen === 'reflect' ? 'physical' : 'special';
     return `${SCREEN_LABEL[art.effect.screen]} — halves ${halves} damage your army takes`;
   }
+  if (art.effect.kind === 'guard') {
+    return 'Answers every attack on the pieces around it, until the opponent has replied';
+  }
   return `Lays ${HAZARD_LABEL[art.effect.hazard]} across the enemy's third rank`;
 }
 
@@ -483,6 +486,20 @@ export function GameBoard({
                     />
                   )}
 
+                  {/* A standing guard, so the threat is visible before the player commits to an attack. */}
+                  {piece && game.guardTurnsLeft(piece.id) > 0 && (
+                    <span
+                      aria-hidden
+                      title="Guarding — answers attacks aimed at the pieces around it"
+                      style={{
+                        position: 'absolute', top: '2%', left: '4%', fontSize: '9cqmin', lineHeight: 1,
+                        color: 'var(--accent)', textShadow: '0 0 0.6cqmin rgba(0,0,0,0.9)', zIndex: 2,
+                      }}
+                    >
+                      ⛨
+                    </span>
+                  )}
+
                   {/* Hazards on this square: a small band of pips so the ground itself is readable. */}
                   {hazardsAt(game, square) && (
                     <span
@@ -881,6 +898,11 @@ function SidePanel({
                     {squareName(h.move.from)}→{squareName(h.move.to)}
                   </span>
                   <span style={{ color: p.color }}>{p.label}</span>
+                  {h.intercepted && (
+                    <span style={{ color: 'var(--accent)' }}>
+                      {h.intercepted.kind === 'draw' ? 'drawn' : 'guarded'}
+                    </span>
+                  )}
                   {h.crit && <span style={{ color: VERDICT_PRESENTATION.advantage.color }}>crit</span>}
                 </li>
               );
@@ -924,6 +946,15 @@ function ResolutionCard({ dex, resolved }: { dex: Dex; resolved: ResolvedMove })
           {dex.getSpecies(resolved.defender.species)?.name} ({resolved.defender.type}
           {resolved.defenderHpAfter > 0 ? `, ${resolved.defenderHpAfter}/${resolved.defenderMaxHp} HP` : ', fainted'})
           {resolved.effectiveness !== null && ` · ${resolved.effectiveness}×`}
+        </div>
+      )}
+      {resolved.intercepted && (
+        <div style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
+          {resolved.intercepted.kind === 'draw'
+            ? `${dex.getSpecies(resolved.defender!.species)?.name} drew the attack meant for ${dex.getSpecies(resolved.intercepted.insteadOf.species)?.name} and absorbed it`
+            : `${dex.getSpecies(resolved.defender!.species)?.name} took the hit meant for ${dex.getSpecies(resolved.intercepted.insteadOf.species)?.name}`}
+          {' · '}
+          {squareName(resolved.move.to)} was never contested, so the attacker holds its square
         </div>
       )}
       {cause && <div style={{ fontSize: '0.74rem', color: 'var(--text-dim)' }}>{cause}</div>}

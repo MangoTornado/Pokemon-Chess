@@ -31,7 +31,7 @@
 
 import type { BattleType, SpeciesEntry } from '../data/schema.ts';
 import type { Dex } from '../data/dex.ts';
-import { fileOf } from './board.ts';
+import { KING_MOVES, fileOf, squareName } from './board.ts';
 import type { PieceClass, Side, Square } from './board.ts';
 import { Position } from './position.ts';
 import { encodeArt, encodeTera, isArtMove, isTeraMove } from './position.ts';
@@ -63,6 +63,8 @@ import {
 } from './field.ts';
 import type { Field } from './field.ts';
 import { pickArt } from '../game/arts.ts';
+import { DRAW_BOOST, GUARD_TURNS, abilityDraws } from '../rules/redirect.ts';
+import type { Interception } from '../rules/redirect.ts';
 import type { Art } from '../game/arts.ts';
 import type { StatStages } from './stages.ts';
 
@@ -148,6 +150,24 @@ export interface VariantMove {
   readonly tera?: BattleType;
 }
 
+/**
+ * Set when a third piece answered an attack in the target's place.
+ *
+ * Note which way round this reads: every `defender*` field on the resolution describes the piece that
+ * *actually fought*, because those are the numbers the exchange produced. This report carries the piece that
+ * was originally aimed at, which is the part that would otherwise be lost — "Groudon took the hit meant for
+ * Gyarados" needs both halves, and naming the wrong one as the defender would contradict the HP beside it.
+ */
+export interface InterceptReport {
+  readonly pieceId: number;
+  readonly square: Square;
+  readonly kind: 'draw' | 'guard';
+  /** The piece the attack was aimed at, which never entered the exchange. */
+  readonly insteadOf: PokemonLoadout;
+  /** The ability that drew the attack, for a `draw`. */
+  readonly ability?: string;
+}
+
 export interface ResolvedMove {
   readonly move: Move;
   readonly side: Side;
@@ -179,6 +199,8 @@ export interface ResolvedMove {
   /** Stage changes this action landed on the surviving defender, e.g. `{ spe: -1 }` — null if none. */
   readonly boostsInflicted: Readonly<Record<string, number>> | null;
   /** Damage the attacker did to itself (recoil, Life Orb) or took from a contact item. 0 for none. */
+  /** Set when a third piece answered this attack in the target's place. */
+  readonly intercepted?: InterceptReport;
   readonly recoilTaken: number;
   readonly grantsBonus: boolean;
   /** Ids removed from the board. */
@@ -288,6 +310,14 @@ export class PokemonChess {
    * set is small and immutable, so it threads through game state like the rest.
    */
   private readonly tera: ReadonlySet<number>;
+
+  /**
+   * Pieces currently volunteering to answer for their neighbours, and for how many more of their side's turns.
+   *
+   * Keyed by piece rather than square because a guard that moves keeps its watch, which is what makes casting
+   * one a real commitment rather than a square-bound trap.
+   */
+  private readonly guards: ReadonlyMap<number, number>;
   /**
    * The field move each piece can cast, or null — computed once at creation.
    *
@@ -316,6 +346,7 @@ export class PokemonChess {
     stages: ReadonlyMap<number, StatStages>,
     field: Field,
     tera: ReadonlySet<number>,
+    guards: ReadonlyMap<number, number>,
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -332,6 +363,7 @@ export class PokemonChess {
     this.stages = stages;
     this.field = field;
     this.tera = tera;
+    this.guards = guards;
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -382,6 +414,7 @@ export class PokemonChess {
         ? { ...EMPTY_FIELD, weather: { kind: options.weather, turns: Infinity } }
         : EMPTY_FIELD,
       new Set(), // nobody has Terastallised yet
+      new Map(), // nobody is guarding yet
       new Rng(options.seed).state,
       null,
       [],
@@ -700,7 +733,13 @@ export class PokemonChess {
     if (!move.captured) return 'quiet';
     const moverPiece = this.position.pieceAt(move.from)!;
     const attackerId = moverPiece.id;
-    const defenderId = move.captured.id;
+
+    // Forecast the exchange that will actually be fought, not the one that was aimed at. A redirected attack
+    // resolves against the interceptor, so previewing the target would promise the player an outcome the
+    // engine will not deliver — and the board's whole contract is that a square says beforehand what it does.
+    const intercept = this.interceptorFor(attackerId, move.captured.id);
+    if (intercept?.kind === 'draw') return 'blocked';
+    const defenderId = intercept ? intercept.pieceId : move.captured.id;
 
     // Use the best legal slot — coverage may make a capture the declared type could not.
     const best = this.bestSlotAgainst(attackerId, defenderId);
@@ -799,7 +838,10 @@ export class PokemonChess {
       const nextPos = this.position.withTurnReturned();
       const up = this.checkup(side, nextPos, this.live, this.statuses, this.field);
       return {
-        game: this.next(up.position, up.live, up.statuses, this.stages, up.field, nextTera, nextRngState, null, resolved),
+        game: this.next({
+          position: up.position, live: up.live, statuses: up.statuses, field: up.field, tera: nextTera,
+          guards: up.guards, rngState: nextRngState, pending: null,
+        }, resolved),
         resolved,
       };
     }
@@ -809,6 +851,7 @@ export class PokemonChess {
     if (isArtMove(move.encoded)) {
       const art = this.artOf(attackerId);
       const nextField = art ? this.fieldAfterArt(art, side, move.from) : this.field;
+
       const resolved: ResolvedMove = {
         move, side, attacker, defender: null, effectiveness: null,
         verdict: 'quiet',
@@ -822,8 +865,14 @@ export class PokemonChess {
       };
       const nextPos = this.position.withTurnReturned();
       const up = this.checkup(side, nextPos, this.live, this.statuses, nextField);
+      // Set the guard on top of the aged map, not before it: the caster's own Checkup must not age the
+      // guard it just cast, or it would lapse before the enemy turn it exists to cover.
+      const nextGuards = art ? this.guardsAfterArt(art, attackerId, up.guards) : up.guards;
       return {
-        game: this.next(up.position, up.live, up.statuses, this.stages, up.field, this.tera, nextRngState, null, resolved),
+        game: this.next({
+          position: up.position, live: up.live, statuses: up.statuses, field: up.field,
+          guards: nextGuards, rngState: nextRngState, pending: null,
+        }, resolved),
         resolved,
       };
     }
@@ -847,14 +896,28 @@ export class PokemonChess {
       // A quiet move always passes the turn, so the mover's side takes its end-of-turn Checkup.
       const up = this.checkup(side, arrival.position, arrival.live, arrival.statuses, this.field);
       return {
-        game: this.next(up.position, up.live, up.statuses, arrival.stages, up.field, this.tera, nextRngState, null, resolved),
+        game: this.next({
+          position: up.position, live: up.live, statuses: up.statuses, stages: arrival.stages,
+          field: up.field, guards: up.guards, rngState: nextRngState, pending: null,
+        }, resolved),
         resolved,
       };
     }
 
     const defenderPiece = move.captured;
-    const defenderId = defenderPiece.id;
+    const targetId = defenderPiece.id;
+
+    // Redirection, resolved before the Clash because a Clash is between exactly two pieces and this decides
+    // which two. A drawing ability absorbs the attack outright; a cast guard fights it in the target's place.
+    const intercept = this.interceptorFor(attackerId, targetId);
+    if (intercept?.kind === 'draw') {
+      return this.absorbedAttack(move, side, attackerId, attacker, intercept, targetId, roll, nextRngState);
+    }
+    const defenderId = intercept ? intercept.pieceId : targetId;
+    const redirected = intercept !== null;
+    // The piece that actually fights, so every `defender*` number below describes one and the same piece.
     const defender = this.loadoutOf(defenderId);
+
     // Resolve with the best legal slot — the same one the forecast and the offer used.
     const best = this.bestSlotAgainst(attackerId, defenderId);
     const slot = best?.slot ?? 0;
@@ -883,6 +946,29 @@ export class PokemonChess {
     const setLive = (id: number, c: Combatant) =>
       nextLive.set(id, { hp: c.hp, maxHp: c.maxHp, pristine: c.pristine });
 
+    if (redirected) {
+      // Nobody relocates. The square the attacker went for was never actually contested, so winning the
+      // exchange takes material but no ground — that trade is what makes redirection worth a tempo, and it is
+      // also why a guard can rout an attacker that never attacked it. Whoever fell is removed from its own
+      // square; the piece that was originally attacked is untouched.
+      const guardSquare = intercept!.square;
+      nextPos = this.position;
+      if (dC.hp <= 0) {
+        nextPos = nextPos.withPieceRemoved(guardSquare, true);
+        nextLive.delete(defenderId);
+        removed.push(defenderId);
+      } else {
+        setLive(defenderId, dC);
+      }
+      if (aC.hp <= 0) {
+        nextPos = nextPos.withPieceRemoved(move.from, true);
+        nextLive.delete(attackerId);
+        removed.push(attackerId);
+      } else {
+        setLive(attackerId, aC);
+      }
+      nextPos = nextPos.withTurnReturned();
+    } else {
     switch (result.verdict) {
       case 'advantage':
       case 'capture':
@@ -914,6 +1000,7 @@ export class PokemonChess {
         setLive(attackerId, aC);
         setLive(defenderId, dC);
         break;
+    }
     }
 
     const kingCaptured = removed.some((id) => this.pieceById(id)?.cls === 'king');
@@ -983,6 +1070,14 @@ export class PokemonChess {
       statusInflicted: inflicted,
       boostsInflicted: boostsApplied,
       recoilTaken: result.recoilTaken,
+      ...(intercept
+        ? {
+            intercepted: {
+              pieceId: intercept.pieceId, square: intercept.square, kind: intercept.kind,
+              insteadOf: this.loadoutOf(targetId),
+            },
+          }
+        : {}),
       grantsBonus: pending !== null,
       removed,
       kingCaptured,
@@ -992,30 +1087,54 @@ export class PokemonChess {
     if (pending === null && !kingCaptured) {
       const up = this.checkup(side, posForNext, nextLive, nextStatus, this.field);
       return {
-        game: this.next(up.position, up.live, up.statuses, nextStages, up.field, this.tera, nextRngState, null, resolved),
+        game: this.next({
+          position: up.position, live: up.live, statuses: up.statuses, stages: nextStages, field: up.field,
+          guards: up.guards, rngState: nextRngState, pending: null,
+        }, resolved),
         resolved,
       };
     }
     return {
-      game: this.next(posForNext, nextLive, nextStatus, nextStages, this.field, this.tera, nextRngState, pending, resolved),
+      game: this.next({ position: posForNext, live: nextLive, statuses: nextStatus, stages: nextStages, rngState: nextRngState, pending }, resolved),
       resolved,
     };
   }
 
+  /**
+   * The successor state, named rather than positional.
+   *
+   * Every field defaults to this game's current value, so a call site spells out only what its action actually
+   * changed — which is both the honest reading of the code and the reason it is a patch: a long positional
+   * argument list grows a new parameter in the middle every time the game gains a layer, and inserting one in
+   * the wrong place silently shifts every argument after it. `rngState` and `pending` are required because
+   * every action has to decide both: inheriting a stale `pending` would hand a side a move it did not earn.
+   */
   private next(
-    position: Position,
-    live: ReadonlyMap<number, LiveState>,
-    statuses: ReadonlyMap<number, PieceStatus>,
-    stages: ReadonlyMap<number, StatStages>,
-    field: Field,
-    tera: ReadonlySet<number>,
-    rngState: RngState,
-    pending: PendingExtraMove | null,
+    patch: {
+      readonly position?: Position;
+      readonly live?: ReadonlyMap<number, LiveState>;
+      readonly statuses?: ReadonlyMap<number, PieceStatus>;
+      readonly stages?: ReadonlyMap<number, StatStages>;
+      readonly field?: Field;
+      readonly tera?: ReadonlySet<number>;
+      readonly guards?: ReadonlyMap<number, number>;
+      readonly rngState: RngState;
+      readonly pending: PendingExtraMove | null;
+    },
     resolved: ResolvedMove,
   ): PokemonChess {
     return new PokemonChess(
-      position, this.loadout, this.rules, this.dex, this.stats, this.movesets, this.arts, live, statuses,
-      stages, field, tera, rngState, pending, [...this.history, resolved],
+      patch.position ?? this.position, this.loadout, this.rules, this.dex, this.stats, this.movesets,
+      this.arts,
+      patch.live ?? this.live,
+      patch.statuses ?? this.statuses,
+      patch.stages ?? this.stages,
+      patch.field ?? this.field,
+      patch.tera ?? this.tera,
+      patch.guards ?? this.guards,
+      patch.rngState,
+      patch.pending,
+      [...this.history, resolved],
     );
   }
 
@@ -1024,8 +1143,14 @@ export class PokemonChess {
     return this.statuses.get(pieceId) ?? {};
   }
 
-  /** The field after an art is cast: fresh weather, or another layer across the enemy hazard band. */
+  /**
+   * The field after an art is cast: fresh weather, a screen, or another layer across the enemy hazard band.
+   *
+   * A guard cast (Follow Me) changes no field state — it marks the caster instead — so it leaves the field
+   * exactly as it found it and {@link guardsAfterArt} does that work.
+   */
   private fieldAfterArt(art: Art, side: Side, square: Square): Field {
+    if (art.effect.kind === 'guard') return this.field;
     if (art.effect.kind === 'weather') {
       return { ...this.field, weather: { kind: art.effect.weather, turns: WEATHER_TURNS } };
     }
@@ -1254,6 +1379,7 @@ export class PokemonChess {
     live: ReadonlyMap<number, LiveState>;
     statuses: ReadonlyMap<number, PieceStatus>;
     field: Field;
+    guards: ReadonlyMap<number, number>;
   } {
     let pos = position;
     const nlive = new Map(live);
@@ -1348,6 +1474,20 @@ export class PokemonChess {
       ? tickWeather(field.weather)
       : field.weather;
 
+    // A guard lapses at the end of the *opponent's* turn, not its caster's.
+    //
+    // That is the whole reason it is worth a tempo: Follow Me cast by White has to still be standing when
+    // Black replies, or it would protect nothing. So this Checkup — the mover's — ages the other side's
+    // guards, having just given them the one enemy turn they were cast to cover. Any guard whose piece has
+    // left the board is dropped here too.
+    const nguards = new Map<number, number>();
+    for (const [id, turns] of this.guards) {
+      if (!pos.allPieces().some((p) => p.piece.id === id)) continue;
+      const own = this.pieceById(id)?.side === side;
+      const left = own ? turns : turns - 1;
+      if (left > 0) nguards.set(id, left);
+    }
+
     // The mover's own screens age on its Checkup, so five turns means five of its own.
     return {
       position: pos,
@@ -1358,7 +1498,114 @@ export class PokemonChess {
         weather: nextWeather,
         screens: { ...field.screens, [side]: tickScreens(field.screens[side]) },
       },
+      guards: nguards,
     };
+  }
+
+  /**
+   * An attack a neighbouring drawer pulled onto itself and shrugged off.
+   *
+   * Lightning Rod and Storm Drain already grant immunity to the type they draw, so there is nothing to
+   * resolve: no Clash happens, no piece moves, no HP changes, and the drawer's Sp. Atk rises. From the
+   * attacker's side it is a wasted turn, which is exactly the threat a standing drawer is meant to be.
+   */
+  private absorbedAttack(
+    move: Move,
+    side: Side,
+    attackerId: number,
+    attacker: PokemonLoadout,
+    intercept: Interception,
+    targetId: number,
+    roll: ClashRoll,
+    nextRngState: RngState,
+  ): { game: PokemonChess; resolved: ResolvedMove } {
+    const drawerId = intercept.pieceId;
+    const nextStages = new Map(this.stages);
+    const boosted = applyBoosts(this.stagesOf(drawerId), DRAW_BOOST);
+    if (hasAnyStage(boosted)) nextStages.set(drawerId, boosted);
+
+    const resolved: ResolvedMove = {
+      move, side, attacker,
+      defender: this.loadoutOf(drawerId), // the drawer is the piece the attack reached
+      effectiveness: 0, // absorbed outright, which is what a 0x matchup means everywhere else
+      verdict: 'blocked',
+      attackerHpAfter: this.liveOf(attackerId).hp,
+      defenderHpAfter: this.liveOf(intercept.pieceId).hp,
+      attackerMaxHp: this.liveOf(attackerId).maxHp,
+      defenderMaxHp: this.liveOf(intercept.pieceId).maxHp,
+      crit: false, momentum: roll.momentum, blowCount: 0, blows: [],
+      moveName: null, moveType: null, statusInflicted: null, boostsInflicted: DRAW_BOOST, recoilTaken: 0,
+      intercepted: {
+        pieceId: drawerId, square: intercept.square, kind: 'draw',
+        insteadOf: this.loadoutOf(targetId),
+        ...(intercept.ability ? { ability: intercept.ability } : {}),
+      },
+      grantsBonus: false, removed: [], kingCaptured: false,
+    };
+
+    const nextPos = this.position.withTurnReturned();
+    const up = this.checkup(side, nextPos, this.live, this.statuses, this.field);
+    return {
+      game: this.next({
+        position: up.position, live: up.live, statuses: up.statuses, stages: nextStages, field: up.field,
+        guards: up.guards, rngState: nextRngState, pending: null,
+      }, resolved),
+      resolved,
+    };
+  }
+
+  /** The guards after an art cast: a guard art marks its caster, any other art leaves them alone. */
+  private guardsAfterArt(art: Art, casterId: number, from: ReadonlyMap<number, number>): ReadonlyMap<number, number> {
+    if (art.effect.kind !== 'guard') return from;
+    const next = new Map(from);
+    next.set(casterId, GUARD_TURNS);
+    return next;
+  }
+
+  /** Whether a piece is currently answering for its neighbours, and for how many more enemy turns. */
+  guardTurnsLeft(pieceId: number): number {
+    return this.guards.get(pieceId) ?? 0;
+  }
+
+  /**
+   * Who actually answers an attack on `defenderId`, or null when the attacked piece answers for itself.
+   *
+   * Checked before a Clash begins, because a Clash is between exactly two pieces and this is the step that
+   * decides which two. A drawing ability outranks a cast guard: it is the more specific claim (one type, always
+   * on) and it absorbs the attack outright rather than fighting it, so letting a guard pre-empt it would throw
+   * away an immunity the defender's side already owned.
+   */
+  interceptorFor(attackerId: number, defenderId: number): Interception | null {
+    const target = this.pieceSquare(defenderId);
+    const defenderPiece = this.pieceById(defenderId);
+    if (target === null || !defenderPiece) return null;
+
+    const best = this.bestSlotAgainst(attackerId, defenderId);
+    const moveType = this.movesetOf(attackerId)[best?.slot ?? 0]?.type ?? this.battleTypeOf(attackerId);
+
+    let guard: Interception | null = null;
+    for (const neighbour of KING_MOVES[target] ?? []) {
+      const piece = this.position.pieceAt(neighbour);
+      // Only an ally of the attacked piece can step in, and never the attacked piece itself.
+      if (!piece || piece.side !== defenderPiece.side || piece.id === defenderId) continue;
+
+      if (abilityDraws(this.loadoutOf(piece.id).ability) === moveType) {
+        return { pieceId: piece.id, square: neighbour, kind: 'draw', ability: this.loadoutOf(piece.id).ability! };
+      }
+      // Remember the first guard, but keep looking for a drawer, which outranks it.
+      if (guard === null && this.guardTurnsLeft(piece.id) > 0) {
+        guard = { pieceId: piece.id, square: neighbour, kind: 'guard' };
+      }
+    }
+    return guard;
+  }
+
+  /** The square a piece stands on, or null if it has left the board. */
+  pieceSquare(pieceId: number): Square | null {
+    for (const { square, piece } of this.position.allPieces()) {
+      if (piece.id === pieceId) return square;
+    }
+    return null;
   }
 
   /** The four-slot moveset a piece fights with. */
@@ -1407,6 +1654,14 @@ export class PokemonChess {
    * the capture is in fact legal.
    */
   blockedReason(attackerId: number, defenderId: number): string | null {
+    // A drawn attack is refused by a *neighbour*, not by the piece being attacked, so blaming the target's own
+    // typing would send the player looking in the wrong place for the reason their move is greyed out.
+    const drawn = this.interceptorFor(attackerId, defenderId);
+    if (drawn?.kind === 'draw') {
+      const by = this.loadoutOf(drawn.pieceId);
+      const name = this.dex.getSpecies(by.species)?.name ?? by.species;
+      return `${name} on ${squareName(drawn.square)} draws it with ${abilityLabel(drawn.ability ?? '')}`;
+    }
     if (this.bestSlotAgainst(attackerId, defenderId) !== null) return null;
     const defender = this.loadoutOf(defenderId);
     const ability = defender.ability;

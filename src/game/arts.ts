@@ -15,12 +15,15 @@ import type { MoveEntry } from '../data/schema.ts';
 import { hazardFromSideCondition, screenFromSideCondition, weatherFromMoveField } from '../engine/field.ts';
 import type { HazardKind, ScreenKind, WeatherKind } from '../engine/field.ts';
 import { Rng } from '../engine/rng.ts';
+import { guardFromVolatile } from '../rules/redirect.ts';
 
 /** What casting an art does. */
 export type ArtEffect =
   | { readonly kind: 'weather'; readonly weather: WeatherKind }
   | { readonly kind: 'hazard'; readonly hazard: HazardKind }
-  | { readonly kind: 'screen'; readonly screen: ScreenKind };
+  | { readonly kind: 'screen'; readonly screen: ScreenKind }
+  /** Follow Me and friends: the caster answers for the allies around it. */
+  | { readonly kind: 'guard' };
 
 /** A castable field move: what it is called, and what it does. */
 export interface Art {
@@ -37,6 +40,7 @@ export function artOfMove(move: MoveEntry): Art | null {
   if (hazard) return { id: move.id, name: move.name, effect: { kind: 'hazard', hazard } };
   const screen = screenFromSideCondition(move.sideCondition);
   if (screen) return { id: move.id, name: move.name, effect: { kind: 'screen', screen } };
+  if (guardFromVolatile(move.volatileStatus)) return { id: move.id, name: move.name, effect: { kind: 'guard' } };
   return null;
 }
 
