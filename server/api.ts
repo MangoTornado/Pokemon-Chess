@@ -144,6 +144,41 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     return json(200, { profile: result.value });
   }
 
+  // ---- Trading ----
+  if (method === 'GET' && path === '/api/trades') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    return json(200, { trades: accounts.listTrades(accountId) });
+  }
+
+  if (method === 'POST' && path === '/api/trades') {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const b = asObject(req.body);
+    const result = accounts.proposeTrade(accountId, b.to, b.offer, b.request);
+    if (!result.ok) return json(400, result.error);
+    return json(201, { trade: result.value });
+  }
+
+  const tradeMatch = /^\/api\/trades\/(\d+)\/(accept|decline|cancel)$/.exec(path);
+  if (method === 'POST' && tradeMatch) {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const result = accounts.respondTrade(accountId, Number(tradeMatch[1]), tradeMatch[2] as 'accept' | 'decline' | 'cancel');
+    if (!result.ok) return json(400, result.error);
+    return json(200, { ok: true });
+  }
+
+  // A player's collection, for building a trade offer against them.
+  const playerCollMatch = /^\/api\/players\/([A-Za-z0-9_-]{1,20})\/collection$/.exec(path);
+  if (method === 'GET' && playerCollMatch) {
+    const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
+    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    const coll = accounts.collectionOf(playerCollMatch[1]!);
+    if (!coll) return json(404, { error: 'No such player.' });
+    return json(200, { collection: coll });
+  }
+
   // Viewing another player's public profile: /api/profile/:username
   const profileMatch = /^\/api\/profile\/([A-Za-z0-9_-]{1,20})$/.exec(path);
   if (method === 'GET' && profileMatch) {

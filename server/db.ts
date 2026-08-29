@@ -32,6 +32,16 @@ export interface ProfileRow {
   updated_at: string;
 }
 
+export interface TradeRow {
+  id: number;
+  from_account: number;
+  to_account: number;
+  offer: string; // JSON number[]
+  request: string; // JSON number[]
+  status: string;
+  created_at: string;
+}
+
 /** A thin typed wrapper over the connection. Synchronous, which node:sqlite is by design. */
 export class Db {
   readonly raw: DatabaseSync;
@@ -86,6 +96,21 @@ export class Db {
         expires_at  TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
+
+      -- Player-to-player trades. offer/request are JSON arrays of collection row ids; on accept the rows
+      -- change owner. Collection has no competitive weight, so a trade is a completionist exchange, but
+      -- ownership is still validated at accept time so nothing is duplicated or stolen.
+      CREATE TABLE IF NOT EXISTS trades (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_account INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        to_account   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        offer        TEXT NOT NULL,
+        request      TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_trades_to ON trades(to_account, status);
+      CREATE INDEX IF NOT EXISTS idx_trades_from ON trades(from_account, status);
     `);
 
     // Columns added after the first schema shipped: `CREATE TABLE IF NOT EXISTS` will not add them to an

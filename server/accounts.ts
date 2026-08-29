@@ -8,14 +8,14 @@
  */
 
 import { Db } from './db.ts';
-import type { AccountRow, ProfileRow } from './db.ts';
+import type { AccountRow, ProfileRow, TradeRow } from './db.ts';
 import { hashPassword, verifyPassword, newSessionToken, hashToken } from './auth.ts';
 import { DEFAULT_AVATAR, normalizeAvatar } from '../src/profile/avatar.ts';
 import type { Avatar } from '../src/profile/avatar.ts';
 import {
   validateUsername, validatePassword, validateDisplayName, validateBio, validateStatus,
 } from '../src/profile/profile.ts';
-import type { PublicProfile } from '../src/profile/profile.ts';
+import type { PublicProfile, TradeView } from '../src/profile/profile.ts';
 import { updateRating, kFactorFor } from '../src/ladder/rating.ts';
 import { GYM_BY_ID, GYM_LEADERS, highestBadge } from '../src/ladder/badges.ts';
 
@@ -255,6 +255,143 @@ export class Accounts {
     const set = this.db.raw.prepare('UPDATE profiles SET rating = ?, games = ?, updated_at = ? WHERE account_id = ?');
     set.run(newWhite, w.games + 1, stamp, whiteId);
     set.run(newBlack, b.games + 1, stamp, blackId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Trading
+  // -------------------------------------------------------------------------
+
+  /** Collection rows (id → species/nickname) owned by an account, among the given ids. */
+  private ownedRows(accountId: number, ids: number[]): { id: number; species_id: string; nickname: string | null }[] {
+    if (ids.length === 0) return [];
+    const holes = ids.map(() => '?').join(',');
+    return this.db.raw
+      .prepare(`SELECT id, species_id, nickname FROM collection WHERE account_id = ? AND id IN (${holes})`)
+      .all(accountId, ...ids) as { id: number; species_id: string; nickname: string | null }[];
+  }
+
+  /** Species/nickname for a set of collection ids regardless of owner, for displaying a trade. */
+  private rowsById(ids: number[]): { id: number; species: string; nickname: string | null }[] {
+    if (ids.length === 0) return [];
+    const holes = ids.map(() => '?').join(',');
+    const rows = this.db.raw
+      .prepare(`SELECT id, species_id, nickname FROM collection WHERE id IN (${holes})`)
+      .all(...ids) as { id: number; species_id: string; nickname: string | null }[];
+    return rows.map((r) => ({ id: r.id, species: r.species_id, nickname: r.nickname }));
+  }
+
+  private static asIdList(input: unknown): number[] {
+    if (!Array.isArray(input)) return [];
+    return input.filter((x): x is number => Number.isInteger(x));
+  }
+
+  /**
+   * Proposes a trade to another player: the individuals you give, and the ones you want from them.
+   *
+   * Validates that you own everything you offer and that they own everything you request, so an offer is
+   * always honourable when made. Ownership is re-checked at accept time, since the world may move.
+   */
+  proposeTrade(fromId: number, toUsername: unknown, offer: unknown, request: unknown): Result<TradeView> {
+    const offerIds = Accounts.asIdList(offer);
+    const requestIds = Accounts.asIdList(request);
+    if (offerIds.length === 0 && requestIds.length === 0) return fail('A trade needs at least one Pokémon.');
+    if (typeof toUsername !== 'string') return fail('Choose someone to trade with.');
+
+    const to = this.db.raw.prepare('SELECT id FROM accounts WHERE username_lower = ?').get(toUsername.toLowerCase()) as
+      | { id: number }
+      | undefined;
+    if (!to) return fail('No player with that name.');
+    if (to.id === fromId) return fail('You cannot trade with yourself.');
+
+    if (this.ownedRows(fromId, offerIds).length !== offerIds.length) return fail('You no longer own part of that offer.');
+    if (this.ownedRows(to.id, requestIds).length !== requestIds.length) return fail('They no longer own what you asked for.');
+
+    const info = this.db.raw
+      .prepare('INSERT INTO trades (from_account, to_account, offer, request, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(fromId, to.id, JSON.stringify(offerIds), JSON.stringify(requestIds), 'pending', this.now().toISOString());
+    return ok(this.tradeView(Number(info.lastInsertRowid), fromId)!);
+  }
+
+  /** The pending trades an account is party to, incoming and outgoing, with species resolved. */
+  listTrades(accountId: number): TradeView[] {
+    const rows = this.db.raw
+      .prepare('SELECT id FROM trades WHERE (from_account = ? OR to_account = ?) AND status = ? ORDER BY id DESC')
+      .all(accountId, accountId, 'pending') as { id: number }[];
+    return rows.map((r) => this.tradeView(r.id, accountId)).filter((t): t is TradeView => t !== null);
+  }
+
+  private tradeView(tradeId: number, viewerId: number): TradeView | null {
+    const t = this.db.raw.prepare('SELECT * FROM trades WHERE id = ?').get(tradeId) as TradeRow | undefined;
+    if (!t) return null;
+    const fromName = (this.db.raw.prepare('SELECT username FROM accounts WHERE id = ?').get(t.from_account) as { username: string } | undefined)?.username ?? '?';
+    const toName = (this.db.raw.prepare('SELECT username FROM accounts WHERE id = ?').get(t.to_account) as { username: string } | undefined)?.username ?? '?';
+    return {
+      id: t.id,
+      direction: t.from_account === viewerId ? 'outgoing' : 'incoming',
+      from: fromName,
+      to: toName,
+      offer: this.rowsById(Accounts.asIdList(JSON.parse(t.offer))),
+      request: this.rowsById(Accounts.asIdList(JSON.parse(t.request))),
+      createdAt: t.created_at,
+    };
+  }
+
+  /**
+   * Responds to a trade. The recipient may `accept` or `decline`; the proposer may `cancel`.
+   *
+   * On accept, ownership is re-validated and the individuals change hands in a single transaction, so a
+   * trade never half-completes and nothing is duplicated.
+   */
+  respondTrade(accountId: number, tradeId: number, action: 'accept' | 'decline' | 'cancel'): Result<{ ok: true }> {
+    const t = this.db.raw.prepare('SELECT * FROM trades WHERE id = ?').get(tradeId) as TradeRow | undefined;
+    if (!t || t.status !== 'pending') return fail('That trade is no longer open.');
+
+    if (action === 'cancel') {
+      if (t.from_account !== accountId) return fail('Only the proposer can cancel this trade.');
+      this.setTradeStatus(tradeId, 'cancelled');
+      return ok({ ok: true });
+    }
+    if (t.to_account !== accountId) return fail('Only the recipient can respond to this trade.');
+    if (action === 'decline') {
+      this.setTradeStatus(tradeId, 'declined');
+      return ok({ ok: true });
+    }
+
+    // action === 'accept'
+    const offerIds = Accounts.asIdList(JSON.parse(t.offer));
+    const requestIds = Accounts.asIdList(JSON.parse(t.request));
+    if (this.ownedRows(t.from_account, offerIds).length !== offerIds.length ||
+        this.ownedRows(t.to_account, requestIds).length !== requestIds.length) {
+      this.setTradeStatus(tradeId, 'cancelled');
+      return fail('Some of these Pokémon are no longer available. The trade was cancelled.');
+    }
+
+    const reassign = this.db.raw.prepare('UPDATE collection SET account_id = ? WHERE id = ?');
+    const runTxn = this.db.raw.prepare('BEGIN');
+    runTxn.run();
+    try {
+      for (const id of offerIds) reassign.run(t.to_account, id);
+      for (const id of requestIds) reassign.run(t.from_account, id);
+      this.setTradeStatus(tradeId, 'accepted');
+      this.db.raw.prepare('COMMIT').run();
+    } catch (err) {
+      this.db.raw.prepare('ROLLBACK').run();
+      return fail('The trade could not be completed.');
+    }
+    return ok({ ok: true });
+  }
+
+  private setTradeStatus(tradeId: number, status: string): void {
+    this.db.raw.prepare('UPDATE trades SET status = ? WHERE id = ?').run(status, tradeId);
+  }
+
+  /** Another player's collection, for building a trade offer. */
+  collectionOf(username: string): { id: number; species: string; nickname: string | null }[] | null {
+    const acc = this.db.raw.prepare('SELECT id FROM accounts WHERE username_lower = ?').get(username.toLowerCase()) as
+      | { id: number }
+      | undefined;
+    if (!acc) return null;
+    return this.collection(acc.id).map((c) => ({ id: c.id, species: c.species, nickname: c.nickname }));
   }
 
   /** Grants a species to an account — a post-match reward, a starter pick, or a trade in. */

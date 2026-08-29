@@ -34,6 +34,26 @@ export interface PublicProfile {
   readonly badges: readonly string[];
 }
 
+/** One individual in a trade — a collection row, resolved to its species. */
+export interface TradeItem {
+  readonly id: number;
+  readonly species: string;
+  readonly nickname: string | null;
+}
+
+/** A pending trade as shown to a viewer, from their point of view. */
+export interface TradeView {
+  readonly id: number;
+  readonly direction: 'incoming' | 'outgoing';
+  readonly from: string;
+  readonly to: string;
+  /** What the proposer gives. */
+  readonly offer: readonly TradeItem[];
+  /** What the proposer wants from the recipient. */
+  readonly request: readonly TradeItem[];
+  readonly createdAt: string;
+}
+
 /** A validation outcome: the cleaned value, or an error message for the field. */
 export type FieldResult =
   | { readonly ok: true; readonly value: string }

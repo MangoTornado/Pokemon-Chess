@@ -26,6 +26,7 @@ import { LadderScreen, LadderMatch } from './LadderScreen.tsx';
 import { OnlineScreen } from './OnlineScreen.tsx';
 import { SandboxScreen } from './SandboxScreen.tsx';
 import { CollectionScreen } from './CollectionScreen.tsx';
+import { TradeScreen } from './TradeScreen.tsx';
 import { AccountScreen } from './AccountScreen.tsx';
 import { AvatarView } from './AvatarView.tsx';
 import { useSession } from './useSession.ts';
@@ -43,6 +44,7 @@ type Screen =
   | { readonly kind: 'online' }
   | { readonly kind: 'sandbox' }
   | { readonly kind: 'collection' }
+  | { readonly kind: 'trade' }
   | { readonly kind: 'gym'; readonly gymId: string }
   | { readonly kind: 'draft'; readonly ai?: { side: Side; difficulty: Difficulty } }
   | {
@@ -125,6 +127,15 @@ export function App() {
         />
       )}
 
+      {screen.kind === 'trade' && (
+        <TradeScreen
+          dex={dex}
+          signedIn={!!session.profile}
+          onExit={() => setScreen({ kind: 'title' })}
+          onSignIn={() => setScreen({ kind: 'account' })}
+        />
+      )}
+
       {screen.kind === 'online' && (
         <OnlineScreen
           dex={dex}
@@ -152,6 +163,7 @@ export function App() {
           onOnline={() => setScreen({ kind: 'online' })}
           onSandbox={() => setScreen({ kind: 'sandbox' })}
           onCollection={() => setScreen({ kind: 'collection' })}
+          onTrade={() => setScreen({ kind: 'trade' })}
         />
       )}
 
@@ -232,6 +244,7 @@ function TitleScreen({
   onOnline,
   onSandbox,
   onCollection,
+  onTrade,
 }: {
   onQuickPlay: (ai?: { side: Side; difficulty: Difficulty }) => void;
   onDraft: (ai?: { side: Side; difficulty: Difficulty }) => void;
@@ -240,6 +253,7 @@ function TitleScreen({
   onOnline: () => void;
   onSandbox: () => void;
   onCollection: () => void;
+  onTrade: () => void;
 }) {
   const [mode, setMode] = useState<'ai' | 'hotseat'>('ai');
   const [difficultyKey, setDifficultyKey] = useState<(typeof DIFFICULTY_ORDER)[number]>('trainer');
@@ -374,6 +388,9 @@ function TitleScreen({
       <div style={{ display: 'flex', gap: '1.1rem', flexWrap: 'wrap' }}>
         <button type="button" onClick={onCollection} style={linkStyle}>
           Collection & Pokédex
+        </button>
+        <button type="button" onClick={onTrade} style={linkStyle}>
+          Trade
         </button>
         <button type="button" onClick={onSandbox} style={linkStyle}>
           Sandbox — AI-vs-AI batch playtests

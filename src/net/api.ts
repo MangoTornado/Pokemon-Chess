@@ -10,7 +10,7 @@
  * both the client and the API, so the origin is always the same and no base URL is needed.
  */
 
-import type { PublicProfile } from '../profile/profile.ts';
+import type { PublicProfile, TradeView } from '../profile/profile.ts';
 import type { Avatar, TrainerOption } from '../profile/avatar.ts';
 
 export interface ApiError {
@@ -91,6 +91,17 @@ export const api = {
   claimReward: (species: string) => call<{ profile: PublicProfile }>('POST', '/api/collection/claim', { species }),
 
   avatarOptions: () => call<{ trainers: TrainerOption[] }>('GET', '/api/avatar-options'),
+
+  // --- Trading ---
+  trades: () => call<{ trades: TradeView[] }>('GET', '/api/trades'),
+  playerCollection: (username: string) =>
+    call<{ collection: { id: number; species: string; nickname: string | null }[] }>(
+      'GET', `/api/players/${encodeURIComponent(username)}/collection`,
+    ),
+  proposeTrade: (to: string, offer: number[], request: number[]) =>
+    call<{ trade: TradeView }>('POST', '/api/trades', { to, offer, request }),
+  respondTrade: (id: number, action: 'accept' | 'decline' | 'cancel') =>
+    call<{ ok: true }>('POST', `/api/trades/${id}/${action}`),
 
   /** Reports a rated match result; the server updates rating and the badge case and returns the profile. */
   ladderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) =>

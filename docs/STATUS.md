@@ -56,7 +56,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | Client UI for accounts/profile | ✅ | `ui/AccountScreen.tsx`, `ui/AvatarCustomizer.tsx`, `ui/useSession.ts`, `net/api.ts` — sign-up, login, profile fields, and the region-grouped trainer customizer, wired to the backend and routed from `App.tsx`. |
 | Ranked ladder + gym badges | ◑ | **Single-player ladder shipped.** `src/ladder/` + `ui/LadderScreen.tsx` — eight Kanto Gym Leaders fielding mono-type armies (`game/gymArmy.ts`), gyms unlock in canon order, Elo rating with league tiers, and a badge case a losing streak never strips (§17.8). Local-first, syncing to the account when signed in (`POST /api/ladder/result`, server-authoritative). Missing: human matchmaking (needs the multiplayer tract). |
 | Multiplayer (matchmaking, friendly games, live games) | ◑ | **Online play shipped and now server-authoritative.** `server/matches.ts` + `ui/OnlineScreen.tsx` — in-memory rooms, matchmaking (random pairing, **ranked**) and private games by shareable code (friendly). Since a game is a seed + action list, both clients draft the same armies from the shared seed; the server runs the engine (`server/gameValidator.ts`, dex read from disk) to validate every move — illegal or out-of-turn moves are rejected, king capture ends the game, and ranked games settle both ratings (`Accounts.recordHeadToHead`). Board plays via GameBoard controlled mode; client polls. Pending: friends graph/presence, chat, turn timers. |
-| Trading | ○ | not started. |
+| Trading | ✅ | `ui/TradeScreen.tsx` + `trades` table — propose a swap of individuals to another trainer (give and/or request, picked from both collections), who accepts/declines; the proposer can cancel. Ownership is validated on both sides at propose and again at accept, and the swap runs in one transaction so nothing duplicates. Verified end-to-end over HTTP. |
 
 ## Presentation & onboarding
 
@@ -67,7 +67,7 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 | HP bars, forecast preview, refusal affordance | ✅ | on the board. |
 | Effect animations for moves/abilities/items | ○ | depend on effects executing in the Clash first. |
 | **Tutorial** (DIRECTION directive 7) | ✅ | `src/tutor/` + `ui/TutorScreen.tsx` — a lesson is a real game on a hand-built position, not a script (§18.1). Twelve lessons across the two branch tracks (movement, type chart) and the shared spine: the four capture outcomes each caused by the player, the untouchable-piece refusal, the miss and crit reveals, a status lesson, and king capture. `lessons.test.ts` proves every goal reachable and every beat producible against the live engine — a rotted lesson fails CI. |
-| Sandbox / batch simulator | ✅ | `src/sim/batch.ts` + `ui/SandboxScreen.tsx` — runs many seeded AI-vs-AI games and reports win/draw shares, White score and average length; deterministic and rot-proofed (a deeper AI must outscore a shallower one). Already surfacing balance data (e.g. a large first-move edge at equal AI strength). |
+| Sandbox / batch simulator | ✅ | `src/sim/batch.ts` + `ui/SandboxScreen.tsx` — runs many seeded AI-vs-AI games and reports win/draw shares, White score and average length; deterministic and rot-proofed (a deeper AI must outscore a shallower one). Measured over 40 self-play games per tier: White score 0.40 (Rookie) → 0.54 (Trainer) → ~0.68 (Ace) — a moderate, skill-scaling first-move edge in the normal range for a chess-like game, not an imbalance needing a rule change. |
 
 ## Suggested order from here
 
@@ -78,5 +78,5 @@ Legend: **✅ done & tested** · **◑ partial** · **○ not started**
 4. ~~The ladder & Gym Leader matches~~ — **done** (single-player). Eight gyms, Elo + badges, persisted.
 5. ~~Multiplayer~~ — **core + server-authoritative ranked shipped.** Matchmaking (ranked) and private
    games (friendly); the server validates every move and settles ratings. Remaining: friends graph, chat, timers.
-6. ◑ **Sandbox and the collection loop done.** Remaining in this bucket: **trading** (a two-party
-   offer/accept protocol — its own feature), evolution-through-play, and richer effect visuals.
+6. ◑ **Sandbox, collection loop, and trading done.** Remaining: evolution-through-play, and the deeper
+   ISA-op execution (abilities/items/hazards/weather firing in the Clash).
