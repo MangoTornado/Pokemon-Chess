@@ -116,7 +116,8 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn, onFinished }: On
 
       <p style={{ color: 'var(--text-dim)', fontSize: '0.78rem', margin: 0 }}>
         Matchmaking is <strong style={{ color: 'var(--text)' }}>ranked</strong> — every move is validated on
-        the server, and a win moves your rating. Private games (by code) are friendly and unrated.
+        the server, and a win moves your rating. Rating is what unlocks the next Gym Leader, so this is how
+        you earn badges. Private games (by code) are friendly and unrated.
       </p>
     </Panel>
   );

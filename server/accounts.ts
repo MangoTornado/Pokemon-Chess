@@ -577,20 +577,24 @@ export class Accounts {
     }
     if (score !== 0 && score !== 0.5 && score !== 1) return fail('Invalid score.');
 
-    const newRating = updateRating(prof.rating, opponentRating, score, kFactorFor(prof.games));
     const badges = new Set(this.parseBadges(prof.badges));
+    const gymId = typeof input.gymId === 'string' && GYM_BY_ID.has(input.gymId) ? input.gymId : null;
+
+    // A rematch of a gym already beaten is practice, not progress: it must not move the rating, or a player
+    // could farm an easy leader instead of climbing against real opponents.
+    const rematch = gymId !== null && badges.has(gymId);
+    const newRating = rematch ? prof.rating : updateRating(prof.rating, opponentRating, score, kFactorFor(prof.games));
+    const games = rematch ? prof.games : prof.games + 1;
 
     // Beating a gym leader earns its badge (idempotent — a rematch does not duplicate it).
-    if (score === 1 && typeof input.gymId === 'string' && GYM_BY_ID.has(input.gymId)) {
-      badges.add(input.gymId);
-    }
+    if (score === 1 && gymId !== null) badges.add(gymId);
 
     const orderedBadges = GYM_LEADERS.filter((g) => badges.has(g.id)).map((g) => g.id);
     const highest = highestBadge(badges);
 
     this.db.raw
       .prepare('UPDATE profiles SET rating = ?, games = ?, badges = ?, badge = ?, updated_at = ? WHERE account_id = ?')
-      .run(newRating, prof.games + 1, JSON.stringify(orderedBadges), highest?.badge ?? null, this.now().toISOString(), accountId);
+      .run(newRating, games, JSON.stringify(orderedBadges), highest?.badge ?? null, this.now().toISOString(), accountId);
 
     // A win trains the team toward evolution (§17.8).
     if (score === 1) this.grantTeamXp(accountId);

@@ -6,7 +6,7 @@ import { buildGymMatch } from '../game/gymArmy.ts';
 import {
   BASE_RATING, RATING_FLOOR, expectedScore, kFactorFor, tierFor, tierProgress, updateRating,
 } from './rating.ts';
-import { GYM_LEADERS, highestBadge, isGymUnlocked, nextGym } from './badges.ts';
+import { GYM_LEADERS, gymGate, highestBadge, isGymUnlocked, nextGym } from './badges.ts';
 
 const dex = await Dex.load();
 
@@ -66,13 +66,44 @@ describe('badges', () => {
 
   it('gyms unlock strictly in order', () => {
     const earned = new Set<string>();
+    const high = 3000; // rating high enough that only the ordering gate can bind
     expect(nextGym(earned)?.id).toBe('boulder');
-    expect(isGymUnlocked(GYM_LEADERS[0]!, earned)).toBe(true);
-    expect(isGymUnlocked(GYM_LEADERS[1]!, earned)).toBe(false); // Misty locked until Brock falls
+    expect(isGymUnlocked(GYM_LEADERS[0]!, earned, high)).toBe(true);
+    expect(isGymUnlocked(GYM_LEADERS[1]!, earned, high)).toBe(false); // Misty locked until Brock falls
     earned.add('boulder');
     expect(nextGym(earned)?.id).toBe('cascade');
-    expect(isGymUnlocked(GYM_LEADERS[0]!, earned)).toBe(true); // earned gyms allow a rematch
-    expect(isGymUnlocked(GYM_LEADERS[1]!, earned)).toBe(true);
+    expect(isGymUnlocked(GYM_LEADERS[0]!, earned, high)).toBe(true); // earned gyms allow a rematch
+    expect(isGymUnlocked(GYM_LEADERS[1]!, earned, high)).toBe(true);
+  });
+
+  it('a gym also requires the rating to have been climbed', () => {
+    const earned = new Set<string>(['boulder']);
+    const misty = GYM_LEADERS[1]!;
+    // In order, but not yet strong enough.
+    expect(isGymUnlocked(misty, earned, misty.ratingRequired - 1)).toBe(false);
+    expect(isGymUnlocked(misty, earned, misty.ratingRequired)).toBe(true);
+  });
+
+  it('the first gym is reachable at the starting rating, and the last at Champion League', () => {
+    // A new account must be able to earn its first badge without a climb.
+    expect(isGymUnlocked(GYM_LEADERS[0]!, new Set(), BASE_RATING)).toBe(true);
+    // The gates rise monotonically, so each badge is a further rung.
+    for (let i = 1; i < GYM_LEADERS.length; i++) {
+      expect(GYM_LEADERS[i]!.ratingRequired).toBeGreaterThan(GYM_LEADERS[i - 1]!.ratingRequired);
+    }
+    // Giovanni sits at the top league's floor, so the last badge means Champion League.
+    expect(GYM_LEADERS[GYM_LEADERS.length - 1]!.ratingRequired).toBe(tierFor(1950).floor);
+  });
+
+  it('reports how much rating the next badge still needs', () => {
+    const earned = new Set<string>(['boulder']);
+    const misty = GYM_LEADERS[1]!;
+    const gate = gymGate(earned, misty.ratingRequired - 30);
+    expect(gate).toMatchObject({ needed: 30 });
+    expect(gate!.gym.id).toBe('cascade');
+    // No gate once the rating is there, and none once every badge is won.
+    expect(gymGate(earned, misty.ratingRequired)).toBeNull();
+    expect(gymGate(new Set(GYM_LEADERS.map((g) => g.id)), 9999)).toBeNull();
   });
 
   it('highest badge is the greatest-order earned', () => {

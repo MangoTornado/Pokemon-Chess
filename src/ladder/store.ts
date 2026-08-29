@@ -72,11 +72,15 @@ export function useLadder(session: Session): LadderView {
         return;
       }
       setLocal((prev) => {
-        const nextRating = updateRating(prev.rating, opponentRating, score, kFactorFor(prev.games));
         const badges = new Set(prev.badges);
+        // Mirrors the server rule: a rematch of a gym already beaten is practice, so it moves nothing.
+        // Otherwise an easy leader could be farmed instead of climbing against real opponents.
+        const rematch = gymId !== undefined && badges.has(gymId);
+        const nextRating = rematch ? prev.rating : updateRating(prev.rating, opponentRating, score, kFactorFor(prev.games));
+        const games = rematch ? prev.games : prev.games + 1;
         if (score === 1 && gymId && GYM_BY_ID.has(gymId)) badges.add(gymId);
         const ordered = GYM_LEADERS.filter((g) => badges.has(g.id)).map((g) => g.id);
-        const next = { rating: nextRating, games: prev.games + 1, badges: ordered };
+        const next = { rating: nextRating, games, badges: ordered };
         saveLocal(next);
         return next;
       });

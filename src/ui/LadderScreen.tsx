@@ -1,10 +1,11 @@
 /**
  * The Gym Challenge — the single-player ranked ladder (SPEC §17.8–17.9).
  *
- * Progression is the eight Kanto badges, each earned by beating a Gym Leader's mono-type army, which is a
- * type puzzle the player solves by using the chart. A rating rides alongside as the matchmaking number and
- * its league tier; the badge case is the achievement track a losing streak never strips. Gyms open in
- * canon order, so each fight is a fair difficulty step rather than a wall.
+ * The loop, not a corridor: rating comes from beating real players online, and a Gym Leader is the milestone
+ * that marks each rung — reach their required rating, take the badge, go back to climbing. So this screen is
+ * a career view, showing where the player stands, what the next gate costs, and which badges are banked. The
+ * badge case is an achievement track a losing streak never strips; gyms still open in canon order, so each
+ * fight is also a fair difficulty step.
  *
  * Rating and badges are local-first (they work signed out) and sync to the account when signed in — the
  * screen shows which, so a guest knows their climb is only remembered on this device.
@@ -15,9 +16,9 @@ import { useMemo, useRef, useState } from 'react';
 import type { Dex } from '../data/dex.ts';
 import type { PokemonChess } from '../engine/variant.ts';
 import { buildGymMatch } from '../game/gymArmy.ts';
-import { GYM_LEADERS, isGymUnlocked, nextGym } from '../ladder/badges.ts';
+import { GYM_LEADERS, gymGate, isGymUnlocked, nextGym } from '../ladder/badges.ts';
 import type { GymLeader } from '../ladder/badges.ts';
-import { kFactorFor, tierProgress, updateRating } from '../ladder/rating.ts';
+import { BASE_RATING, kFactorFor, tierProgress, updateRating } from '../ladder/rating.ts';
 import type { LadderView } from '../ladder/store.ts';
 import { GameBoard } from './GameBoard.tsx';
 import { RewardChooser } from './CollectionScreen.tsx';
@@ -39,8 +40,9 @@ export function LadderScreen({ ladder, onChallenge, onExit }: LadderScreenProps)
         <div>
           <h2 style={{ margin: 0 }}>Gym Challenge</h2>
           <p style={{ margin: '0.3rem 0 0', color: 'var(--text-dim)', maxWidth: '62ch' }}>
-            Each leader fields a single-type army — one known weakness to exploit. Beat all eight to collect
-            the Kanto badges. Your rating rises and falls with every match.
+            Climb by beating <strong style={{ color: 'var(--text)' }}>real players</strong> online; each Gym
+            Leader accepts your challenge once you reach their rating. Win and the badge is yours — then back
+            to the queue for the next one. Every leader fields a single-type army: one known weakness to exploit.
           </p>
         </div>
         <button type="button" onClick={onExit} style={ghost}>
@@ -90,6 +92,9 @@ export function LadderScreen({ ladder, onChallenge, onExit }: LadderScreenProps)
         </span>
       </div>
 
+      {/* What the next badge costs, so the climb has a visible target. */}
+      <NextGateCard ladder={ladder} onChallenge={onChallenge} />
+
       {/* The badge case */}
       <div style={{ display: 'grid', gap: '0.5rem' }}>
         <h3 style={{ margin: 0, fontSize: '0.95rem', color: 'var(--text-dim)' }}>
@@ -129,7 +134,7 @@ export function LadderScreen({ ladder, onChallenge, onExit }: LadderScreenProps)
       <div style={{ display: 'grid', gap: '0.55rem' }}>
         {GYM_LEADERS.map((g) => {
           const earned = ladder.earned.has(g.id);
-          const unlocked = isGymUnlocked(g, ladder.earned);
+          const unlocked = isGymUnlocked(g, ladder.earned, ladder.rating);
           const isDue = due?.id === g.id;
           return (
             <div
@@ -167,7 +172,13 @@ export function LadderScreen({ ladder, onChallenge, onExit }: LadderScreenProps)
                   {g.leader} <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}>· {g.city}</span>
                 </span>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {earned ? `${g.badge} earned — Mono-${g.type}, rated ${g.rating}` : unlocked ? g.taunt : 'Defeat the previous leader to challenge.'}
+                  {earned
+                    ? `${g.badge} earned — Mono-${g.type}, rated ${g.rating}`
+                    : unlocked
+                      ? g.taunt
+                      : isDue
+                        ? `Reach ${g.ratingRequired} rating to challenge — ${g.ratingRequired - ladder.rating} to go`
+                        : 'Earn the previous badge first.'}
                 </span>
               </div>
               <span style={{ marginLeft: 'auto', flexShrink: 0 }}>
@@ -206,6 +217,80 @@ const ghost = {
   whiteSpace: 'nowrap' as const,
 };
 
+/**
+ * The next rung: either the leader now waiting, or how much rating is still needed to reach them.
+ *
+ * This is the screen's answer to "what do I do next", and it deliberately points back at online play when
+ * the gate is not yet met — that is where rating comes from.
+ */
+function NextGateCard({ ladder, onChallenge }: { ladder: LadderView; onChallenge: (gym: GymLeader) => void }) {
+  const due = nextGym(ladder.earned);
+  if (!due) {
+    return (
+      <div style={{ background: 'var(--bg-raised)', border: '1px solid var(--accent)', borderRadius: 10, padding: '0.85rem 1rem' }}>
+        <strong>All eight badges earned.</strong>{' '}
+        <span style={{ color: 'var(--text-dim)' }}>Keep climbing the ladder — Champion is a leaderboard, not a threshold.</span>
+      </div>
+    );
+  }
+
+  const gate = gymGate(ladder.earned, ladder.rating);
+  const open = gate === null;
+  // Progress from the previous badge's gate to this one, so the bar fills across the rung being climbed.
+  const previous = GYM_LEADERS.find((g) => g.order === due.order - 1);
+  const floor = previous?.ratingRequired ?? BASE_RATING;
+  const span = Math.max(1, due.ratingRequired - floor);
+  const fraction = Math.max(0, Math.min(1, (ladder.rating - floor) / span));
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap',
+        background: 'var(--bg-raised)',
+        border: `1px solid ${open ? TYPE_COLORS[due.type] : 'var(--border)'}`,
+        borderRadius: 10, padding: '0.85rem 1rem',
+      }}
+    >
+      <div style={{ display: 'grid', gap: '0.15rem', minWidth: 190 }}>
+        <span style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+          Next badge
+        </span>
+        <strong>
+          {due.badge} · {due.leader}{' '}
+          <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}>(Mono-{due.type})</span>
+        </strong>
+      </div>
+
+      {open ? (
+        <>
+          <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem', flex: 1, minWidth: 160 }}>
+            {due.leader} will see you now.
+          </span>
+          <button
+            type="button"
+            onClick={() => onChallenge(due)}
+            style={{ ...ghost, background: TYPE_COLORS[due.type], color: textColorOn(due.type), border: 'none', fontWeight: 800 }}
+          >
+            Challenge {due.leader} ▸
+          </button>
+        </>
+      ) : (
+        <div style={{ flex: 1, minWidth: 200, display: 'grid', gap: '0.3rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+            <span style={{ color: 'var(--text-dim)' }}>
+              <strong style={{ color: 'var(--text)' }}>{gate.needed}</strong> more rating — win online matches
+            </span>
+            <span style={{ color: 'var(--text-dim)' }}>{ladder.rating} / {due.ratingRequired}</span>
+          </div>
+          <div style={{ height: 8, borderRadius: 4, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${fraction * 100}%`, background: TYPE_COLORS[due.type], transition: 'width 300ms ease' }} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // A single gym match
 // ---------------------------------------------------------------------------
@@ -224,6 +309,8 @@ interface Outcome {
   readonly ratingBefore: number;
   readonly ratingAfter: number;
   readonly badgeEarned: boolean;
+  /** True when this was a rematch of an already-earned badge, so no rating moved. */
+  readonly rematch: boolean;
 }
 
 /**
@@ -240,16 +327,20 @@ export function LadderMatch({ dex, gym, ladder, onExit, onClaimReward }: LadderM
 
   const difficulty = { name: gym.leader, depth: gym.depth, typeBlindness: gym.typeBlindness };
 
+  // A rematch of a badge already won is practice: unrated, so an easy leader cannot be farmed for rating.
+  const rematch = ladder.earned.has(gym.id);
+
   const handleGameOver = (result: ReturnType<PokemonChess['result']>) => {
     if (recorded.current) return;
     recorded.current = true;
     const score: 0 | 0.5 | 1 =
       result.kind === 'win' ? (result.winner === 'white' ? 1 : 0) : 0.5;
     const ratingBefore = ladder.rating;
-    const ratingAfter = updateRating(ratingBefore, gym.rating, score, kFactorFor(ladder.games));
-    const badgeEarned = score === 1 && !ladder.earned.has(gym.id);
-    setOutcome({ score, ratingBefore, ratingAfter, badgeEarned });
-    void ladder.record({ opponentRating: gym.rating, score, ...(score === 1 ? { gymId: gym.id } : {}) });
+    const ratingAfter = rematch ? ratingBefore : updateRating(ratingBefore, gym.rating, score, kFactorFor(ladder.games));
+    const badgeEarned = score === 1 && !rematch;
+    setOutcome({ score, ratingBefore, ratingAfter, badgeEarned, rematch });
+    // The gym id always goes up, win or lose: the server needs it to recognise a rematch.
+    void ladder.record({ opponentRating: gym.rating, score, gymId: gym.id });
   };
 
   return (
@@ -265,7 +356,9 @@ export function LadderMatch({ dex, gym, ladder, onExit, onClaimReward }: LadderM
             {gym.type}
           </span>
           {gym.leader}
-          <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)', fontWeight: 500 }}>· {gym.badge}</span>
+          <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)', fontWeight: 500 }}>
+            · {gym.badge}{rematch ? ' · practice (unrated)' : ''}
+          </span>
         </h2>
         <button type="button" onClick={onExit} style={ghost}>
           {outcome ? 'Back to Gym Challenge' : 'Forfeit'}
@@ -315,8 +408,14 @@ function OutcomeBanner({ gym, outcome, onExit }: { gym: GymLeader; outcome: Outc
           {won ? (outcome.badgeEarned ? `You earned the ${gym.badge}!` : `You beat ${gym.leader} again!`) : drew ? 'A draw.' : `${gym.leader} won this time.`}
         </strong>
         <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem' }}>
-          Rating {outcome.ratingBefore} → <strong style={{ color: 'var(--text)' }}>{outcome.ratingAfter}</strong>{' '}
-          <span style={{ color: delta >= 0 ? '#3fb950' : '#f85149' }}>({delta >= 0 ? '+' : ''}{delta})</span>
+          {outcome.rematch ? (
+            <>Practice rematch — rating unchanged at <strong style={{ color: 'var(--text)' }}>{outcome.ratingAfter}</strong>.</>
+          ) : (
+            <>
+              Rating {outcome.ratingBefore} → <strong style={{ color: 'var(--text)' }}>{outcome.ratingAfter}</strong>{' '}
+              <span style={{ color: delta >= 0 ? '#3fb950' : '#f85149' }}>({delta >= 0 ? '+' : ''}{delta})</span>
+            </>
+          )}
         </span>
       </div>
       <button
