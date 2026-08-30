@@ -12,12 +12,20 @@
 import { Accounts } from './accounts.ts';
 import { Matches, QUICK_CHAT } from './matches.ts';
 import { TRAINERS } from '../src/profile/avatar.ts';
+import { LOGIN_LIMIT, REGISTER_LIMIT, RateLimiter } from './rateLimit.ts';
 
 export interface ApiRequest {
   readonly method: string;
   readonly path: string;
   readonly body: unknown;
   readonly cookies: Readonly<Record<string, string>>;
+  /**
+   * An opaque key for whoever sent this, used only for rate limiting the endpoints reachable without a session.
+   *
+   * Supplied by the transport (`server.ts` passes the remote address) rather than derived here, so the API stays
+   * a pure function of its argument and the tests can hand it any string they like.
+   */
+  readonly client?: string;
 }
 
 export interface ApiResponse {
@@ -32,8 +40,17 @@ export const SESSION_COOKIE = 'pc_session';
 const json = (status: number, body: unknown, session?: string | null): ApiResponse =>
   session === undefined ? { status, json: body } : { status, json: body, session };
 
-export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: Matches): Promise<ApiResponse> {
+/** Shared across calls so the window survives between requests; the server constructs one and reuses it. */
+const defaultLimiter = new RateLimiter();
+
+export async function handleApi(
+  accounts: Accounts,
+  req: ApiRequest,
+  matches?: Matches,
+  limiter: RateLimiter = defaultLimiter,
+): Promise<ApiResponse> {
   const { method, path } = req;
+  const client = req.client ?? 'unknown';
 
   // ---- Online multiplayer (present only when the server wired a Matches manager) --------------------
   if (matches && path.startsWith('/api/mp/')) {
@@ -91,6 +108,12 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
   }
 
   if (method === 'POST' && path === '/api/register') {
+    // Unbounded account creation was the enabling primitive for both ranked-progression exploits: every one of
+    // those stories begins "make a second account".
+    const gate = limiter.check(`register:${client}`, REGISTER_LIMIT);
+    if (!gate.ok) {
+      return json(429, { error: `Too many new accounts from here. Try again in ${gate.retryAfterSeconds}s.` });
+    }
     const b = asObject(req.body);
     const result = await accounts.register({
       username: b.username, password: b.password, displayName: b.displayName, avatar: b.avatar,
@@ -101,8 +124,18 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
 
   if (method === 'POST' && path === '/api/login') {
     const b = asObject(req.body);
+    // Keyed on the account being attacked as well as the caller. Keying on the caller alone would let one
+    // attacker behind a shared address lock every other user there out of their own account.
+    const target = typeof b.username === 'string' ? b.username.toLowerCase().slice(0, 64) : '';
+    const key = `login:${client}:${target}`;
+    const gate = limiter.check(key, LOGIN_LIMIT);
+    if (!gate.ok) {
+      return json(429, { error: `Too many sign-in attempts. Try again in ${gate.retryAfterSeconds}s.` });
+    }
     const result = await accounts.login(b.username, b.password);
     if (!result.ok) return json(401, result.error);
+    // A real user who fumbled their password a few times should not be left throttled once they get it right.
+    limiter.forgive(key);
     return json(200, { profile: result.value.profile }, result.value.token);
   }
 

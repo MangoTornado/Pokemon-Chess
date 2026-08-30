@@ -150,7 +150,8 @@ describe('private rooms close when their creator leaves', () => {
     const id = created.ok ? created.value.id : '';
     m.joinByCode(code, seat(2));
     m.resign(id, 1);
-    expect(m.state(id, 1).ok && m.state(id, 1).value?.status).toBe('over');
+    const ended = m.state(id, 1);
+    expect(ended.ok && ended.value.status).toBe('over');
 
     const third = m.joinByCode(code, seat(3));
     expect(third.ok).toBe(false);

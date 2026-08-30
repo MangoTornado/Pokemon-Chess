@@ -59,6 +59,10 @@ async function handle(options: ServerOptions, req: IncomingMessage, res: ServerR
         path,
         body,
         cookies: parseCookies(req.headers.cookie),
+        // The rate-limit key. Deliberately the socket's own address and not a forwarded header: behind no proxy
+        // an X-Forwarded-For would be attacker-controlled, which would make the limiter trivially bypassable.
+        // A deploy that does terminate at a proxy must read the trusted hop instead.
+        client: req.socket.remoteAddress ?? 'unknown',
       }, options.matches);
       sendApi(res, response, options.secureCookies ?? false);
       return;
