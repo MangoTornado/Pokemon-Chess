@@ -56,10 +56,10 @@ describe('evolution through play', () => {
   it('a gym win trains the team', async () => {
     const { accounts, id } = await player();
     accounts.grant(id, 'charmander');
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 1, gymId: 'boulder' });
+    accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
     expect(accounts.collection(id).find((c) => c.species === 'charmander')!.xp).toBe(1);
     // A loss does not train.
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 0 });
+    accounts.recordLadderResult(id, { score: 0, gymId: 'boulder' });
     expect(accounts.collection(id).find((c) => c.species === 'charmander')!.xp).toBe(1);
   });
 });
@@ -68,7 +68,7 @@ describe('gym rating rules', () => {
   it('a first gym win moves the rating and awards the badge', async () => {
     const { accounts, id } = await player();
     const before = accounts.publicProfile(id)!;
-    const after = accounts.recordLadderResult(id, { opponentRating: 1300, score: 1, gymId: 'boulder' });
+    const after = accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
     expect(after.ok).toBe(true);
     const p = after.ok ? after.value : before;
     expect(p.rating).toBeGreaterThan(before.rating);
@@ -78,12 +78,12 @@ describe('gym rating rules', () => {
 
   it('a rematch of an earned gym is unrated, so it cannot be farmed', async () => {
     const { accounts, id } = await player();
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 1, gymId: 'boulder' });
+    accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
     const earned = accounts.publicProfile(id)!;
 
     // Beat Brock again, and again — neither the rating nor the game count may move.
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 1, gymId: 'boulder' });
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 1, gymId: 'boulder' });
+    accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
+    accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
     const after = accounts.publicProfile(id)!;
     expect(after.rating).toBe(earned.rating);
     expect(after.games).toBe(earned.games);
@@ -92,9 +92,9 @@ describe('gym rating rules', () => {
 
   it('losing a rematch also costs nothing', async () => {
     const { accounts, id } = await player();
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 1, gymId: 'boulder' });
+    accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
     const earned = accounts.publicProfile(id)!;
-    accounts.recordLadderResult(id, { opponentRating: 1300, score: 0, gymId: 'boulder' });
+    accounts.recordLadderResult(id, { score: 0, gymId: 'boulder' });
     expect(accounts.publicProfile(id)!.rating).toBe(earned.rating);
     // And the badge is certainly not lost.
     expect(accounts.publicProfile(id)!.badges).toContain('boulder');
@@ -103,7 +103,7 @@ describe('gym rating rules', () => {
   it('a PvP result is always rated', async () => {
     const { accounts, id } = await player();
     const before = accounts.publicProfile(id)!;
-    accounts.recordLadderResult(id, { opponentRating: 1500, score: 1 });
+    accounts.recordLadderResult(id, { score: 1, gymId: 'boulder' });
     expect(accounts.publicProfile(id)!.rating).toBeGreaterThan(before.rating);
   });
 });

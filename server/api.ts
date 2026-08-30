@@ -48,6 +48,12 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
       matches.cancelQueue(accountId);
       return json(200, { ok: true });
     }
+    // Abandoning one specific waiting room. Needed alongside queue/cancel because that only knows about the
+    // single matchmaking slot, so a private room's Cancel closed nothing and left its join code live.
+    if (method === 'POST' && path === '/api/mp/abandon') {
+      const id = typeof b.id === 'string' ? b.id : '';
+      return json(200, { ok: matches.abandon(id, accountId) });
+    }
     if (method === 'POST' && path === '/api/mp/create') return mpResult(matches.createPrivate(player));
     if (method === 'POST' && path === '/api/mp/join') {
       const code = typeof b.code === 'string' ? b.code.trim() : '';
@@ -126,9 +132,9 @@ export async function handleApi(accounts: Accounts, req: ApiRequest, matches?: M
     const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
     if (accountId === null) return json(401, { error: 'Not signed in.' });
     const b = asObject(req.body);
-    const result = accounts.recordLadderResult(accountId, {
-      opponentRating: b.opponentRating, score: b.score, gymId: b.gymId,
-    });
+    // Only the gym and the outcome come from the client; the opponent's rating is read from the gym itself and
+    // the unlock gate is enforced server-side.
+    const result = accounts.recordLadderResult(accountId, { score: b.score, gymId: b.gymId });
     if (!result.ok) return json(400, result.error);
     return json(200, { profile: result.value });
   }

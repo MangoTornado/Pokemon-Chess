@@ -16,6 +16,8 @@
  * rooms in one process. Finished and abandoned rooms are pruned so memory does not grow without bound.
  */
 
+import { randomInt } from 'node:crypto';
+
 import type { EngineOps } from './gameValidator.ts';
 import { isPlausibleEncodedMove } from '../src/engine/position.ts';
 
@@ -24,6 +26,21 @@ const ROOM_TTL_MS = 30 * 60 * 1000;
 
 /** How long a player may sit unmatched in the queue before their room is reclaimed. */
 const QUEUE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * How many actions a game must contain before its result is allowed to move ratings.
+ *
+ * Neither a resignation nor a client-reported outcome can be checked against the board — intent is not derivable
+ * from a position — so the only honest guard is to require that a game was actually *played*. Without it, two
+ * accounts could queue into each other and have the loser resign immediately, banking real Elo, team XP and two
+ * encounter rolls for nothing; the ladder would be decided by whoever scripts the fastest loop.
+ *
+ * SPEC open question 14 defers anti-cheat "beyond move validation" — win-trading and collusion — and this does
+ * not pretend to solve those: two determined players can still trade wins by playing ten real moves first. What
+ * it closes is the different and much cheaper hole of banking a result with no game behind it at all. The game
+ * still ends normally below this threshold; it simply ends unrated.
+ */
+const RANKED_MIN_ACTIONS = 10;
 
 /**
  * Each side's total thinking time for the whole game.
@@ -191,6 +208,23 @@ export class Matches {
     return ok(this.view(room, player.accountId));
   }
 
+  /**
+   * Abandons a specific waiting room the caller owns — the private-game counterpart of {@link cancelQueue}.
+   *
+   * `cancelQueue` only ever looks at the single matchmaking `waitingRoomId`, so a private room's Cancel button
+   * closed nothing: the join code stayed live and a friend could walk into a game its creator had already left.
+   * Returns false if the room is not the caller's to abandon, or has already started.
+   */
+  abandon(id: string, accountId: number): boolean {
+    const room = this.rooms.get(id);
+    if (!room || room.status !== 'waiting') return false;
+    if (room.white?.accountId !== accountId) return false;
+    this.rooms.delete(id);
+    if (room.code) this.byCode.delete(room.code);
+    if (this.waitingRoomId === id) this.waitingRoomId = null;
+    return true;
+  }
+
   /** Removes the caller from the queue, closing their empty waiting room. */
   cancelQueue(accountId: number): void {
     if (!this.waitingRoomId) return;
@@ -217,6 +251,10 @@ export class Matches {
     const room = id ? this.rooms.get(id) : undefined;
     if (!room) return fail('No game with that code.', 404);
     if (this.sideOf(room, player.accountId)) return ok(this.view(room, player.accountId)); // reconnect
+    // Load-bearing, not defence in depth: without it a code could be used on a finished room, flipping it back to
+    // 'playing' while `room.ended` stayed true — and since every ending early-returns on that flag, the
+    // resurrected game could then never end again by any route, sitting live until the TTL reaped it.
+    if (room.status !== 'waiting') return fail('That game is no longer open.', 409);
     if (room.black) return fail('That game is already full.', 409);
     room.black = player;
     room.status = 'playing';
@@ -299,6 +337,8 @@ export class Matches {
     if (!room) return fail('No such game.', 404);
     const side = this.sideOf(room, accountId);
     if (!side) return fail('You are not a player in this game.', 403);
+    // A resignation on a finished or unstarted room is not a resignation.
+    if (room.status !== 'playing') return fail('This game is not in progress.', 409);
     this.finalizeEnd(room, side === 'white' ? 'black' : 'white', 'resign');
     return ok(this.view(room, accountId));
   }
@@ -311,8 +351,20 @@ export class Matches {
     const room = this.rooms.get(id);
     if (!room) return fail('No such game.', 404);
     if (!this.sideOf(room, accountId)) return fail('You are not a player in this game.', 403);
-    // With an engine the server already ends games itself; a client report is then only a harmless
-    // confirmation. Without one, this is how a game ends. Either way it settles exactly once.
+
+    // Never take the result from the client when we can work it out ourselves.
+    //
+    // This used to call finalizeEnd unconditionally, behind a comment claiming a client report was "only a
+    // harmless confirmation" once an engine was configured. It was not harmless: finalizeEnd settles ratings, so
+    // any seated player in a ranked room could POST their own side as the winner before making a single move and
+    // bank real Elo, team XP and an encounter roll. Measured at 1500/1500 -> 1476/1524 off one request.
+    //
+    // With an engine, `move()` already ends terminal positions itself (see the king-capture branch there), so
+    // the report genuinely is redundant — which is what makes ignoring it the right fix rather than a lossy one.
+    // The honest client posts its local result once; it now gets the room state back and nothing else happens.
+    if (this.engine) return ok(this.view(room, accountId));
+
+    if (room.status !== 'playing') return fail('This game is not in progress.', 409);
     this.finalizeEnd(room, outcome, outcome === 'draw' ? 'draw' : 'king-capture');
     return ok(this.view(room, accountId));
   }
@@ -327,7 +379,18 @@ export class Matches {
     room.turnStartedAt = null;
     room.lastActivity = this.now();
     if (room.white && room.black && this.onEnd) {
-      this.onEnd({ whiteId: room.white.accountId, blackId: room.black.accountId, winner, ranked: room.matchmaking });
+      // Rate what the server can *prove*. This is the one choke point every ending flows through — resign,
+      // flag-fall, king capture, client report — so the rule belongs here rather than in each caller.
+      //
+      // A flag-fall is proved by the server's own clock and an engine-detected king capture by its own replay, so
+      // both rate unconditionally; that keeps abandonment punished, which a blanket action floor would have let
+      // players dodge by never moving. A resignation cannot be proved at all (intent is not derivable from a
+      // position), and neither can a client-reported ending in relay mode, so those two need a real game behind
+      // them before they touch anybody's rating.
+      const provable = by === 'timeout'
+        || (this.engine !== undefined && (by === 'king-capture' || by === 'draw'));
+      const rated = room.matchmaking && (provable || room.actions.length >= RANKED_MIN_ACTIONS);
+      this.onEnd({ whiteId: room.white.accountId, blackId: room.black.accountId, winner, ranked: rated });
     }
   }
 
@@ -417,14 +480,18 @@ export class Matches {
 
   private freshCode(): string {
     // Unambiguous alphabet (no O/0, I/1) so a code read aloud is unambiguous.
+    //
+    // Drawn from `crypto.randomInt`, not `Math.random`: this code is the *only* credential protecting a private
+    // room, and V8's Math.random is a recoverable xorshift128+ — observing a couple of codes would let someone
+    // predict the next, which is a different and much cheaper attack than guessing one in 32^6.
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     for (let attempt = 0; attempt < 50; attempt++) {
       let code = '';
-      for (let i = 0; i < 6; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+      for (let i = 0; i < 6; i++) code += alphabet[randomInt(alphabet.length)];
       if (!this.byCode.has(code)) return code;
     }
     // Astronomically unlikely fallback.
-    return `R${this.rooms.size}${Math.floor(Math.random() * 1e6)}`.slice(0, 6).toUpperCase();
+    return `R${this.rooms.size}${randomInt(1e6)}`.slice(0, 6).toUpperCase();
   }
 
   /** Drops rooms that are finished-and-idle or stuck waiting, and their code entries. */
@@ -444,5 +511,6 @@ export class Matches {
 
 function defaultId(): string {
   // A short random id; collisions are handled by Map semantics (a duplicate would overwrite, so keep it wide).
-  return `g${Date.now().toString(36)}${Math.floor(Math.random() * 1e9).toString(36)}`;
+  // Unguessable for the same reason as the join code: a room id is enough to read a game's whole state.
+  return `g${Date.now().toString(36)}${randomInt(2 ** 48 - 1).toString(36)}`;
 }

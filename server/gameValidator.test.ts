@@ -20,6 +20,21 @@ function firstLegal(seed: string, priorActions: number[] = []): { encoded: numbe
   return { encoded: move.move.encoded, turn: game.turn };
 }
 
+/** Plays `count` real, engine-validated actions into a room, alternating whoever is actually to move. */
+function playPlies(
+  m: { move: (id: string, accountId: number, ply: number, encoded: number) => unknown; state: (id: string, a: number) => unknown },
+  id: string,
+  seed: string,
+  count: number,
+): void {
+  const actions: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const { encoded, turn } = firstLegal(seed, actions);
+    m.move(id, turn === 'white' ? 1 : 2, actions.length, encoded);
+    actions.push(encoded);
+  }
+}
+
 describe('server-side move validation', () => {
   it('loads the dex from disk (server path) with the full species set', () => {
     expect(dex.species.length).toBeGreaterThan(1000);
@@ -68,15 +83,40 @@ describe('Matches with a validator (server-authoritative)', () => {
     expect(m.move(id, 2, 1, black.encoded).ok).toBe(true);   // Black's legal reply
   });
 
-  it('settles ratings once when a ranked game ends (resign)', () => {
+  it('settles ratings once when a resignation follows a real game', () => {
     const ends: EndInfo[] = [];
-    const { m, id } = ranked((i) => ends.push(i));
+    const { m, id, seed } = ranked((i) => ends.push(i));
+    playPlies(m, id, seed, 10); // a resignation only rates once a game has actually been played
     m.resign(id, 2); // Black resigns → White wins
     expect(ends).toHaveLength(1);
     expect(ends[0]).toMatchObject({ whiteId: 1, blackId: 2, winner: 'white', ranked: true });
     // A second end event does not fire.
     m.reportOutcome(id, 1, 'white');
     expect(ends).toHaveLength(1);
+  });
+
+  it('does not rate a resignation with no game behind it', () => {
+    // The faucet this closes: two accounts queue into each other and the "loser" resigns immediately, banking
+    // real Elo, team XP and two encounter rolls for nothing. The game still ends — it just ends unrated.
+    const ends: EndInfo[] = [];
+    const { m, id } = ranked((i) => ends.push(i));
+    const r = m.resign(id, 2);
+    expect(r.ok && r.value.status).toBe('over');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({ winner: 'white', ranked: false });
+  });
+
+  it('ignores a client-reported outcome entirely when it can compute one', () => {
+    // Before: any seated player could POST their own side as the winner on move one and the server settled
+    // ratings on it (measured 1500/1500 -> 1476/1524). The server ends terminal positions itself, so the report
+    // is redundant rather than merely unverified.
+    const ends: EndInfo[] = [];
+    const { m, id } = ranked((i) => ends.push(i));
+    const r = m.reportOutcome(id, 2, 'black'); // Black claims a win, zero moves played
+    expect(r.ok).toBe(true); // the honest client posts this once; it is accepted and ignored
+    expect(r.ok && r.value.status).toBe('playing'); // the game is untouched
+    expect(r.ok && r.value.outcome).toBeNull();
+    expect(ends).toHaveLength(0); // and no rating moved
   });
 
   it('a private (friendly) game is not ranked', () => {

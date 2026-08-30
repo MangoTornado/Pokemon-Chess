@@ -146,13 +146,21 @@ export const api = {
   respondTrade: (id: number, action: 'accept' | 'decline' | 'cancel') =>
     call<{ ok: true }>('POST', `/api/trades/${id}/${action}`),
 
-  /** Reports a rated match result; the server updates rating and the badge case and returns the profile. */
-  ladderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) =>
+  /**
+   * Reports a gym battle's outcome; the server updates rating and the badge case and returns the profile.
+   *
+   * Deliberately does not carry the opponent's rating. The server reads that from the gym's own definition,
+   * because a client-supplied one was a rating faucet — and sending a number the server ignores would invite
+   * someone to think it mattered.
+   */
+  ladderResult: (input: { score: 0 | 0.5 | 1; gymId: string }) =>
     call<{ profile: PublicProfile }>('POST', '/api/ladder/result', input),
 
   // --- Online multiplayer ---
   mpQueue: () => call<{ game: RoomView }>('POST', '/api/mp/queue'),
   mpCancelQueue: () => call<{ ok: true }>('POST', '/api/mp/queue/cancel'),
+  /** Abandons one specific waiting room — the private-game counterpart of cancelling the queue. */
+  mpAbandon: (id: string) => call<{ ok: boolean }>('POST', '/api/mp/abandon', { id }),
   mpCreate: () => call<{ game: RoomView }>('POST', '/api/mp/create'),
   mpJoin: (code: string) => call<{ game: RoomView }>('POST', '/api/mp/join', { code }),
   mpState: (id: string) => call<{ game: RoomView }>('GET', `/api/mp/game/${encodeURIComponent(id)}`),

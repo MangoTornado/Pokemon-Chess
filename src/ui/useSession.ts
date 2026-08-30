@@ -22,7 +22,7 @@ export interface Session {
   logout: () => Promise<void>;
   updateProfile: (input: { displayName?: string; bio?: string; status?: string; avatar?: Avatar }) => Promise<ApiError | null>;
   /** Reports a rated match result to the server, updating the signed-in profile's rating and badges. */
-  recordLadderResult: (input: { opponentRating: number; score: 0 | 0.5 | 1; gymId?: string }) => Promise<ApiError | null>;
+  recordLadderResult: (input: { score: 0 | 0.5 | 1; gymId: string }) => Promise<ApiError | null>;
   /** Re-fetches the profile from the server (e.g. after a ranked online game changed the rating). */
   refresh: () => Promise<void>;
 }

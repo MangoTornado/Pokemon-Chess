@@ -66,7 +66,14 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn, onFinished }: On
 
   // Waiting for an opponent (matchmaking or a private room whose code we are sharing).
   if (room && room.status === 'waiting') {
-    return <WaitingRoom room={room} onCancel={async () => { await api.mpCancelQueue(); setRoom(null); }} onReady={setRoom} />;
+    // A private room needs its own abandon: cancelling the queue only touches the matchmaking slot, so the
+    // private code stayed joinable and a friend could walk into a game its creator had already left.
+    const cancel = async () => {
+      if (room.code) await api.mpAbandon(room.id);
+      else await api.mpCancelQueue();
+      setRoom(null);
+    };
+    return <WaitingRoom room={room} onCancel={cancel} onReady={setRoom} />;
   }
 
   const act = async (fn: () => Promise<{ ok: true; value: { game: RoomView } } | { ok: false; error: { error: string } }>) => {

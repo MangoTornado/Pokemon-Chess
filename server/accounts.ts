@@ -17,7 +17,7 @@ import {
 } from '../src/profile/profile.ts';
 import type { FriendView, ListingView, PublicProfile, TradeView, WonderResult } from '../src/profile/profile.ts';
 import { updateRating, kFactorFor } from '../src/ladder/rating.ts';
-import { GYM_BY_ID, GYM_LEADERS, highestBadge } from '../src/ladder/badges.ts';
+import { GYM_BY_ID, GYM_LEADERS, highestBadge, isGymUnlocked } from '../src/ladder/badges.ts';
 import type { Encounter, MatchOutcome } from '../src/game/encounters.ts';
 
 /** Sessions live a fortnight; a returning player is not re-challenged constantly, but a token expires. */
@@ -886,29 +886,47 @@ export class Accounts {
 
 
   /**
-   * Records a rated match result and updates the account's rating, games count, and badge case.
+   * Records the result of a **gym battle** and updates the account's rating, games count, and badge case.
    *
-   * The rating maths lives server-side so the number is authoritative — the client reports only the
-   * matchup and outcome, never the delta. A gym badge is awarded only on a win against that gym, and the
-   * visible `badge` chip is always kept as the highest badge earned (SPEC §17.8: a losing streak never
-   * strips an earned badge).
+   * The rating maths lives server-side so the number is authoritative. That used to be claimed of this whole
+   * method — "the client reports only the matchup and outcome, never the delta" — but computing the delta from
+   * numbers the client chose is not authority: `opponentRating` was taken straight from the request body and
+   * merely range-checked to [100, 4000], so posting `{score: 1, opponentRating: 4000}` in a loop inflated rating,
+   * team XP and encounter rolls at will, and posting each `gymId` once collected all eight badges regardless of
+   * canon order or the rating gates.
+   *
+   * Now the only thing taken from the caller is *which gym* and *how it went*. The opponent's rating comes from
+   * that gym's own definition, and `isGymUnlocked` — the same gate the UI shows — is enforced here, so a locked
+   * gym is refused rather than quietly awarded.
+   *
+   * What this still does not do is prove the battle happened: a gym game is played entirely client-side, so a
+   * fabricated win against the *currently unlocked* gym is still possible. The badge for it can only be claimed
+   * once (a rematch moves nothing), which bounds the damage to the eight wins a legitimate player would also get,
+   * but closing it properly means serving gym battles from a server-created challenge and validating the action
+   * list the way `Matches` does for PvP. Tracked as a known gap rather than papered over.
+   *
+   * A gym badge is awarded only on a win against that gym, and the visible `badge` chip is always kept as the
+   * highest badge earned (SPEC §17.8: a losing streak never strips an earned badge).
    */
   recordLadderResult(
     accountId: number,
-    input: { opponentRating: unknown; score: unknown; gymId?: unknown },
+    input: { score: unknown; gymId?: unknown },
   ): Result<PublicProfile> {
     const prof = this.db.raw.prepare('SELECT * FROM profiles WHERE account_id = ?').get(accountId) as ProfileRow | undefined;
     if (!prof) return fail('No such profile.');
 
-    const opponentRating = Number(input.opponentRating);
     const score = input.score;
-    if (!Number.isFinite(opponentRating) || opponentRating < 100 || opponentRating > 4000) {
-      return fail('Invalid opponent rating.');
-    }
     if (score !== 0 && score !== 0.5 && score !== 1) return fail('Invalid score.');
 
     const badges = new Set(this.parseBadges(prof.badges));
     const gymId = typeof input.gymId === 'string' && GYM_BY_ID.has(input.gymId) ? input.gymId : null;
+    // This endpoint records gym battles only. A PvP result arrives through `recordHeadToHead`, driven by the
+    // server's own match state, so an unnamed opponent here has no legitimate source.
+    if (gymId === null) return fail('Unknown gym.');
+    const gym = GYM_BY_ID.get(gymId)!;
+    if (!isGymUnlocked(gym, badges, prof.rating)) return fail('That gym will not accept your challenge yet.');
+    // Read from the gym, never from the request: this is the number that used to be the rating faucet.
+    const opponentRating = gym.rating;
 
     // A rematch of a gym already beaten is practice, not progress: it must not move the rating, or a player
     // could farm an easy leader instead of climbing against real opponents.

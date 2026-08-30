@@ -129,11 +129,17 @@ describe('moves', () => {
     expect(m.move(id, bob.accountId, 0, 1).ok).toBe(false);
   });
 
-  it('reportOutcome is idempotent — first report wins', () => {
+  it('reportOutcome is idempotent — first report wins, and the second is refused', () => {
+    // Relay mode (no engine), where a client report is the only way a game can end. The first one decides it;
+    // a later contradicting report is now rejected outright rather than quietly ignored, so a loser cannot
+    // overwrite the record and nobody has to rely on finalizeEnd's once-only guard for correctness.
     const { m, id } = playing();
-    m.reportOutcome(id, alice.accountId, 'white');
+    expect(m.reportOutcome(id, alice.accountId, 'white').ok).toBe(true);
     const second = m.reportOutcome(id, bob.accountId, 'black');
-    expect(second.ok && second.value.outcome).toBe('white');
+    expect(second.ok).toBe(false);
+    expect(!second.ok && second.status).toBe(409);
+    const state = m.state(id, alice.accountId);
+    expect(state.ok && state.value.outcome).toBe('white');
   });
 });
 

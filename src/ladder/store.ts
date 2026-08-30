@@ -68,7 +68,9 @@ export function useLadder(session: Session): LadderView {
   const record = useCallback<LadderView['record']>(
     async ({ opponentRating, score, gymId }) => {
       if (session.profile) {
-        await session.recordLadderResult({ opponentRating, score, ...(gymId ? { gymId } : {}) });
+        // `opponentRating` stays local: it is only needed for the offline optimistic update below, and the
+        // server derives its own from the gym so the two cannot disagree.
+        if (gymId) await session.recordLadderResult({ score, gymId });
         return;
       }
       setLocal((prev) => {
