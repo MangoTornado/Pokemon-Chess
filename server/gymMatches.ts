@@ -55,6 +55,15 @@ interface GymBattle {
   outcome: Side | 'draw' | null;
   /** Guards the one-time settlement, so a result reaches the ladder exactly once. */
   settled: boolean;
+  /**
+   * True while a move is being played out, which takes seconds at the deeper gyms.
+   *
+   * The ply check alone does not survive the `await` on the leader's search: two same-ply requests both saw the
+   * unchanged action list, both passed, both ran a search, and the later completion overwrote the earlier — so a
+   * double-click silently *lost* the player's first move and billed the server twice for it. Measured: moves 111
+   * and 222 submitted together produced `[222, 999]`, with 111 gone.
+   */
+  inFlight: boolean;
   /** Whether the ladder actually accepted the result — surfaced so a refusal is never silent. */
   recorded: boolean;
   /**
@@ -214,6 +223,7 @@ export class GymMatches {
       status: 'playing',
       outcome: null,
       settled: false,
+      inFlight: false,
       recorded: false,
       turn: opening.value.turn,
       lastActivity: this.now(),
@@ -245,6 +255,8 @@ export class GymMatches {
     const battle = owned.value;
 
     if (this.expireIfOverdue(battle)) return fail('This gym battle is over.', 409);
+    // Refused rather than queued: a second move for the same position is a double-submit, not a new intention.
+    if (battle.inFlight) return fail('Your last move is still being answered.', 409);
     if (!Number.isInteger(ply) || ply !== battle.actions.length) {
       return fail('Out-of-date move; refresh and retry.', 409);
     }
@@ -254,7 +266,15 @@ export class GymMatches {
       return ok(this.view(battle));
     }
 
-    const stepped = await this.engine.step(battle.gymId, battle.seed, battle.actions, encoded as number);
+    // Held across the await, so nothing else can act on this battle until the leader has answered. Released in
+    // `finally` because a search that throws — a saturated pool, a dead worker — must not wedge the battle shut.
+    battle.inFlight = true;
+    let stepped;
+    try {
+      stepped = await this.engine.step(battle.gymId, battle.seed, battle.actions, encoded as number);
+    } finally {
+      battle.inFlight = false;
+    }
     if (!stepped.ok) return fail(stepped.error, stepped.status);
 
     battle.actions = [...stepped.value.actions];
@@ -277,6 +297,9 @@ export class GymMatches {
     if (!owned.ok) return owned;
     const battle = owned.value;
     if (this.expireIfOverdue(battle)) return ok(this.view(battle));
+    // Otherwise the same window reopens the free exit: a forfeit landing mid-search would see the pre-move action
+    // list, read it as "nothing played", and discard the battle — releasing the draw for another look.
+    if (battle.inFlight) return fail('Your last move is still being answered.', 409);
     if (battle.actions.length === 0) {
       this.discard(battle);
       return ok({ ...this.view(battle), status: 'over', outcome: null });

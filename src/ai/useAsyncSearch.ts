@@ -46,6 +46,21 @@ export function useAsyncSearch(_dex: Dex): AsyncSearch {
           resolve(event.data);
         }
       };
+      // Construction succeeding is not the same as the worker *working*: it can still fail while loading its own
+      // module, or die later. No `message` then arrives, so every pending search stayed unresolved forever and the
+      // board sat on the AI's turn with no way forward. Fail the outstanding requests and drop back to the main
+      // thread, which computes the identical move — the worker is a performance choice, never a correctness one.
+      const abandon = () => {
+        workerRef.current = null;
+        // Resolved *with an error*, not merely with a null move: `search` below already falls back to the main
+        // thread when it sees one, so this routes a dead worker into the path that still produces the right move.
+        for (const [id, resolve] of pending.current) {
+          resolve({ id, encoded: null, nodes: 0, error: 'the search worker stopped' });
+        }
+        pending.current.clear();
+      };
+      worker.onerror = abandon;
+      worker.onmessageerror = abandon;
       workerRef.current = worker;
     } catch {
       workerRef.current = null;

@@ -17,6 +17,8 @@ export interface ApiError {
   readonly error: string;
   /** The field the error belongs to, when the server tagged one. */
   readonly field?: string;
+  /** The HTTP status, when the request reached the server at all. */
+  readonly status?: number;
 }
 
 export type ApiResult<T> = { ok: true; value: T } | { ok: false; error: ApiError };
@@ -40,6 +42,9 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<Ap
       ok: false,
       error: {
         error: typeof json.error === 'string' ? json.error : `Request failed (${res.status}).`,
+        // Carried through so a caller can act on *which* failure it was — a vanished room (404) is a different
+        // situation from a busy server (503) or a rejected move (409), and a message string cannot be branched on.
+        status: res.status,
         ...(typeof json.field === 'string' ? { field: json.field } : {}),
       },
     };

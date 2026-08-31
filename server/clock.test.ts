@@ -238,16 +238,44 @@ describe('the reconnect deadline', () => {
     expect(first.ok && first.value.outcome).toBeNull();
   });
 
-  it('still awards it once one side has actually come back and stayed', () => {
-    // Returning once is not enough to win — but being present while the other side keeps missing the deadline is.
+  it('gives the absent player a fresh window after an outage, then awards it', () => {
+    // A detected outage forgives absence for a full deadline's worth, so the player who was also cut off gets the
+    // same chance to return that a lone disconnection gives. Only once that has run out does the game go.
     const h = harness();
     const id = paired(h);
     h.advance(5 * 60 * 1000);
-    h.m.state(id, white.accountId); // White returns; nothing resolves yet
+    h.m.state(id, white.accountId); // White returns; an outage window opens
     h.advance(30_000);
-    const later = h.m.state(id, white.accountId); // White is present, Black is not
+    const early = h.m.state(id, white.accountId);
+    expect(early.ok && early.value.outcome, 'still inside the forgiveness window').toBeNull();
+
+    h.advance(2 * 60 * 1000); // past it, and Black never came back
+    const later = h.m.state(id, white.accountId);
     expect(later.ok && later.value.outcome).toBe('white');
     expect(later.ok && later.value.endedBy).toBe('abandoned');
+  });
+
+  it('forgives both players when they come back moments apart', () => {
+    // The exact sequence that used to cost the second player the game: both out, one returns, the other a second
+    // later, and the later arrival was the only one overdue.
+    const h = harness();
+    const id = paired(h);
+    h.advance(5 * 60 * 1000);
+    h.m.state(id, white.accountId);
+    h.advance(1000);
+    const black2 = h.m.state(id, black.accountId);
+    expect(black2.ok && black2.value.status).toBe('playing');
+    expect(black2.ok && black2.value.outcome).toBeNull();
+
+    // Both present again, so play continues. Kept short deliberately: White is on the move throughout, and the
+    // 8-minute turn clock would otherwise flag them and end the game on time rather than by anything tested here.
+    for (let i = 0; i < 3; i++) {
+      h.advance(30_000);
+      h.m.state(id, white.accountId);
+      h.m.state(id, black.accountId);
+    }
+    const still = h.m.state(id, black.accountId);
+    expect(still.ok && still.value.status).toBe('playing');
   });
 
   it('leaves a game where both players vanished for the TTL to reap', () => {

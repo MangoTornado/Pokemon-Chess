@@ -148,9 +148,19 @@ export class AiPool {
         this.drain();
       }
     };
-    worker.on('error', die);
+    // Once per worker, not once per event. An uncaught exception in a worker emits `error` and *then* a nonzero
+    // `exit`, so both handlers fired: the first installed a replacement and could hand it queued work, and the
+    // second then rejected that replacement's request and installed another — orphaning the first and losing the
+    // job it was running.
+    let buried = false;
+    const buryOnce = (reason: string) => {
+      if (buried) return;
+      buried = true;
+      die(reason);
+    };
+    worker.on('error', buryOnce);
     worker.on('exit', (code) => {
-      if (code !== 0 && !this.closed) die(`exited with code ${code}`);
+      if (code !== 0 && !this.closed) buryOnce(`exited with code ${code}`);
     });
     return worker;
   }

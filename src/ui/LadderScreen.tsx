@@ -421,8 +421,15 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
               if (!confirm(message)) return;
               // `ladder.record` refreshes the profile from the server for a signed-in player; without it the
               // whole app keeps showing the pre-forfeit rating until something else happens to refetch.
+              // Only on success. Refreshing and leaving regardless told the player they had forfeited while the
+              // battle was still live on the server — the same "the UI says it happened" failure worth avoiding
+              // everywhere else in this screen.
               void api.gymForfeit(battle.id).then((r) => {
-                if (r.ok) setBattle(r.value.battle);
+                if (!r.ok) {
+                  setServerError(`Could not forfeit: ${r.error.error}`);
+                  return;
+                }
+                setBattle(r.value.battle);
                 void ladder.record({ opponentRating: gym.rating, score: 0, gymId: gym.id });
                 onExit();
               });

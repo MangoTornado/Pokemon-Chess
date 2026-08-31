@@ -240,6 +240,73 @@ describe('recording the result', () => {
   });
 });
 
+describe('one move at a time', () => {
+  /** A step that takes a tick, the way a real depth-4 search takes seconds. */
+  const slowEngine = (): GymEngine => ({
+    opening: () => ({ ok: true, value: { actions: [], ended: false, winner: null, turn: 'white' } }),
+    step: async (_g, _s, actions, encoded) => {
+      await new Promise((r) => setTimeout(r, 20));
+      return { ok: true, value: { actions: [...actions, encoded, 999], ended: false, winner: null, turn: 'white' } };
+    },
+  });
+
+  it('refuses a second move while the leader is still answering the first', async () => {
+    // Measured before the fix: moves 111 and 222 submitted together both returned ok, both ran a search, and the
+    // action list ended up [222, 999] — the player's first move silently GONE and the server billed twice for it.
+    // The ply check could not catch it because `actions` does not change until after the await.
+    const h = harness(slowEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+
+    const [first, second] = await Promise.all([
+      h.gyms.move(1, id, 0, 111),
+      h.gyms.move(1, id, 0, 222),
+    ]);
+    const accepted = [first, second].filter((r) => r.ok);
+    expect(accepted).toHaveLength(1);
+
+    const after = h.gyms.state(1, id);
+    expect(after.ok && after.value.actions).toEqual([111, 999]);
+  });
+
+  it('accepts the next move once the first has been answered', async () => {
+    const h = harness(slowEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    expect((await h.gyms.move(1, id, 0, 111)).ok).toBe(true);
+    expect((await h.gyms.move(1, id, 2, 222)).ok).toBe(true);
+  });
+
+  it('does not let a forfeit slip through the search window and free the draw', async () => {
+    // The same window reopened seed shopping: a forfeit landing mid-search saw the pre-move action list, read it as
+    // "nothing played", and discarded the battle — handing back a fresh draw.
+    const h = harness(slowEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    const moving = h.gyms.move(1, id, 0, 111);
+    const sneaky = h.gyms.forfeit(1, id);
+    expect(sneaky.ok).toBe(false);
+    await moving;
+    expect(h.recorded).toEqual([]);
+  });
+
+  it('releases the battle when a search fails, rather than wedging it shut', async () => {
+    // A saturated pool or a dead worker throws. If the in-flight flag survived that, the battle would be unplayable
+    // for the rest of its life.
+    const angry: GymEngine = {
+      opening: () => ({ ok: true, value: { actions: [], ended: false, winner: null, turn: 'white' } }),
+      step: async () => { throw new Error('pool is busy'); },
+    };
+    const h = harness(angry);
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    await expect(h.gyms.move(1, id, 0, 111)).rejects.toThrow('pool is busy');
+    // Still playable: the next move is refused for its ply, not for a stuck flag.
+    const retry = await h.gyms.move(1, id, 0, 111).catch((e: Error) => e.message);
+    expect(retry).toBe('pool is busy');
+  });
+});
+
 describe('the draw cannot be shopped for', () => {
   /**
    * The attack this whole module exists to stop, which a free forfeit quietly reopened.

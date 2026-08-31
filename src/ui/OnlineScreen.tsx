@@ -148,15 +148,34 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn, onFinished }: On
 }
 
 function WaitingRoom({ room, onCancel, onReady }: { room: RoomView; onCancel: () => void; onReady: (r: RoomView) => void }) {
-  // Poll until an opponent joins.
+  const [gone, setGone] = useState(false);
+
+  // Poll until an opponent joins — or until the room is not there any more.
   useEffect(() => {
     let live = true;
     const timer = setInterval(async () => {
       const r = await api.mpState(room.id);
-      if (live && r.ok && r.value.game.status !== 'waiting') onReady(r.value.game);
+      if (!live) return;
+      if (r.ok) {
+        if (r.value.game.status !== 'waiting') onReady(r.value.game);
+        return;
+      }
+      // A waiting room is reclaimed after its queue TTL, and the next poll then 404s. Ignoring every failure meant
+      // spinning against a deleted room for as long as the tab stayed open, with nothing on screen changing.
+      if (r.error.status === 404) setGone(true);
     }, POLL_MS);
     return () => { live = false; clearInterval(timer); };
   }, [room.id, onReady]);
+
+  if (gone) {
+    return (
+      <Panel title="No longer waiting" onExit={onCancel} exitLabel="Back">
+        <p style={{ color: 'var(--text-dim)' }}>
+          That queue slot expired before anyone joined. Queue up again when you are ready.
+        </p>
+      </Panel>
+    );
+  }
 
   return (
     <Panel title="Waiting for an opponent" onExit={onCancel} exitLabel="Cancel">

@@ -146,6 +146,16 @@ interface Room {
   lastChatAt: { white: number; black: number };
   /** Last time each side was in contact, for the reconnect deadline. Null until they first arrive. */
   lastSeenAt: { white: number | null; black: number | null };
+  /**
+   * When a detected shared outage stops excusing absence, or null when there is no outage in progress.
+   *
+   * Judging presence from a pre-call snapshot removed the *simultaneous* race but not the sequential one: with both
+   * sides overdue, the first to reconnect became "present", and the second — arriving a second later — was then the
+   * only one overdue and lost the game. Measured at exactly that: White returns, nothing resolves; Black returns
+   * 1 s later and is forfeited. So a detected outage opens a window in which nobody can be forfeited, giving both
+   * players the same chance to come back that a single disconnection gives one.
+   */
+  outageUntil: number | null;
   /** Thinking time left per side, in ms. */
   clock: { white: number; black: number };
   /** When the side to move started thinking, for deducting elapsed time. Null while waiting to start. */
@@ -272,8 +282,13 @@ export class Matches {
   /** Creates a private room and returns its join code. The creator is White. */
   createPrivate(player: RoomPlayer): MatchResult<RoomView> {
     this.prune();
+    // Any live room, not only one already playing. Checking `playing` alone let repeated /create calls while a
+    // room was still *waiting* mint unbounded rooms and join codes, each of which could later seat the creator in a
+    // simultaneous game — the very thing the reconnect fix needs not to happen.
     const busy = this.liveRoomFor(player.accountId);
-    if (busy && busy.status === 'playing') {
+    if (busy) {
+      // A waiting room of their own is handed back rather than refused: asking twice is not an error.
+      if (busy.status === 'waiting' && busy.code) return ok(this.view(busy, player.accountId));
       return fail('You are already in a game. Finish or resign it first.', 409);
     }
     let code = this.freshCode();
@@ -385,11 +400,21 @@ export class Matches {
     };
     const whiteOut = overdue('white');
     const blackOut = overdue('black');
-    if (whiteOut === blackOut) {
-      // Neither is overdue, or both are. Both means nobody kept the deadline, so nobody takes the game on it —
-      // the TTL reclaims the room instead of awarding it to the less absent player.
+
+    if (whiteOut && blackOut) {
+      // Nobody kept the deadline. Open a recovery window rather than awarding the game, and do not extend one that
+      // is already open, or a stream of polls would keep the game unresolvable forever.
+      if (room.outageUntil === null) room.outageUntil = t + ABANDON_MS;
       return;
     }
+    if (!whiteOut && !blackOut) {
+      // Both present: whatever outage there was is over.
+      room.outageUntil = null;
+      return;
+    }
+    // Exactly one is overdue — but if a shared outage is still being forgiven, they are not yet on the hook for it.
+    if (room.outageUntil !== null && t < room.outageUntil) return;
+    room.outageUntil = null;
     this.finalizeEnd(room, whiteOut ? 'black' : 'white', 'abandoned');
   }
 
@@ -588,6 +613,7 @@ export class Matches {
       // first message of the game.
       lastChatAt: { white: -Infinity, black: -Infinity },
       lastSeenAt: { white: this.now(), black: null },
+      outageUntil: null,
       clock: { white: CLOCK_MS, black: CLOCK_MS },
       // The clock starts when the second player arrives, not while waiting for one.
       turnStartedAt: null,

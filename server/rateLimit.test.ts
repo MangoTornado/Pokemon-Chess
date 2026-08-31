@@ -13,7 +13,7 @@ import { Accounts } from './accounts.ts';
 import { Db } from './db.ts';
 import { handleApi, SESSION_COOKIE } from './api.ts';
 import type { ApiRequest } from './api.ts';
-import { LOGIN_LIMIT, REGISTER_LIMIT, RateLimiter } from './rateLimit.ts';
+import { LOGIN_CALLER_LIMIT, LOGIN_LIMIT, REGISTER_LIMIT, RateLimiter } from './rateLimit.ts';
 
 /** A hand-cranked clock, so nothing sleeps. */
 function clocked() {
@@ -152,5 +152,47 @@ describe('account creation', () => {
     expect(other.status).toBe(201);
     expect(other.session).toBeTruthy();
     expect(SESSION_COOKIE).toBeTruthy();
+  });
+});
+
+describe('the caller-wide sign-in cap', () => {
+  it('cannot be dodged by naming a different username every time', async () => {
+    // The bypass: each username is its own bucket, so varying it gave unlimited attempts — and every unknown name
+    // still paid for the deliberately slow decoy hash and still added a map entry. Unbounded CPU and memory from
+    // one client.
+    const { limiter } = clocked();
+    const accounts = new Accounts(new Db(':memory:'));
+    let refusals = 0;
+    for (let i = 0; i < LOGIN_CALLER_LIMIT.max + 5; i++) {
+      const r = await handleApi(
+        accounts, req('/api/login', { username: `victim${i}`, password: 'wrong-password-here' }), undefined, limiter,
+      );
+      if (r.status === 429) refusals += 1;
+    }
+    expect(refusals).toBeGreaterThan(0);
+  });
+
+  it('still lets a different caller sign in while one is throttled', async () => {
+    const { limiter } = clocked();
+    const accounts = new Accounts(new Db(':memory:'));
+    await handleApi(accounts, req('/api/register', { username: 'realuser', password: 'a-long-enough-password' }),
+      undefined, new RateLimiter());
+
+    for (let i = 0; i < LOGIN_CALLER_LIMIT.max + 2; i++) {
+      await handleApi(accounts, req('/api/login', { username: `x${i}`, password: 'nope-nope-nope' }, '10.0.0.1'),
+        undefined, limiter);
+    }
+    const elsewhere = await handleApi(
+      accounts, req('/api/login', { username: 'realuser', password: 'a-long-enough-password' }, '10.0.0.9'),
+      undefined, limiter,
+    );
+    expect(elsewhere.status).toBe(200);
+  });
+
+  it('keeps the tracked-key map bounded under a flood of invented usernames', () => {
+    const { limiter } = clocked();
+    for (let i = 0; i < 20_000; i++) limiter.check(`login:1.2.3.4:user${i}`, LOGIN_LIMIT);
+    // A sweep only drops expired windows, so without a hard cap this map grew as fast as an attacker could type.
+    expect(limiter.size()).toBeLessThan(10_000);
   });
 });

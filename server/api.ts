@@ -12,8 +12,9 @@
 import { Accounts } from './accounts.ts';
 import { Matches, QUICK_CHAT } from './matches.ts';
 import { TRAINERS } from '../src/profile/avatar.ts';
-import { LOGIN_LIMIT, REGISTER_LIMIT, RateLimiter } from './rateLimit.ts';
+import { LOGIN_CALLER_LIMIT, LOGIN_LIMIT, REGISTER_LIMIT, RateLimiter } from './rateLimit.ts';
 import type { GymMatches } from './gymMatches.ts';
+import { PoolBusyError } from './aiPool.ts';
 
 export interface ApiRequest {
   readonly method: string;
@@ -132,6 +133,13 @@ export async function handleApi(
     // attacker behind a shared address lock every other user there out of their own account.
     const target = typeof b.username === 'string' ? b.username.toLowerCase().slice(0, 64) : '';
     const key = `login:${client}:${target}`;
+    // Two limits, and both are needed. Per-username stops one attacker locking a *specific* account out of its own
+    // sign-in; per-caller stops them dodging that by naming a different username every request, which otherwise
+    // bought unlimited attempts — each one paying for a deliberately slow decoy hash and a new map entry.
+    const volume = limiter.check(`login:${client}`, LOGIN_CALLER_LIMIT);
+    if (!volume.ok) {
+      return json(429, { error: `Too many sign-in attempts. Try again in ${volume.retryAfterSeconds}s.` });
+    }
     const gate = limiter.check(key, LOGIN_LIMIT);
     if (!gate.ok) {
       return json(429, { error: `Too many sign-in attempts. Try again in ${gate.retryAfterSeconds}s.` });
@@ -182,7 +190,18 @@ export async function handleApi(
     if (method === 'POST' && path === '/api/gym/move') {
       const id = typeof b.id === 'string' ? b.id : '';
       // Awaited: the leader's reply runs on a worker thread, so this is the one route that genuinely waits.
-      return gymResult(await gyms.move(accountId, id, b.ply, b.encoded));
+      //
+      // A saturated pool is an expected condition the pool signals deliberately, not a bug — so it becomes a
+      // retryable 503 rather than falling through to the generic handler as an opaque 500. The battle is untouched,
+      // so retrying the same move is safe.
+      try {
+        return gymResult(await gyms.move(accountId, id, b.ply, b.encoded));
+      } catch (cause) {
+        if (cause instanceof PoolBusyError) {
+          return json(503, { error: 'The Gym is busy right now. Try that move again in a moment.' });
+        }
+        throw cause;
+      }
     }
     // Forfeiting is a decision and costs the battle; leaving is not, and `/api/gym/active` finds it again.
     if (method === 'POST' && path === '/api/gym/forfeit') {

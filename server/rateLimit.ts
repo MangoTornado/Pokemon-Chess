@@ -29,8 +29,26 @@ export interface Limit {
  */
 export const LOGIN_LIMIT: Limit = { max: 10, windowMs: 60_000 };
 
+/**
+ * Sign-in attempts from one caller, whatever username they name.
+ *
+ * The per-username limit alone was bypassable by varying the username: each new name is a new bucket, so an
+ * attacker got unlimited attempts — and every unknown username still runs the deliberately slow decoy scrypt and
+ * still adds a map entry. That is unbounded CPU and unbounded memory from one client. This caps the *volume*
+ * while the per-username limit keeps one attacker from locking a specific account out.
+ *
+ * Set well above a person fumbling their own password and well below a guessing run.
+ */
+export const LOGIN_CALLER_LIMIT: Limit = { max: 30, windowMs: 60_000 };
+
 /** New accounts. Enough for a family sharing an address, not enough to farm a ladder. */
 export const REGISTER_LIMIT: Limit = { max: 5, windowMs: 60 * 60_000 };
+
+/** Sweep once the map is worth walking. */
+const SWEEP_AT = 256;
+
+/** A hard ceiling on tracked keys, so one caller inventing usernames cannot grow the map without bound. */
+const MAX_WINDOWS = 4096;
 
 interface Window {
   count: number;
@@ -83,10 +101,16 @@ export class RateLimiter {
    * a key does not record which limit created it.
    */
   private sweep(t: number): void {
-    const longest = Math.max(LOGIN_LIMIT.windowMs, REGISTER_LIMIT.windowMs);
-    if (this.windows.size < 512) return; // cheap: only bother once the map is worth sweeping
+    if (this.windows.size < SWEEP_AT) return; // cheap: only bother once the map is worth sweeping
+    const longest = Math.max(LOGIN_LIMIT.windowMs, LOGIN_CALLER_LIMIT.windowMs, REGISTER_LIMIT.windowMs);
     for (const [key, w] of this.windows) {
       if (t - w.since >= longest) this.windows.delete(key);
     }
+    // A sweep only drops *expired* windows, so a fast enough attacker can still hold live ones. Past a hard cap,
+    // evict the oldest regardless: forgetting a limit is the safe direction to fail, since the worst outcome is
+    // someone getting a fresh allowance, whereas unbounded growth is the server falling over.
+    if (this.windows.size <= MAX_WINDOWS) return;
+    const oldestFirst = [...this.windows.entries()].sort((a, b) => a[1].since - b[1].since);
+    for (const [key] of oldestFirst.slice(0, this.windows.size - MAX_WINDOWS)) this.windows.delete(key);
   }
 }
