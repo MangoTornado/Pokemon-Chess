@@ -52,6 +52,27 @@ const RANKED_MIN_ACTIONS = 10;
 const CLOCK_MS = 8 * 60 * 1000;
 
 /**
+ * How long a player may be out of contact before their opponent is awarded the game.
+ *
+ * The turn clock alone does not cover this. It only debits the side *to move*, so a player who closes the tab on
+ * their opponent's turn has nothing running against them — they could be gone for hours while the opponent sits
+ * there with no recourse and no way to claim the game. This is the missing half: a deadline to come back by.
+ *
+ * Two minutes rather than seconds, because it must forgive a brief network blip or a phone changing towers; and
+ * minutes rather than the 8-minute clock, because the opponent is waiting the whole time. Presence is inferred
+ * from contact — the client polls while a game is open — so "seen" means "asked us about this room recently".
+ */
+const ABANDON_MS = 2 * 60 * 1000;
+
+/**
+ * How long after a missed poll the countdown becomes visible.
+ *
+ * Without it the banner would flicker on for every player between their normal polls, which would train people to
+ * ignore it — the one thing a warning must not do.
+ */
+const POLL_GRACE_MS = 15 * 1000;
+
+/**
  * The fixed quick-chat vocabulary.
  *
  * SPEC §17.10 rules out free text between strangers, because this game's audience includes children and
@@ -117,12 +138,14 @@ interface Room {
   status: RoomStatus;
   /** Set when the game ends: the winning side, or 'draw'. */
   outcome: Side | 'draw' | null;
-  endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
+  endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | 'abandoned' | null;
   /** Guards the one-time end transition (rating settlement fires exactly once). */
   ended: boolean;
   chat: ChatLine[];
   /** Last time each side said something, for the cooldown. */
   lastChatAt: { white: number; black: number };
+  /** Last time each side was in contact, for the reconnect deadline. Null until they first arrive. */
+  lastSeenAt: { white: number | null; black: number | null };
   /** Thinking time left per side, in ms. */
   clock: { white: number; black: number };
   /** When the side to move started thinking, for deducting elapsed time. Null while waiting to start. */
@@ -148,7 +171,13 @@ export interface RoomView {
   /** Thinking time left per side in ms, with the side on the move already debited. */
   readonly clock: { white: number; black: number };
   /** How the game ended, when it did — so the UI can say "on time" rather than just "you lost". */
-  readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
+  readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | 'abandoned' | null;
+  /**
+   * Seconds the opponent has left to come back before they forfeit, or null when they are present.
+   *
+   * Shown to the waiting player so an unresponsive game explains itself instead of just hanging.
+   */
+  readonly opponentReconnectSeconds: number | null;
   /** Recent quick-chat, oldest first. */
   readonly chat: readonly ChatLine[];
 }
@@ -195,6 +224,7 @@ export class Matches {
         room.black = player;
         room.status = 'playing';
         room.turnStartedAt = this.now(); // the clock starts now that both players are here
+        room.lastSeenAt.black = this.now();
         room.lastActivity = this.now();
         this.waitingRoomId = null;
         return ok(this.view(room, player.accountId));
@@ -259,6 +289,7 @@ export class Matches {
     room.black = player;
     room.status = 'playing';
     room.turnStartedAt = this.now(); // the clock starts now that both players are here
+    room.lastSeenAt.black = this.now();
     room.lastActivity = this.now();
     return ok(this.view(room, player.accountId));
   }
@@ -267,9 +298,74 @@ export class Matches {
   state(id: string, accountId: number): MatchResult<RoomView> {
     const room = this.rooms.get(id);
     if (!room) return fail('No such game.', 404);
-    // Polling is also how a flag-fall is noticed, so charge the clock on read.
+    // Polling is how three things get noticed, since the server runs no timers: contact, a flag-fall, and an
+    // opponent who has stopped coming back. Order matters — mark ourselves present *before* judging the other
+    // side, or a poll could resolve an abandonment against the very player making it.
+    this.markSeen(room, accountId);
     this.chargeClock(room);
+    this.resolveAbandonment(room);
     return ok(this.view(room, accountId));
+  }
+
+  /**
+   * The caller's current game, if they are in one.
+   *
+   * Needed for reconnection: the client holds the room id in component state, so a refresh or a navigation used to
+   * lose the game entirely even though the room was still live on the server. Now the client can ask.
+   */
+  activeFor(accountId: number): MatchResult<RoomView> {
+    this.prune();
+    for (const room of this.rooms.values()) {
+      if (room.status === 'over') continue;
+      if (!this.sideOf(room, accountId)) continue;
+      this.markSeen(room, accountId);
+      this.chargeClock(room);
+      this.resolveAbandonment(room);
+      return ok(this.view(room, accountId));
+    }
+    return fail('You are not in a game.', 404);
+  }
+
+  /** Records that a player is in contact right now. */
+  private markSeen(room: Room, accountId: number): void {
+    const side = this.sideOf(room, accountId);
+    if (side) room.lastSeenAt[side] = this.now();
+  }
+
+  /**
+   * Awards the game to the present player when the other has missed the reconnect deadline.
+   *
+   * Only ever fires while a game is in progress and both seats are filled, and only against a side that has
+   * actually been in contact at some point — a player who never arrived is the pairing's problem, not a forfeit.
+   * The winner must themselves be present, so two disconnected players simply leave the room to be pruned rather
+   * than one of them winning by being marginally less absent.
+   */
+  private resolveAbandonment(room: Room): void {
+    if (room.status !== 'playing' || !room.white || !room.black) return;
+    const t = this.now();
+    for (const side of ['white', 'black'] as Side[]) {
+      const seen = room.lastSeenAt[side];
+      if (seen === null || t - seen <= ABANDON_MS) continue;
+      const other: Side = side === 'white' ? 'black' : 'white';
+      const otherSeen = room.lastSeenAt[other];
+      if (otherSeen === null || t - otherSeen > ABANDON_MS) continue; // both gone: let the TTL take it
+      this.finalizeEnd(room, other, 'abandoned');
+      return;
+    }
+  }
+
+  /** Seconds until the opponent forfeits for being out of contact, or null while they are present. */
+  private reconnectSecondsFor(room: Room, accountId: number): number | null {
+    if (room.status !== 'playing') return null;
+    const side = this.sideOf(room, accountId);
+    if (!side) return null;
+    const other: Side = side === 'white' ? 'black' : 'white';
+    const seen = room.lastSeenAt[other];
+    if (seen === null) return null;
+    const left = ABANDON_MS - (this.now() - seen);
+    // Only surfaced once they are actually overdue for a poll, so a normal turn does not look like a disconnect.
+    if (left >= ABANDON_MS - POLL_GRACE_MS) return null;
+    return Math.max(0, Math.ceil(left / 1000));
   }
 
   /**
@@ -286,8 +382,11 @@ export class Matches {
       return fail('Out-of-date move; refresh and retry.', 409);
     }
     if (!isPlausibleEncodedMove(encoded)) return fail('Malformed move.', 400);
+    this.markSeen(room, accountId);
     // A player who has run out of time loses before their move is considered.
     if (this.chargeClock(room) && room.status !== 'playing') return ok(this.view(room, accountId));
+    this.resolveAbandonment(room);
+    if (room.status !== 'playing') return ok(this.view(room, accountId));
 
     // Server-authoritative check: is this a legal move for this side right now? (Relay-only if no engine.)
     if (this.engine) {
@@ -370,7 +469,11 @@ export class Matches {
   }
 
   /** Ends a room exactly once, recording the outcome and firing the rating callback for a ranked game. */
-  private finalizeEnd(room: Room, winner: Side | 'draw', by: 'king-capture' | 'draw' | 'resign' | 'timeout' = 'king-capture'): void {
+  private finalizeEnd(
+    room: Room,
+    winner: Side | 'draw',
+    by: 'king-capture' | 'draw' | 'resign' | 'timeout' | 'abandoned' = 'king-capture',
+  ): void {
     if (room.ended) return;
     room.ended = true;
     room.status = 'over';
@@ -444,6 +547,7 @@ export class Matches {
       // -Infinity, not 0: with a clock that starts at zero, 0 would read as "just spoke" and silence the
       // first message of the game.
       lastChatAt: { white: -Infinity, black: -Infinity },
+      lastSeenAt: { white: this.now(), black: null },
       clock: { white: CLOCK_MS, black: CLOCK_MS },
       // The clock starts when the second player arrives, not while waiting for one.
       turnStartedAt: null,
@@ -474,6 +578,7 @@ export class Matches {
       you: this.sideOf(room, accountId),
       clock: { ...room.clock },
       endedBy: room.endedBy,
+      opponentReconnectSeconds: this.reconnectSecondsFor(room, accountId),
       chat: [...room.chat],
     };
   }

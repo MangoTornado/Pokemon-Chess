@@ -339,6 +339,8 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
   useEffect(() => {
     if (signedIn !== true) return;
     let live = true;
+    // `start` resumes a battle already in progress against this gym rather than rerolling it, so entering the
+    // screen twice — or refreshing mid-battle — picks the game up where it was. Leaving is not giving up.
     void api.gymStart(gym.id).then((r) => {
       if (!live) return;
       setStarting(false);
@@ -396,9 +398,31 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
             · {gym.badge}{rematch ? ' · practice (unrated)' : ''}
           </span>
         </h2>
-        <button type="button" onClick={onExit} style={ghost}>
-          {outcome ? 'Back to Gym Challenge' : 'Forfeit'}
-        </button>
+        <div style={{ display: 'flex', gap: '0.4rem' }}>
+          {/* Two different exits, and the difference is the whole point: leaving keeps the battle, forfeiting
+              gives it up and is recorded as a loss. Labelling one "Forfeit" while it merely navigated away was
+              the confusion worth fixing. */}
+          {!outcome && (
+            <button type="button" onClick={onExit} style={ghost}>
+              Leave — resume later
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (outcome) { onExit(); return; }
+              if (!battle) { onExit(); return; }
+              if (!confirm(`Forfeit to ${gym.leader}? This counts as a loss.`)) return;
+              void api.gymForfeit(battle.id).then((r) => {
+                if (r.ok) setBattle(r.value.battle);
+                onExit();
+              });
+            }}
+            style={ghost}
+          >
+            {outcome ? 'Back to Gym Challenge' : 'Forfeit'}
+          </button>
+        </div>
       </div>
 
       {outcome && <OutcomeBanner gym={gym} outcome={outcome} onExit={onExit} />}
@@ -406,6 +430,13 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
       {/* Every finished game yields an encounter, issued by the server when it recorded the result — a win
           offers more and better, a loss fewer and plainer, but never nothing. */}
       {outcome && signedIn && <EncounterCard dex={dex} />}
+
+      {battle && battle.reconnectSeconds !== null && battle.status === 'playing' && (
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.82rem' }}>
+          Your progress is saved. Come back within {Math.ceil(battle.reconnectSeconds / 60)} minutes or the battle
+          is forfeited.
+        </p>
+      )}
 
       {serverError && (
         <p style={{ margin: 0, color: TYPE_COLORS.Fire, fontSize: '0.85rem' }}>

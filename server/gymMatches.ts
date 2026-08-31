@@ -28,7 +28,7 @@ import type { Dex } from '../src/data/dex.ts';
 import { GYM_BY_ID, isGymUnlocked } from '../src/ladder/badges.ts';
 import { isPlausibleEncodedMove } from '../src/engine/position.ts';
 import type { Side } from '../src/engine/variant.ts';
-import { PLAYER_SIDE, createGymEngine } from './gymEngine.ts';
+import { LEADER_SIDE, PLAYER_SIDE, createGymEngine } from './gymEngine.ts';
 import type { GymEngine } from './gymEngine.ts';
 
 /** How long an idle gym battle survives before it is reclaimed. */
@@ -81,6 +81,12 @@ export interface GymView {
   readonly you: Side;
   /** Once over: whether the ladder recorded the result. False means the outcome stood but nothing was written. */
   readonly recorded: boolean;
+  /**
+   * Seconds left to come back before the battle forfeits itself, or null when there is nothing to lose yet.
+   *
+   * Shown so a resumed battle says how long it will wait, rather than leaving the deadline as a surprise.
+   */
+  readonly reconnectSeconds: number | null;
 }
 
 export type GymResult<T> = { ok: true; value: T } | { ok: false; error: string; status: number };
@@ -146,16 +152,31 @@ export class GymMatches {
     if (typeof gymId !== 'string' || !GYM_BY_ID.has(gymId)) return fail('Unknown gym.', 404);
     const gym = GYM_BY_ID.get(gymId)!;
 
+    // One battle at a time is checked before the unlock gate, because "finish or forfeit the one you are in" is
+    // both true regardless of the gate and the more actionable of the two answers.
+    //
+    // Leaving a battle does not end it. Coming back to the same gym resumes exactly where it was, because
+    // navigating away is not a decision to give up — only forfeiting is. A challenge to a *different* gym while
+    // one is in progress is refused rather than silently discarding it, so the choice stays the player's.
+    const previous = this.byAccount.get(accountId);
+    if (previous) {
+      const open = this.battles.get(previous);
+      if (open && open.status === 'playing') {
+        if (open.gymId === gymId) return ok(this.view(open));
+        const other = GYM_BY_ID.get(open.gymId);
+        return fail(
+          `You are already in a battle with ${other?.leader ?? 'another leader'}. Finish or forfeit it first.`,
+          409,
+        );
+      }
+      this.battles.delete(previous);
+    }
+
     const standing = this.accounts.standing(accountId);
     if (!standing) return fail('No such profile.', 404);
     if (!isGymUnlocked(gym, new Set(standing.badges), standing.rating)) {
       return fail('That gym will not accept your challenge yet.', 403);
     }
-
-    // Starting a new battle abandons any previous one, which is exactly what walking away from the old
-    // client-side gym battle did. See the note at the bottom of this file on what that does and does not fix.
-    const previous = this.byAccount.get(accountId);
-    if (previous) this.battles.delete(previous);
 
     const seed = `gym-${gymId}-${this.makeSeed()}`;
     const opening = this.engine.opening(gymId, seed);
@@ -218,13 +239,40 @@ export class GymMatches {
     return ok(this.view(battle));
   }
 
-  /** Abandons the caller's battle, recording nothing. This is what the Forfeit button does. */
-  abandon(accountId: number, id: string): boolean {
-    const battle = this.battles.get(id);
-    if (!battle || battle.accountId !== accountId) return false;
-    this.battles.delete(id);
-    if (this.byAccount.get(accountId) === id) this.byAccount.delete(accountId);
-    return true;
+  /**
+   * Forfeits the caller's battle: it counts as a loss.
+   *
+   * This is the deliberate way out, as opposed to simply leaving — which now resumes. Recording the loss is what
+   * makes the distinction mean anything: if walking away were free *and* forfeiting were free, a player could
+   * always dodge a battle that had turned against them, and the badge gates would measure persistence rather
+   * than skill. A battle nobody has moved in yet is discarded instead, since there is no game to lose.
+   */
+  forfeit(accountId: number, id: string): GymResult<GymView> {
+    const owned = this.own(accountId, id);
+    if (!owned.ok) return owned;
+    const battle = owned.value;
+    if (battle.status !== 'playing') return ok(this.view(battle));
+    if (battle.actions.length === 0) {
+      this.discard(battle);
+      return ok({ ...this.view(battle), status: 'over', outcome: null });
+    }
+    this.settle(battle, LEADER_SIDE);
+    return ok(this.view(battle));
+  }
+
+  /** Drops a battle from memory without recording anything. */
+  private discard(battle: GymBattle): void {
+    this.battles.delete(battle.id);
+    if (this.byAccount.get(battle.accountId) === battle.id) this.byAccount.delete(battle.accountId);
+  }
+
+  /** The caller's battle in progress, if any — what the client asks on mount so a refresh can resume. */
+  activeFor(accountId: number): GymResult<GymView> {
+    this.prune();
+    const id = this.byAccount.get(accountId);
+    const battle = id ? this.battles.get(id) : undefined;
+    if (!battle || battle.status !== 'playing') return fail('You are not in a gym battle.', 404);
+    return ok(this.view(battle));
   }
 
   /** Battles in memory, for a health check. */
@@ -264,16 +312,32 @@ export class GymMatches {
       turn: battle.turn,
       you: PLAYER_SIDE,
       recorded: battle.recorded,
+      reconnectSeconds: this.reconnectSecondsFor(battle),
     };
   }
 
+  /**
+   * Reclaims battles nobody came back to — as a forfeit, not a silent disappearance.
+   *
+   * This is the other half of making a resume meaningful. If an abandoned battle simply evaporated, walking away
+   * would still be the free escape that forfeiting is not, and the deadline would be the dodge rather than the
+   * deterrent. So a battle that had moves played in it is recorded as a loss when its deadline passes; one that
+   * never got started is just dropped, because there is no game there to lose.
+   */
   private prune(): void {
     const t = this.now();
     for (const [id, battle] of this.battles) {
       if (t - battle.lastActivity <= GYM_TTL_MS) continue;
+      if (battle.status === 'playing' && battle.actions.length > 0) this.settle(battle, LEADER_SIDE);
       this.battles.delete(id);
       if (this.byAccount.get(battle.accountId) === id) this.byAccount.delete(battle.accountId);
     }
+  }
+
+  /** Seconds left to come back to a battle before it forfeits itself. */
+  private reconnectSecondsFor(battle: GymBattle): number | null {
+    if (battle.status !== 'playing' || battle.actions.length === 0) return null;
+    return Math.max(0, Math.ceil((GYM_TTL_MS - (this.now() - battle.lastActivity)) / 1000));
   }
 }
 

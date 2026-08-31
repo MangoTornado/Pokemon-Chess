@@ -73,6 +73,8 @@ export async function handleApi(
       const id = typeof b.id === 'string' ? b.id : '';
       return json(200, { ok: matches.abandon(id, accountId) });
     }
+    // Reconnection: the client keeps the room id in component state, so a refresh used to lose a live game.
+    if (method === 'GET' && path === '/api/mp/active') return mpResult(matches.activeFor(accountId));
     if (method === 'POST' && path === '/api/mp/create') return mpResult(matches.createPrivate(player));
     if (method === 'POST' && path === '/api/mp/join') {
       const code = typeof b.code === 'string' ? b.code.trim() : '';
@@ -182,10 +184,12 @@ export async function handleApi(
       // Awaited: the leader's reply runs on a worker thread, so this is the one route that genuinely waits.
       return gymResult(await gyms.move(accountId, id, b.ply, b.encoded));
     }
-    if (method === 'POST' && path === '/api/gym/abandon') {
+    // Forfeiting is a decision and costs the battle; leaving is not, and `/api/gym/active` finds it again.
+    if (method === 'POST' && path === '/api/gym/forfeit') {
       const id = typeof b.id === 'string' ? b.id : '';
-      return json(200, { ok: gyms.abandon(accountId, id) });
+      return gymResult(gyms.forfeit(accountId, id));
     }
+    if (method === 'GET' && path === '/api/gym/active') return gymResult(gyms.activeFor(accountId));
     if (method === 'GET') {
       const m = /^\/api\/gym\/([A-Za-z0-9_-]+)$/.exec(path);
       if (m) return gymResult(gyms.state(accountId, m[1]!));

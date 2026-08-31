@@ -81,7 +81,9 @@ export interface RoomView {
   /** Thinking time left per side in ms. */
   readonly clock: { white: number; black: number };
   /** How the game ended, when it did. */
-  readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | null;
+  readonly endedBy: 'king-capture' | 'draw' | 'resign' | 'timeout' | 'abandoned' | null;
+  /** Seconds the opponent has left to reconnect before forfeiting, or null while they are present. */
+  readonly opponentReconnectSeconds: number | null;
   /** Recent quick-chat, oldest first. */
   readonly chat: readonly { side: 'white' | 'black'; name: string; phrase: number; at: number }[];
 }
@@ -98,6 +100,8 @@ export interface GymBattleView {
   readonly turn: 'white' | 'black';
   readonly you: 'white' | 'black';
   readonly recorded: boolean;
+  /** Seconds left to come back before the battle forfeits itself, or null when nothing is at stake yet. */
+  readonly reconnectSeconds: number | null;
 }
 
 interface GymResponse {
@@ -180,11 +184,18 @@ export const api = {
   /** Plays one move and receives the leader's reply. Slow by nature: the leader thinks on the server. */
   gymMove: (id: string, ply: number, encoded: number) =>
     call<GymResponse>('POST', '/api/gym/move', { id, ply, encoded }),
-  gymAbandon: (id: string) => call<{ ok: boolean }>('POST', '/api/gym/abandon', { id }),
+  /** Forfeits: a recorded loss. Leaving a battle does not do this — `gymActive` finds it again. */
+  gymForfeit: (id: string) => call<{ battle: GymBattleView; profile: PublicProfile | null }>(
+    'POST', '/api/gym/forfeit', { id },
+  ),
+  /** The battle already in progress, so a refresh resumes instead of losing it. */
+  gymActive: () => call<{ battle: GymBattleView; profile: PublicProfile | null }>('GET', '/api/gym/active'),
   gymState: (id: string) => call<GymResponse>('GET', `/api/gym/${encodeURIComponent(id)}`),
 
   /** Abandons one specific waiting room — the private-game counterpart of cancelling the queue. */
   mpAbandon: (id: string) => call<{ ok: boolean }>('POST', '/api/mp/abandon', { id }),
+  /** The room already in progress, so a refresh reconnects instead of losing the game. */
+  mpActive: () => call<{ game: RoomView }>('GET', '/api/mp/active'),
   mpCreate: () => call<{ game: RoomView }>('POST', '/api/mp/create'),
   mpJoin: (code: string) => call<{ game: RoomView }>('POST', '/api/mp/join', { code }),
   mpState: (id: string) => call<{ game: RoomView }>('GET', `/api/mp/game/${encodeURIComponent(id)}`),

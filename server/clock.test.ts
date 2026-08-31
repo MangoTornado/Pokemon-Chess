@@ -183,3 +183,108 @@ describe('quick chat', () => {
     expect(state.ok && state.value.chat.length).toBeLessThanOrEqual(20);
   });
 });
+
+describe('the reconnect deadline', () => {
+  /**
+   * The gap this closes: the turn clock only debits the side *to move*, so a player who closed the tab on their
+   * opponent's turn had nothing running against them. They could be gone indefinitely while the opponent sat
+   * there with no way to claim the game.
+   */
+  it('awards the game to the player who is still here', () => {
+    const ends: EndInfo[] = [];
+    const h = harness((i) => ends.push(i));
+    const id = paired(h);
+    // White keeps polling; Black never comes back.
+    for (let i = 0; i < 3; i++) { h.advance(30_000); h.m.state(id, white.accountId); }
+    h.advance(60_000);
+    const s = h.m.state(id, white.accountId);
+    expect(s.ok && s.value.status).toBe('over');
+    expect(s.ok && s.value.outcome).toBe('white');
+    expect(s.ok && s.value.endedBy).toBe('abandoned');
+    expect(ends).toHaveLength(1);
+  });
+
+  it('does not fire against a player who is polling normally', () => {
+    const h = harness();
+    const id = paired(h);
+    // Both sides check in every 30s for five minutes — longer than the deadline, but nobody is ever absent.
+    for (let i = 0; i < 10; i++) {
+      h.advance(30_000);
+      h.m.state(id, white.accountId);
+      h.m.state(id, black.accountId);
+    }
+    const s = h.m.state(id, white.accountId);
+    expect(s.ok && s.value.status).toBe('playing');
+  });
+
+  it('never resolves against the player making the request', () => {
+    // Ordering hazard: judging the other side before marking the caller present would let a returning player's own
+    // first poll hand the game away. So after a gap in which *both* were overdue, the one who came back is the one
+    // who kept the deadline — they may win, but they must never lose by asking.
+    const h = harness();
+    const id = paired(h);
+    h.advance(5 * 60 * 1000);
+    const back = h.m.state(id, black.accountId);
+    expect(back.ok && back.value.outcome).not.toBe('white');
+    expect(back.ok && back.value.outcome).toBe('black');
+  });
+
+  it('gives the game to whoever comes back first once the deadline has passed', () => {
+    // The deadline is per player, so a shared outage is not a draw: the player who returns has met it and the one
+    // who has not, has not. Deliberate, and the reason the previous test can assert a win rather than a stalemate.
+    const h = harness();
+    const id = paired(h);
+    h.advance(5 * 60 * 1000);
+    h.m.state(id, white.accountId); // White returns first
+    const late = h.m.state(id, black.accountId);
+    expect(late.ok && late.value.outcome).toBe('white');
+    expect(late.ok && late.value.endedBy).toBe('abandoned');
+  });
+
+  it('leaves a game where both players vanished for the TTL to reap', () => {
+    const ends: EndInfo[] = [];
+    const h = harness((i) => ends.push(i));
+    paired(h);
+    h.advance(5 * 60 * 1000);
+    // Nobody polls, so nothing resolves: winning by being marginally less absent is not a win.
+    expect(ends).toHaveLength(0);
+  });
+
+  it('tells the waiting player how long the opponent has left', () => {
+    const h = harness();
+    const id = paired(h);
+    const fresh = h.m.state(id, white.accountId);
+    // Nothing to report while the opponent is present.
+    expect(fresh.ok && fresh.value.opponentReconnectSeconds).toBeNull();
+
+    h.advance(60_000);
+    const waiting = h.m.state(id, white.accountId);
+    expect(waiting.ok && waiting.value.opponentReconnectSeconds).toBeGreaterThan(0);
+    expect(waiting.ok && waiting.value.opponentReconnectSeconds).toBeLessThanOrEqual(120);
+  });
+});
+
+describe('finding your game again', () => {
+  it('returns the room a player is already in, so a refresh does not lose it', () => {
+    const h = harness();
+    const id = paired(h);
+    const found = h.m.activeFor(black.accountId);
+    expect(found.ok && found.value.id).toBe(id);
+    expect(found.ok && found.value.you).toBe('black');
+  });
+
+  it('finds a room that is still waiting for an opponent', () => {
+    const h = harness();
+    const first = h.m.enqueue(white);
+    const found = h.m.activeFor(white.accountId);
+    expect(found.ok && found.value.id).toBe(first.ok ? first.value.id : '');
+  });
+
+  it('reports nothing for someone not in a game, and after theirs ends', () => {
+    const h = harness();
+    const id = paired(h);
+    expect(h.m.activeFor(999).ok).toBe(false);
+    h.m.resign(id, white.accountId);
+    expect(h.m.activeFor(white.accountId).ok).toBe(false);
+  });
+});

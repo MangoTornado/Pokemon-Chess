@@ -37,6 +37,22 @@ export function OnlineScreen({ dex, signedIn, onExit, onSignIn, onFinished }: On
   const [busy, setBusy] = useState(false);
   const [codeInput, setCodeInput] = useState('');
 
+  /**
+   * Reconnect on mount.
+   *
+   * The room id lives in component state, so a refresh — or a tab crash, or navigating away and back — used to
+   * lose the game even though the room was still live on the server and the opponent was still sitting in it. The
+   * server keeps a two-minute reconnect deadline, and this is what makes it reachable.
+   */
+  useEffect(() => {
+    if (!signedIn) return;
+    let live = true;
+    void api.mpActive().then((r) => {
+      if (live && r.ok) setRoom(r.value.game);
+    });
+    return () => { live = false; };
+  }, [signedIn]);
+
   if (!signedIn) {
     return (
       <Panel title="Play Online" onExit={onExit}>
@@ -233,13 +249,23 @@ function OnlineGame({
   };
 
   const finished = room.status === 'over';
-  const how = room.endedBy === 'timeout' ? ' on time' : room.endedBy === 'resign' ? ' by resignation' : '';
+  // Naming *how* it ended matters most for the two endings nobody watched happen: a flag-fall and a forfeit by
+  // disconnection both look like the game simply stopping otherwise.
+  const how = room.endedBy === 'timeout'
+    ? ' on time'
+    : room.endedBy === 'resign'
+      ? ' by resignation'
+      : room.endedBy === 'abandoned'
+        ? ' — your opponent did not come back'
+        : '';
   const outcomeText = finished
     ? room.outcome === 'draw'
       ? 'Draw.'
       : room.outcome === side
         ? `You win${how}!`
-        : `You lost${how}.`
+        : room.endedBy === 'abandoned'
+          ? 'You lost — you were away too long.'
+          : `You lost${how}.`
     : null;
 
   return (
@@ -290,6 +316,22 @@ function OnlineGame({
           <strong style={{ fontSize: '1.05rem' }}>{outcomeText}</strong>
           <button type="button" onClick={onBackToLobby} style={{ ...primary, marginLeft: 'auto' }}>Back to lobby</button>
         </div>
+      )}
+
+      {/* An unresponsive game should explain itself rather than just hanging. The server counts the deadline; this
+          only reports it, so the two cannot disagree about who is about to forfeit. */}
+      {room.status === 'playing' && room.opponentReconnectSeconds !== null && (
+        <p
+          role="status"
+          style={{
+            margin: 0, padding: '0.5rem 0.75rem', borderRadius: 8,
+            background: 'var(--bg-raised)', border: '1px solid var(--accent)',
+            color: 'var(--text)', fontSize: '0.85rem',
+          }}
+        >
+          {opponent ?? 'Your opponent'} has lost contact. They forfeit in{' '}
+          <strong>{room.opponentReconnectSeconds}s</strong> unless they come back.
+        </p>
       )}
 
       <GameBoard

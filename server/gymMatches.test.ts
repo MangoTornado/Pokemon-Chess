@@ -90,15 +90,44 @@ describe('starting a battle', () => {
     expect(noProfile.start(1, 'boulder').ok).toBe(false);
   });
 
-  it('keeps one battle per account, so a second challenge abandons the first', () => {
+  it('resumes the same battle instead of starting a second one', async () => {
+    // Leaving a gym battle is not giving up, so coming back must find the game where it was rather than silently
+    // rerolling it — which would also hand a player a free reroll of a bad draw.
     const { gyms } = harness(fakeEngine());
     const first = gyms.start(1, 'boulder');
-    const second = gyms.start(1, 'boulder');
-    expect(first.ok && second.ok).toBe(true);
-    if (!first.ok || !second.ok) return;
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await gyms.move(1, first.value.id, 0, 1234);
+
+    const again = gyms.start(1, 'boulder');
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.value.id).toBe(first.value.id);
+    expect(again.value.actions).toHaveLength(2); // the move already played is still there
     expect(gyms.count()).toBe(1);
-    expect(gyms.state(1, first.value.id).ok).toBe(false); // the old one is gone
-    expect(gyms.state(1, second.value.id).ok).toBe(true);
+  });
+
+  it('finds the battle again after the client has forgotten it', async () => {
+    const { gyms } = harness(fakeEngine());
+    const started = gyms.start(1, 'boulder');
+    if (!started.ok) return;
+    await gyms.move(1, started.value.id, 0, 1234);
+    const found = gyms.activeFor(1);
+    expect(found.ok && found.value.id).toBe(started.value.id);
+    expect(gyms.activeFor(2).ok).toBe(false);
+  });
+
+  it('refuses a different gym while one is in progress, rather than discarding it', async () => {
+    const { gyms } = harness(fakeEngine());
+    const first = gyms.start(1, 'boulder');
+    if (!first.ok) return;
+    await gyms.move(1, first.value.id, 0, 1234);
+
+    const other = gyms.start(1, 'cascade');
+    expect(other.ok).toBe(false);
+    expect(!other.ok && other.status).toBe(409);
+    // The battle in progress is untouched.
+    expect(gyms.state(1, first.value.id).ok).toBe(true);
   });
 });
 
@@ -182,24 +211,82 @@ describe('recording the result', () => {
     expect(view?.outcome).toBe('white');
   });
 
-  it('records nothing for an abandoned battle', async () => {
-    const { gyms, recorded, id } = (() => {
-      const h = harness(fakeEngine());
-      const started = h.gyms.start(1, 'boulder');
-      return { ...h, id: started.ok ? started.value.id : '' };
-    })();
-    await gyms.move(1, id, 0, 1234);
-    expect(gyms.abandon(1, id)).toBe(true);
-    expect(recorded).toEqual([]);
-    expect(gyms.count()).toBe(0);
-    // And not somebody else's to abandon.
-    const again = harness(fakeEngine());
-    const other = again.gyms.start(5, 'boulder');
-    expect(again.gyms.abandon(6, other.ok ? other.value.id : '')).toBe(false);
+  it('records a forfeit as a loss, because leaving is now free and forfeiting is the decision', async () => {
+    const h = harness(fakeEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    await h.gyms.move(1, id, 0, 1234);
+
+    const r = h.gyms.forfeit(1, id);
+    expect(r.ok && r.value.status).toBe('over');
+    expect(h.recorded).toEqual([{ accountId: 1, gymId: 'boulder', score: 0 }]);
+  });
+
+  it('discards a forfeit of a battle nobody has moved in, since there is no game to lose', () => {
+    const h = harness(fakeEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    expect(h.gyms.forfeit(1, id).ok).toBe(true);
+    expect(h.recorded).toEqual([]);
+    expect(h.gyms.count()).toBe(0);
+  });
+
+  it('is not somebody else’s battle to forfeit', () => {
+    const h = harness(fakeEngine());
+    const started = h.gyms.start(5, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    expect(h.gyms.forfeit(6, id).ok).toBe(false);
+    expect(h.recorded).toEqual([]);
   });
 });
 
-describe('housekeeping', () => {
+describe('the deadline to come back by', () => {
+  it('forfeits a battle nobody came back to, rather than letting it evaporate', async () => {
+    // The other half of making "leaving resumes" safe. If an abandoned battle simply vanished, walking away would
+    // still be the free escape that forfeiting is not, and the deadline would be the dodge rather than the
+    // deterrent.
+    const h = harness(fakeEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    await h.gyms.move(1, id, 0, 1234);
+
+    h.advance(61 * 60 * 1000);
+    h.gyms.start(1, 'boulder'); // any return triggers the prune
+    expect(h.recorded).toEqual([{ accountId: 1, gymId: 'boulder', score: 0 }]);
+  });
+
+  it('does not forfeit a battle nobody had started playing', () => {
+    const h = harness(fakeEngine());
+    h.gyms.start(1, 'boulder');
+    h.advance(61 * 60 * 1000);
+    h.gyms.start(1, 'boulder');
+    expect(h.recorded).toEqual([]); // no game happened, so there is no loss to record
+  });
+
+  it('only materialises the forfeit when someone comes back, which is the bound on the dodge', async () => {
+    // Honest about a limit rather than papering over it: with no timers, the loss is written by the next request
+    // that prunes. So a player who never touches a gym again never eats it — but they cannot play *any* gym
+    // without eating it first, which is the property that matters.
+    const h = harness(fakeEngine());
+    const started = h.gyms.start(1, 'boulder');
+    await h.gyms.move(1, started.ok ? started.value.id : '', 0, 1234);
+    h.advance(61 * 60 * 1000);
+    expect(h.recorded).toEqual([]); // nothing has run yet
+
+    h.gyms.activeFor(1); // or start(); either prunes
+    expect(h.recorded).toEqual([{ accountId: 1, gymId: 'boulder', score: 0 }]);
+  });
+
+  it('reports how long is left to come back', async () => {
+    const h = harness(fakeEngine());
+    const started = h.gyms.start(1, 'boulder');
+    const id = started.ok ? started.value.id : '';
+    // Nothing at stake before a move is played, so nothing is claimed.
+    expect(started.ok && started.value.reconnectSeconds).toBeNull();
+    const moved = await h.gyms.move(1, id, 0, 1234);
+    expect(moved.ok && moved.value.reconnectSeconds).toBeGreaterThan(0);
+  });
+
   it('reclaims an idle battle so a walked-away game does not sit in memory forever', () => {
     const { gyms, advance } = harness(fakeEngine());
     gyms.start(1, 'boulder');
