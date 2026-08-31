@@ -240,6 +240,70 @@ describe('recording the result', () => {
   });
 });
 
+describe('the draw cannot be shopped for', () => {
+  /**
+   * The attack this whole module exists to stop, which a free forfeit quietly reopened.
+   *
+   * The seed is returned in the view, and the client computes BOTH armies from it with the same shipped
+   * `buildGymMatch` — so a player can see the matchup before moving. When a forfeit before the first move cost
+   * nothing, start/look/forfeit could be repeated until a favourable draw appeared: five distinct armies in five
+   * round trips, measured. So the draw sticks until the gym is actually resolved.
+   */
+  it('hands back the same draw after a forfeit with no moves played', () => {
+    let n = 0;
+    const h = harness(fakeEngine());
+    // A real minting function, so a repeated seed can only come from the stickiness being deliberate.
+    const gyms = new GymMatches({} as Dex, {
+      standing: () => STANDING,
+      record: () => ({ ok: true }),
+    }, { engine: fakeEngine(), makeId: () => `b${n++}`, makeSeed: () => `mint-${n++}` });
+    void h;
+
+    const seeds = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const started = gyms.start(1, 'boulder');
+      if (!started.ok) break;
+      seeds.add(started.value.seed);
+      gyms.forfeit(1, started.value.id); // free, and now pointless
+    }
+    expect(seeds.size).toBe(1);
+  });
+
+  it('draws afresh only once the gym has actually been resolved', async () => {
+    let n = 0;
+    const recorded: unknown[] = [];
+    const gyms = new GymMatches({} as Dex, {
+      standing: () => STANDING,
+      record: (a, g, sc) => { recorded.push({ a, g, sc }); return { ok: true }; },
+    }, { engine: fakeEngine({ endAfter: 2, winner: 'white' }), makeId: () => `b${n++}`, makeSeed: () => `mint-${n++}` });
+
+    const first = gyms.start(1, 'boulder');
+    if (!first.ok) return;
+    await gyms.move(1, first.value.id, 0, 1234); // ends the battle
+    expect(recorded).toHaveLength(1);
+
+    const second = gyms.start(1, 'boulder');
+    expect(second.ok && second.value.seed).not.toBe(first.value.seed);
+  });
+
+  it('keeps the draw across a forfeit even when the player played and lost', async () => {
+    // A resolved battle releases the draw, so this is the boundary: a *played* forfeit resolves it and must reroll.
+    let n = 0;
+    const gyms = new GymMatches({} as Dex, {
+      standing: () => STANDING,
+      record: () => ({ ok: true }),
+    }, { engine: fakeEngine(), makeId: () => `b${n++}`, makeSeed: () => `mint-${n++}` });
+
+    const first = gyms.start(1, 'boulder');
+    if (!first.ok) return;
+    await gyms.move(1, first.value.id, 0, 1234);
+    gyms.forfeit(1, first.value.id); // played, so this is a recorded loss and resolves the gym
+
+    const second = gyms.start(1, 'boulder');
+    expect(second.ok && second.value.seed).not.toBe(first.value.seed);
+  });
+});
+
 describe('the deadline to come back by', () => {
   it('forfeits a battle nobody came back to, rather than letting it evaporate', async () => {
     // The other half of making "leaving resumes" safe. If an abandoned battle simply vanished, walking away would

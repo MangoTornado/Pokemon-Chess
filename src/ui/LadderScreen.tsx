@@ -412,9 +412,18 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
             onClick={() => {
               if (outcome) { onExit(); return; }
               if (!battle) { onExit(); return; }
-              if (!confirm(`Forfeit to ${gym.leader}? This counts as a loss.`)) return;
+              // Truthful about which it is: a battle with no moves in it is simply dropped, and saying "this
+              // counts as a loss" when it does not is how a player learns to distrust every other warning.
+              const played = battle.actions.length > 0;
+              const message = played
+                ? `Forfeit to ${gym.leader}? This counts as a loss.`
+                : `Give up this challenge? Nothing is recorded — and ${gym.leader} will field the same team next time.`;
+              if (!confirm(message)) return;
+              // `ladder.record` refreshes the profile from the server for a signed-in player; without it the
+              // whole app keeps showing the pre-forfeit rating until something else happens to refetch.
               void api.gymForfeit(battle.id).then((r) => {
                 if (r.ok) setBattle(r.value.battle);
+                void ladder.record({ opponentRating: gym.rating, score: 0, gymId: gym.id });
                 onExit();
               });
             }}
@@ -440,13 +449,21 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
 
       {serverError && (
         <p style={{ margin: 0, color: TYPE_COLORS.Fire, fontSize: '0.85rem' }}>
-          {serverError} — the Gym could not referee this battle, so nothing was recorded.
+          {serverError}
         </p>
       )}
 
       {starting ? (
         <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>
           {gym.leader} is choosing a team…
+        </p>
+      ) : signedIn === true && !battle ? (
+        // Signed in with no refereed battle — the server refused to start one, most often because another is
+        // already in progress. Falling through to the local-AI branch here was the worst bug in this screen: it
+        // handed the player a real-looking battle nobody was refereeing, and `handleGameOver` then reported a
+        // badge and a rating change the server had never written.
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>
+          No battle is running. Go back to the Gym Challenge list to resume the one you are in, or forfeit it.
         </p>
       ) : (
         <GameBoard

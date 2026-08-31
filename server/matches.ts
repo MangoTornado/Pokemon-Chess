@@ -215,6 +215,10 @@ export class Matches {
   /** Enters the matchmaking queue: joins a waiting opponent, or opens a room and waits. */
   enqueue(player: RoomPlayer): MatchResult<RoomView> {
     this.prune();
+    // Already in a game? Hand that one back rather than seating them twice. Being in two live rooms is what let a
+    // reconnect land in the wrong one, and it also means one of the two is being abandoned unattended.
+    const existing = this.liveRoomFor(player.accountId);
+    if (existing) return ok(this.view(existing, player.accountId));
     if (this.waitingRoomId) {
       const room = this.rooms.get(this.waitingRoomId);
       if (room && room.status === 'waiting' && room.white) {
@@ -268,6 +272,10 @@ export class Matches {
   /** Creates a private room and returns its join code. The creator is White. */
   createPrivate(player: RoomPlayer): MatchResult<RoomView> {
     this.prune();
+    const busy = this.liveRoomFor(player.accountId);
+    if (busy && busy.status === 'playing') {
+      return fail('You are already in a game. Finish or resign it first.', 409);
+    }
     let code = this.freshCode();
     const room = this.open(player, code, false);
     this.byCode.set(code, room.id);
@@ -301,9 +309,10 @@ export class Matches {
     // Polling is how three things get noticed, since the server runs no timers: contact, a flag-fall, and an
     // opponent who has stopped coming back. Order matters — mark ourselves present *before* judging the other
     // side, or a poll could resolve an abandonment against the very player making it.
+    const before = { ...room.lastSeenAt };
     this.markSeen(room, accountId);
     this.chargeClock(room);
-    this.resolveAbandonment(room);
+    this.resolveAbandonment(room, before);
     return ok(this.view(room, accountId));
   }
 
@@ -315,15 +324,38 @@ export class Matches {
    */
   activeFor(accountId: number): MatchResult<RoomView> {
     this.prune();
+    // The most recently active room, not the first one found.
+    //
+    // Map order is creation order, so returning the first match handed a player an *older* unfinished game — for
+    // instance a friendly they had walked away from — and reconnected them to that instead of the ranked game they
+    // were actually in. Their polls then refreshed presence in the wrong room and the real game was forfeited out
+    // from under them two minutes later, rated. A live game they are playing beats a stale one they left.
+    let best: Room | null = null;
     for (const room of this.rooms.values()) {
-      if (room.status === 'over') continue;
-      if (!this.sideOf(room, accountId)) continue;
-      this.markSeen(room, accountId);
-      this.chargeClock(room);
-      this.resolveAbandonment(room);
-      return ok(this.view(room, accountId));
+      if (room.status === 'over' || !this.sideOf(room, accountId)) continue;
+      if (best === null) { best = room; continue; }
+      // Prefer a game in progress over one still waiting, then the more recently active of the two.
+      const better = (room.status === 'playing') !== (best.status === 'playing')
+        ? room.status === 'playing'
+        : room.lastActivity > best.lastActivity;
+      if (better) best = room;
     }
-    return fail('You are not in a game.', 404);
+    if (!best) return fail('You are not in a game.', 404);
+    const beforeSeen = { ...best.lastSeenAt };
+    this.markSeen(best, accountId);
+    this.chargeClock(best);
+    this.resolveAbandonment(best, beforeSeen);
+    return ok(this.view(best, accountId));
+  }
+
+  /** A room this account is seated in that has not finished, preferring one in progress. */
+  private liveRoomFor(accountId: number): Room | null {
+    let best: Room | null = null;
+    for (const room of this.rooms.values()) {
+      if (room.status === 'over' || !this.sideOf(room, accountId)) continue;
+      if (best === null || (room.status === 'playing' && best.status !== 'playing')) best = room;
+    }
+    return best;
   }
 
   /** Records that a player is in contact right now. */
@@ -340,18 +372,25 @@ export class Matches {
    * The winner must themselves be present, so two disconnected players simply leave the room to be pruned rather
    * than one of them winning by being marginally less absent.
    */
-  private resolveAbandonment(room: Room): void {
+  private resolveAbandonment(room: Room, asOf?: { white: number | null; black: number | null }): void {
     if (room.status !== 'playing' || !room.white || !room.black) return;
     const t = this.now();
-    for (const side of ['white', 'black'] as Side[]) {
-      const seen = room.lastSeenAt[side];
-      if (seen === null || t - seen <= ABANDON_MS) continue;
-      const other: Side = side === 'white' ? 'black' : 'white';
-      const otherSeen = room.lastSeenAt[other];
-      if (otherSeen === null || t - otherSeen > ABANDON_MS) continue; // both gone: let the TTL take it
-      this.finalizeEnd(room, other, 'abandoned');
+    // Judged against presence as it stood *before* the caller announced itself, so the outcome does not depend on
+    // who happened to poll first. Without this, a shared outage was a race: the player who walked away first could
+    // still take the game off the one whose connection came back a moment later, simply by refreshing sooner.
+    const seenAt = asOf ?? room.lastSeenAt;
+    const overdue = (side: Side) => {
+      const seen = seenAt[side];
+      return seen !== null && t - seen > ABANDON_MS;
+    };
+    const whiteOut = overdue('white');
+    const blackOut = overdue('black');
+    if (whiteOut === blackOut) {
+      // Neither is overdue, or both are. Both means nobody kept the deadline, so nobody takes the game on it —
+      // the TTL reclaims the room instead of awarding it to the less absent player.
       return;
     }
+    this.finalizeEnd(room, whiteOut ? 'black' : 'white', 'abandoned');
   }
 
   /** Seconds until the opponent forfeits for being out of contact, or null while they are present. */
@@ -382,10 +421,11 @@ export class Matches {
       return fail('Out-of-date move; refresh and retry.', 409);
     }
     if (!isPlausibleEncodedMove(encoded)) return fail('Malformed move.', 400);
+    const seenBefore = { ...room.lastSeenAt };
     this.markSeen(room, accountId);
     // A player who has run out of time loses before their move is considered.
     if (this.chargeClock(room) && room.status !== 'playing') return ok(this.view(room, accountId));
-    this.resolveAbandonment(room);
+    this.resolveAbandonment(room, seenBefore);
     if (room.status !== 'playing') return ok(this.view(room, accountId));
 
     // Server-authoritative check: is this a legal move for this side right now? (Relay-only if no engine.)

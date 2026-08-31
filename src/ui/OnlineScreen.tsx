@@ -288,7 +288,20 @@ function OnlineGame({
           {!finished && (
             <button type="button" onClick={resign} style={ghost}>Resign</button>
           )}
-          <button type="button" onClick={finished ? onBackToLobby : onExit} style={ghost}>
+          {/* Leaving a live game is not free: the opponent's next poll starts a two-minute countdown and then
+              takes the game. Saying so is the difference between a rule and a trap. */}
+          <button
+            type="button"
+            onClick={() => {
+              if (finished) { onBackToLobby(); return; }
+              const ok = confirm(
+                'Leave this game?\n\nIt stays open and you can come back to it — but if you are away for more '
+                + 'than two minutes your opponent wins by forfeit.',
+              );
+              if (ok) onExit();
+            }}
+            style={ghost}
+          >
             {finished ? 'Back to lobby' : 'Leave'}
           </button>
         </div>
@@ -316,6 +329,13 @@ function OnlineGame({
           <strong style={{ fontSize: '1.05rem' }}>{outcomeText}</strong>
           <button type="button" onClick={onBackToLobby} style={{ ...primary, marginLeft: 'auto' }}>Back to lobby</button>
         </div>
+      )}
+
+      {room.status === 'playing' && (
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+          You can close this and come back — the game is kept on the server. Being away more than two minutes
+          forfeits it.
+        </p>
       )}
 
       {/* An unresponsive game should explain itself rather than just hanging. The server counts the deadline; this

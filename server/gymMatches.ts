@@ -122,6 +122,19 @@ export class GymMatches {
   private readonly now: () => number;
   private readonly makeId: () => string;
   private readonly makeSeed: () => string;
+  /**
+   * The draw a player is committed to for a gym they have not yet resolved, keyed `accountId:gymId`.
+   *
+   * Server-minting the seed stopped a client *choosing* its draw, but it did not stop it *sampling* one: the view
+   * returns the seed, the client computes both armies from it with the same shipped `buildGymMatch`, and a
+   * forfeit before the first move cost nothing — so start/look/forfeit could be repeated until a favourable
+   * matchup appeared. Measured at five distinct armies in five round trips, which is the very attack this module
+   * exists to prevent.
+   *
+   * So the seed sticks. Walking away from a bad draw is still free, and now also pointless: you get the same one
+   * back until you actually resolve that gym.
+   */
+  private readonly pendingSeeds = new Map<string, string>();
 
   constructor(
     dex: Dex,
@@ -161,8 +174,15 @@ export class GymMatches {
     const previous = this.byAccount.get(accountId);
     if (previous) {
       const open = this.battles.get(previous);
-      if (open && open.status === 'playing') {
-        if (open.gymId === gymId) return ok(this.view(open));
+      if (open && this.expireIfOverdue(open)) {
+        // Its deadline had passed, so it is resolved now; fall through and start a fresh one.
+      } else if (open && open.status === 'playing') {
+        if (open.gymId === gymId) {
+          // Coming back *is* activity: otherwise the banner counts down from the last move and promises a
+          // deadline the player cannot reset by doing the very thing it asks of them.
+          open.lastActivity = this.now();
+          return ok(this.view(open));
+        }
         const other = GYM_BY_ID.get(open.gymId);
         return fail(
           `You are already in a battle with ${other?.leader ?? 'another leader'}. Finish or forfeit it first.`,
@@ -178,7 +198,10 @@ export class GymMatches {
       return fail('That gym will not accept your challenge yet.', 403);
     }
 
-    const seed = `gym-${gymId}-${this.makeSeed()}`;
+    // The same draw until this gym is resolved — see `pendingSeeds`.
+    const drawKey = `${accountId}:${gymId}`;
+    const seed = this.pendingSeeds.get(drawKey) ?? `gym-${gymId}-${this.makeSeed()}`;
+    this.pendingSeeds.set(drawKey, seed);
     const opening = this.engine.opening(gymId, seed);
     if (!opening.ok) return fail(opening.error, opening.status);
 
@@ -202,9 +225,11 @@ export class GymMatches {
 
   /** The caller's own battle. */
   state(accountId: number, id: string): GymResult<GymView> {
-    const battle = this.own(accountId, id);
-    if (!battle.ok) return battle;
-    return ok(this.view(battle.value));
+    const owned = this.own(accountId, id);
+    if (!owned.ok) return owned;
+    this.expireIfOverdue(owned.value);
+    if (owned.value.status === 'playing') owned.value.lastActivity = this.now();
+    return ok(this.view(owned.value));
   }
 
   /**
@@ -219,7 +244,7 @@ export class GymMatches {
     if (!owned.ok) return owned;
     const battle = owned.value;
 
-    if (battle.status !== 'playing') return fail('This gym battle is over.', 409);
+    if (this.expireIfOverdue(battle)) return fail('This gym battle is over.', 409);
     if (!Number.isInteger(ply) || ply !== battle.actions.length) {
       return fail('Out-of-date move; refresh and retry.', 409);
     }
@@ -251,7 +276,7 @@ export class GymMatches {
     const owned = this.own(accountId, id);
     if (!owned.ok) return owned;
     const battle = owned.value;
-    if (battle.status !== 'playing') return ok(this.view(battle));
+    if (this.expireIfOverdue(battle)) return ok(this.view(battle));
     if (battle.actions.length === 0) {
       this.discard(battle);
       return ok({ ...this.view(battle), status: 'over', outcome: null });
@@ -271,7 +296,9 @@ export class GymMatches {
     this.prune();
     const id = this.byAccount.get(accountId);
     const battle = id ? this.battles.get(id) : undefined;
-    if (!battle || battle.status !== 'playing') return fail('You are not in a gym battle.', 404);
+    if (!battle || this.expireIfOverdue(battle)) return fail('You are not in a gym battle.', 404);
+    // Asking is coming back, so the deadline restarts here too.
+    battle.lastActivity = this.now();
     return ok(this.view(battle));
   }
 
@@ -281,6 +308,20 @@ export class GymMatches {
   }
 
   // --- internals -----------------------------------------------------------
+
+  /**
+   * Settles a battle whose deadline has passed, so touching it cannot revive it.
+   *
+   * Without this, `move()` refreshed `lastActivity` before anything compared it to the deadline, so a move made an
+   * hour late simply reset the clock and the forfeit never happened. Returns true if the battle is now over.
+   */
+  private expireIfOverdue(battle: GymBattle): boolean {
+    if (battle.status !== 'playing') return true;
+    if (this.now() - battle.lastActivity <= GYM_TTL_MS) return false;
+    if (battle.actions.length > 0) this.settle(battle, LEADER_SIDE);
+    else this.discard(battle);
+    return true;
+  }
 
   private own(accountId: number, id: string): GymResult<GymBattle> {
     const battle = this.battles.get(id);
@@ -297,6 +338,8 @@ export class GymMatches {
     battle.lastActivity = this.now();
     if (battle.settled) return;
     battle.settled = true;
+    // Resolved, so the next challenge to this gym draws afresh.
+    this.pendingSeeds.delete(`${battle.accountId}:${battle.gymId}`);
     const score: 0 | 0.5 | 1 = winner === 'draw' ? 0.5 : winner === PLAYER_SIDE ? 1 : 0;
     battle.recorded = this.accounts.record(battle.accountId, battle.gymId, score).ok;
   }

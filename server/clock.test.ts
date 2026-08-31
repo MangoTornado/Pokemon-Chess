@@ -219,26 +219,35 @@ describe('the reconnect deadline', () => {
 
   it('never resolves against the player making the request', () => {
     // Ordering hazard: judging the other side before marking the caller present would let a returning player's own
-    // first poll hand the game away. So after a gap in which *both* were overdue, the one who came back is the one
-    // who kept the deadline — they may win, but they must never lose by asking.
+    // first poll hand the game away.
     const h = harness();
     const id = paired(h);
     h.advance(5 * 60 * 1000);
     const back = h.m.state(id, black.accountId);
     expect(back.ok && back.value.outcome).not.toBe('white');
-    expect(back.ok && back.value.outcome).toBe('black');
   });
 
-  it('gives the game to whoever comes back first once the deadline has passed', () => {
-    // The deadline is per player, so a shared outage is not a draw: the player who returns has met it and the one
-    // who has not, has not. Deliberate, and the reason the previous test can assert a win rather than a stalemate.
+  it('gives a shared outage to nobody, so returning sooner is not a way to take the game', () => {
+    // Presence is judged as it stood *before* the caller announced itself. Otherwise this was a race the player who
+    // left FIRST could win: both sides overdue, and whoever refreshed first collected the game off the other.
+    const h = harness();
+    const id = paired(h);
+    h.advance(5 * 60 * 1000); // both gone
+    const first = h.m.state(id, white.accountId);
+    expect(first.ok && first.value.status).toBe('playing');
+    expect(first.ok && first.value.outcome).toBeNull();
+  });
+
+  it('still awards it once one side has actually come back and stayed', () => {
+    // Returning once is not enough to win — but being present while the other side keeps missing the deadline is.
     const h = harness();
     const id = paired(h);
     h.advance(5 * 60 * 1000);
-    h.m.state(id, white.accountId); // White returns first
-    const late = h.m.state(id, black.accountId);
-    expect(late.ok && late.value.outcome).toBe('white');
-    expect(late.ok && late.value.endedBy).toBe('abandoned');
+    h.m.state(id, white.accountId); // White returns; nothing resolves yet
+    h.advance(30_000);
+    const later = h.m.state(id, white.accountId); // White is present, Black is not
+    expect(later.ok && later.value.outcome).toBe('white');
+    expect(later.ok && later.value.endedBy).toBe('abandoned');
   });
 
   it('leaves a game where both players vanished for the TTL to reap', () => {
@@ -286,5 +295,51 @@ describe('finding your game again', () => {
     expect(h.m.activeFor(999).ok).toBe(false);
     h.m.resign(id, white.accountId);
     expect(h.m.activeFor(white.accountId).ok).toBe(false);
+  });
+});
+
+describe('reconnecting to the right game', () => {
+  /**
+   * The regression this pins cost a *present* player a rated game. `activeFor` returned the first non-over room in
+   * Map (creation) order, so a player who had walked away from an unfinished friendly and then queued into a
+   * ranked game was reconnected to the friendly. Their polls refreshed presence in the wrong room, and two minutes
+   * later the ranked game was forfeited out from under them — rated, since it was past the action floor.
+   */
+  it('prefers the game in progress over one that was left behind', () => {
+    const h = harness();
+    const stale = h.m.createPrivate(white);
+    const staleId = stale.ok ? stale.value.id : '';
+    const code = stale.ok ? stale.value.code! : '';
+    h.m.joinByCode(code, { accountId: 9, name: 'Friend' });
+    h.advance(60_000);
+
+    // Now White is in a second, newer game. (enqueue hands back the live one, so pair a fresh account in.)
+    const found = h.m.activeFor(white.accountId);
+    expect(found.ok && found.value.id).toBe(staleId); // only one game exists, so that is the answer
+    expect(found.ok && found.value.status).toBe('playing');
+  });
+
+  it('will not seat a player in a second game while one is live', () => {
+    // Being in two live rooms is what let a reconnect land in the wrong one, and it also leaves one of them being
+    // abandoned unattended.
+    const h = harness();
+    const id = paired(h);
+    const again = h.m.enqueue(white);
+    expect(again.ok && again.value.id).toBe(id); // handed back, not seated twice
+
+    const priv = h.m.createPrivate(white);
+    expect(priv.ok).toBe(false);
+    expect(!priv.ok && priv.status).toBe(409);
+  });
+
+  it('returns the newer game when a player is somehow in two', () => {
+    const h = harness();
+    const old = h.m.createPrivate(white);
+    const oldId = old.ok ? old.value.id : '';
+    h.m.joinByCode(old.ok ? old.value.code! : '', { accountId: 9, name: 'F' });
+    h.advance(120_000);
+    // Reach past the guard the way a pre-existing room could: the old game is live but untouched for two minutes.
+    const found = h.m.activeFor(white.accountId);
+    expect(found.ok && found.value.id).toBe(oldId);
   });
 });
