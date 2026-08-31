@@ -86,6 +86,25 @@ export interface RoomView {
   readonly chat: readonly { side: 'white' | 'black'; name: string; phrase: number; at: number }[];
 }
 
+/** A gym battle as the server describes it. The action list is the server's, and it is the authority. */
+export interface GymBattleView {
+  readonly id: string;
+  readonly gymId: string;
+  /** The server's seed. The client builds the same board from it; it never chooses one. */
+  readonly seed: string;
+  readonly status: 'playing' | 'over';
+  readonly actions: readonly number[];
+  readonly outcome: 'white' | 'black' | 'draw' | null;
+  readonly turn: 'white' | 'black';
+  readonly you: 'white' | 'black';
+  readonly recorded: boolean;
+}
+
+interface GymResponse {
+  readonly battle: GymBattleView;
+  readonly profile: PublicProfile | null;
+}
+
 export const api = {
   register: (input: { username: string; password: string; displayName?: string; avatar?: Avatar }) =>
     call<{ profile: PublicProfile }>('POST', '/api/register', input),
@@ -146,19 +165,24 @@ export const api = {
   respondTrade: (id: number, action: 'accept' | 'decline' | 'cancel') =>
     call<{ ok: true }>('POST', `/api/trades/${id}/${action}`),
 
-  /**
-   * Reports a gym battle's outcome; the server updates rating and the badge case and returns the profile.
-   *
-   * Deliberately does not carry the opponent's rating. The server reads that from the gym's own definition,
-   * because a client-supplied one was a rating faucet — and sending a number the server ignores would invite
-   * someone to think it mattered.
-   */
-  ladderResult: (input: { score: 0 | 0.5 | 1; gymId: string }) =>
-    call<{ profile: PublicProfile }>('POST', '/api/ladder/result', input),
-
+  
   // --- Online multiplayer ---
   mpQueue: () => call<{ game: RoomView }>('POST', '/api/mp/queue'),
   mpCancelQueue: () => call<{ ok: true }>('POST', '/api/mp/queue/cancel'),
+  // --- Gym battles, refereed by the server ---
+  //
+  // There is no "report a gym result" call, deliberately. One used to exist and the score came from the request
+  // body, so a client could declare a win. The server plays the leader now and records its own verdict, so the
+  // client's only inputs are which gym to challenge and which move it wants to make.
+
+  /** Opens a gym battle. The server issues the seed, which is what stops a client shopping for a favourable one. */
+  gymStart: (gymId: string) => call<GymResponse>('POST', '/api/gym/start', { gymId }),
+  /** Plays one move and receives the leader's reply. Slow by nature: the leader thinks on the server. */
+  gymMove: (id: string, ply: number, encoded: number) =>
+    call<GymResponse>('POST', '/api/gym/move', { id, ply, encoded }),
+  gymAbandon: (id: string) => call<{ ok: boolean }>('POST', '/api/gym/abandon', { id }),
+  gymState: (id: string) => call<GymResponse>('GET', `/api/gym/${encodeURIComponent(id)}`),
+
   /** Abandons one specific waiting room — the private-game counterpart of cancelling the queue. */
   mpAbandon: (id: string) => call<{ ok: boolean }>('POST', '/api/mp/abandon', { id }),
   mpCreate: () => call<{ game: RoomView }>('POST', '/api/mp/create'),

@@ -13,6 +13,7 @@ import { Accounts } from './accounts.ts';
 import { Matches, QUICK_CHAT } from './matches.ts';
 import { TRAINERS } from '../src/profile/avatar.ts';
 import { LOGIN_LIMIT, REGISTER_LIMIT, RateLimiter } from './rateLimit.ts';
+import type { GymMatches } from './gymMatches.ts';
 
 export interface ApiRequest {
   readonly method: string;
@@ -48,6 +49,7 @@ export async function handleApi(
   req: ApiRequest,
   matches?: Matches,
   limiter: RateLimiter = defaultLimiter,
+  gyms?: GymMatches,
 ): Promise<ApiResponse> {
   const { method, path } = req;
   const client = req.client ?? 'unknown';
@@ -161,15 +163,34 @@ export async function handleApi(
     return json(200, { profile: result.value });
   }
 
-  if (method === 'POST' && path === '/api/ladder/result') {
+  // There is deliberately no route for reporting a gym result. It used to exist, and a client could simply
+  // declare a win: the score came from the request body. A gym battle is now refereed by the server move by move
+  // (`/api/gym/*`), which records the outcome from its own engine, so there is nothing left for a client to
+  // assert. Signed-out players keep a purely local ladder, which touches no server state at all.
+
+  // ---- Gym battles, refereed by the server ---------------------------------------------------------
+  if (gyms && path.startsWith('/api/gym/')) {
     const accountId = accounts.accountForToken(req.cookies[SESSION_COOKIE]);
-    if (accountId === null) return json(401, { error: 'Not signed in.' });
+    if (accountId === null) return json(401, { error: 'Sign in to challenge a gym.' });
     const b = asObject(req.body);
-    // Only the gym and the outcome come from the client; the opponent's rating is read from the gym itself and
-    // the unlock gate is enforced server-side.
-    const result = accounts.recordLadderResult(accountId, { score: b.score, gymId: b.gymId });
-    if (!result.ok) return json(400, result.error);
-    return json(200, { profile: result.value });
+    const gymResult = <T>(r: { ok: true; value: T } | { ok: false; error: string; status: number }) =>
+      r.ok ? json(200, { battle: r.value, profile: accounts.publicProfile(accountId) }) : json(r.status, { error: r.error });
+
+    if (method === 'POST' && path === '/api/gym/start') return gymResult(gyms.start(accountId, b.gymId));
+    if (method === 'POST' && path === '/api/gym/move') {
+      const id = typeof b.id === 'string' ? b.id : '';
+      // Awaited: the leader's reply runs on a worker thread, so this is the one route that genuinely waits.
+      return gymResult(await gyms.move(accountId, id, b.ply, b.encoded));
+    }
+    if (method === 'POST' && path === '/api/gym/abandon') {
+      const id = typeof b.id === 'string' ? b.id : '';
+      return json(200, { ok: gyms.abandon(accountId, id) });
+    }
+    if (method === 'GET') {
+      const m = /^\/api\/gym\/([A-Za-z0-9_-]+)$/.exec(path);
+      if (m) return gymResult(gyms.state(accountId, m[1]!));
+    }
+    return json(404, { error: 'Not found.' });
   }
 
   if (method === 'GET' && path === '/api/collection') {

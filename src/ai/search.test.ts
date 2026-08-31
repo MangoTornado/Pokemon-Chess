@@ -49,7 +49,14 @@ describe('the evaluator', () => {
   });
 });
 
-describe('move choice', () => {
+/**
+ * A search budget, not a unit-test one.
+ *
+ * These run real negamax at several depths on full boards, which is tens of thousands of nodes — seconds, not
+ * milliseconds. On vitest's 5 s default they passed alone and failed intermittently in a full parallel run, which
+ * reads as noise rather than as the honest "this is expensive" it actually is.
+ */
+describe('move choice', { timeout: 120_000 }, () => {
   it('returns a legal move for the side to move', () => {
     const game = randomGame('choose');
     const result = chooseMove(game, DIFFICULTIES.ace!, 7);

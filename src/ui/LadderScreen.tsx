@@ -11,7 +11,7 @@
  * screen shows which, so a guest knows their climb is only remembered on this device.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { Dex } from '../data/dex.ts';
 import type { PokemonChess } from '../engine/variant.ts';
@@ -20,6 +20,8 @@ import { GYM_LEADERS, gymGate, isGymUnlocked, nextGym } from '../ladder/badges.t
 import type { GymLeader } from '../ladder/badges.ts';
 import { BASE_RATING, kFactorFor, tierProgress, updateRating } from '../ladder/rating.ts';
 import type { LadderView } from '../ladder/store.ts';
+import { api } from '../net/api.ts';
+import type { GymBattleView } from '../net/api.ts';
 import { GameBoard } from './GameBoard.tsx';
 import { EncounterCard } from './EncounterCard.tsx';
 import { TYPE_COLORS, textColorOn } from './typeColors.ts';
@@ -319,10 +321,43 @@ interface Outcome {
  * rating change and any badge earned.
  */
 export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchProps) {
-  // A fresh seed per mount so a rematch is a new game, captured once so React state changes do not reroll it.
-  const seed = useRef(`gym-${gym.id}-${Math.floor(performance.now())}`).current;
+  /**
+   * A signed-in gym battle is refereed by the server, so the seed comes from it.
+   *
+   * The client used to mint the seed, and because `buildGymMatch` draws the *player's own* army from it too, that
+   * let a modified client grid-search seeds offline for a favourable draw. A signed-out player still mints one
+   * locally: their ladder is purely local and touches nothing on the server, so there is nothing to protect.
+   */
+  const [battle, setBattle] = useState<GymBattleView | null>(null);
+  const [starting, setStarting] = useState(signedIn === true);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const localSeed = useRef(`gym-${gym.id}-${Math.floor(performance.now())}`).current;
+  const seed = battle?.seed ?? localSeed;
   const setup = useMemo(() => buildGymMatch(dex, gym.type, seed), [dex, gym.type, seed]);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+
+  useEffect(() => {
+    if (signedIn !== true) return;
+    let live = true;
+    void api.gymStart(gym.id).then((r) => {
+      if (!live) return;
+      setStarting(false);
+      if (r.ok) setBattle(r.value.battle);
+      else setServerError(r.error.error);
+    });
+    return () => { live = false; };
+  }, [gym.id, signedIn]);
+
+  /** Sends the player's move and adopts the server's reply, which already contains the leader's answer. */
+  const [thinking, setThinking] = useState(false);
+  const sendMove = async (encoded: number, plyBefore: number) => {
+    if (!battle) return;
+    setThinking(true);
+    const r = await api.gymMove(battle.id, plyBefore, encoded);
+    setThinking(false);
+    if (r.ok) setBattle(r.value.battle);
+    else setServerError(r.error.error);
+  };
   const recorded = useRef(false);
 
   const difficulty = { name: gym.leader, depth: gym.depth, typeBlindness: gym.typeBlindness };
@@ -339,7 +374,8 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
     const ratingAfter = rematch ? ratingBefore : updateRating(ratingBefore, gym.rating, score, kFactorFor(ladder.games));
     const badgeEarned = score === 1 && !rematch;
     setOutcome({ score, ratingBefore, ratingAfter, badgeEarned, rematch });
-    // The gym id always goes up, win or lose: the server needs it to recognise a rematch.
+    // Signed out, this writes the local ladder. Signed in, it only refreshes the profile — the server already
+    // recorded the result of the battle it refereed, and there is no endpoint left to report one to.
     void ladder.record({ opponentRating: gym.rating, score, gymId: gym.id });
   };
 
@@ -371,15 +407,39 @@ export function LadderMatch({ dex, gym, ladder, onExit, signedIn }: LadderMatchP
           offers more and better, a loss fewer and plainer, but never nothing. */}
       {outcome && signedIn && <EncounterCard dex={dex} />}
 
-      <GameBoard
-        dex={dex}
-        seed={seed}
-        setup={setup}
-        onLeave={onExit}
-        hideLeave
-        ai={{ side: 'black', difficulty }}
-        onGameOver={handleGameOver}
-      />
+      {serverError && (
+        <p style={{ margin: 0, color: TYPE_COLORS.Fire, fontSize: '0.85rem' }}>
+          {serverError} — the Gym could not referee this battle, so nothing was recorded.
+        </p>
+      )}
+
+      {starting ? (
+        <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.9rem' }}>
+          {gym.leader} is choosing a team…
+        </p>
+      ) : (
+        <GameBoard
+          dex={dex}
+          seed={seed}
+          setup={setup}
+          onLeave={onExit}
+          hideLeave
+          onGameOver={handleGameOver}
+          {...(battle
+            // Refereed by the server: it owns the action list and plays the leader, so the board is a replay of
+            // what the server has accepted rather than a local game with a local opponent.
+            ? {
+                controlled: {
+                  side: 'white' as const,
+                  actions: battle.actions,
+                  opponentName: thinking ? `${gym.leader} is thinking…` : gym.leader,
+                  onLocalMove: (encoded: number, plyBefore: number) => void sendMove(encoded, plyBefore),
+                },
+              }
+            // Signed out: a purely local battle against a local AI, recorded only in the browser.
+            : { ai: { side: 'black' as const, difficulty } })}
+        />
+      )}
     </section>
   );
 }

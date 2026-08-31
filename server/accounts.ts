@@ -18,6 +18,7 @@ import {
 import type { FriendView, ListingView, PublicProfile, TradeView, WonderResult } from '../src/profile/profile.ts';
 import { updateRating, kFactorFor } from '../src/ladder/rating.ts';
 import { GYM_BY_ID, GYM_LEADERS, highestBadge, isGymUnlocked } from '../src/ladder/badges.ts';
+import type { GymLeader } from '../src/ladder/badges.ts';
 import type { Encounter, MatchOutcome } from '../src/game/encounters.ts';
 
 /** Sessions live a fortnight; a returning player is not re-challenged constantly, but a token expires. */
@@ -877,6 +878,35 @@ export class Accounts {
     return ok({ species, profile: this.publicProfile(accountId)! });
   }
 
+  /**
+   * An account's rating and badge case, for the gym unlock gate.
+   *
+   * Exposed so `GymMatches` can enforce the gate *before* a battle starts rather than after it finishes, which is
+   * the only order that stops a locked gym from being played at all.
+   */
+  standing(accountId: number): { rating: number; badges: readonly string[] } | null {
+    const prof = this.db.raw.prepare('SELECT rating, badges FROM profiles WHERE account_id = ?').get(accountId) as
+      { rating: number; badges: string } | undefined;
+    if (!prof) return null;
+    return { rating: prof.rating, badges: this.parseBadges(prof.badges) };
+  }
+
+  /**
+   * Records a gym battle the *server itself played*.
+   *
+   * The distinction from the old `/api/ladder/result` is the whole security story. That endpoint took a score
+   * from the request body, so a client could simply declare a win; this is reachable only from `GymMatches`,
+   * which derives the score from its own engine's verdict at the end of a game it refereed move by move.
+   */
+  recordGymResult(accountId: number, gymId: string, score: 0 | 0.5 | 1): Result<PublicProfile> {
+    const gym = GYM_BY_ID.get(gymId);
+    if (!gym) return fail('Unknown gym.');
+    // No unlock gate here: `GymMatches.start` enforced it before a single move was played, and re-testing it now
+    // could only discard a win the server refereed itself. Returns the Result rather than swallowing it so a
+    // failure is visible instead of silently costing a player their badge.
+    return this.applyGymResult(accountId, gym, score);
+  }
+
   /** Grants a species to an account — a post-match reward, a starter pick, or a trade in. */
   grant(accountId: number, species: string): void {
     this.db.raw
@@ -925,6 +955,22 @@ export class Accounts {
     if (gymId === null) return fail('Unknown gym.');
     const gym = GYM_BY_ID.get(gymId)!;
     if (!isGymUnlocked(gym, badges, prof.rating)) return fail('That gym will not accept your challenge yet.');
+    return this.applyGymResult(accountId, gym, score);
+  }
+
+  /**
+   * Writes a gym battle's outcome, with no unlock gate of its own.
+   *
+   * The gate is a condition on *starting* a challenge, and re-testing it at the end introduces a bug rather than
+   * safety: a player's rating can fall while they are fighting (a PvP loss in another tab), and a gym the server
+   * itself refereed from start to finish would then have its result silently thrown away. So the gate lives at
+   * the two places a battle can begin — `GymMatches.start` and `recordLadderResult` — and this does the writing.
+   */
+  private applyGymResult(accountId: number, gym: GymLeader, score: 0 | 0.5 | 1): Result<PublicProfile> {
+    const prof = this.db.raw.prepare('SELECT * FROM profiles WHERE account_id = ?').get(accountId) as ProfileRow | undefined;
+    if (!prof) return fail('No such profile.');
+    const badges = new Set(this.parseBadges(prof.badges));
+    const gymId = gym.id;
     // Read from the gym, never from the request: this is the number that used to be the rating faucet.
     const opponentRating = gym.rating;
 

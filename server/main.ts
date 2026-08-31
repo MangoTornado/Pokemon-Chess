@@ -16,6 +16,9 @@ import { dirname, resolve } from 'node:path';
 import { Db } from './db.ts';
 import { Accounts } from './accounts.ts';
 import { Matches } from './matches.ts';
+import { GymMatches } from './gymMatches.ts';
+import { createGymEngine } from './gymEngine.ts';
+import { AiPool } from './aiPool.ts';
 import { createServer } from './server.ts';
 import { loadDexFromDisk } from './gameDex.ts';
 import { createEngineOps } from './gameValidator.ts';
@@ -46,7 +49,18 @@ const matches = new Matches(undefined, undefined, createEngineOps(dex), (info) =
   if (info.ranked) accounts.recordHeadToHead(info.whiteId, info.blackId, info.winner);
 });
 
-const server = createServer({ accounts, matches, staticDir: STATIC_DIR, secureCookies: PRODUCTION });
+// The gym leader is played by the server, so a badge cannot be claimed without a game the server refereed.
+//
+// The leader's search runs on a worker pool rather than inline. That is not an optimisation: at the deepest gyms
+// one reply is seconds of solid CPU, and Node has a single thread, so an inline search would make one Giovanni
+// challenger freeze every other request on the site — including other people's sign-ins.
+const aiPool = new AiPool();
+const gyms = new GymMatches(dex, {
+  standing: (accountId) => accounts.standing(accountId),
+  record: (accountId, gymId, score) => ({ ok: accounts.recordGymResult(accountId, gymId, score).ok }),
+}, { engine: createGymEngine(dex, aiPool.search) });
+
+const server = createServer({ accounts, matches, gyms, staticDir: STATIC_DIR, secureCookies: PRODUCTION });
 
 server.listen(PORT, () => {
   console.log(`Pokémon Chess server on http://localhost:${PORT}  (db: ${DB_PATH}, static: ${STATIC_DIR})`);

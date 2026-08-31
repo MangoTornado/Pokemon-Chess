@@ -68,9 +68,10 @@ export function useLadder(session: Session): LadderView {
   const record = useCallback<LadderView['record']>(
     async ({ opponentRating, score, gymId }) => {
       if (session.profile) {
-        // `opponentRating` stays local: it is only needed for the offline optimistic update below, and the
-        // server derives its own from the gym so the two cannot disagree.
-        if (gymId) await session.recordLadderResult({ score, gymId });
+        // Nothing is *reported* for a signed-in player any more: the server refereed the gym battle move by move
+        // and recorded the outcome itself when the game ended, so there is no endpoint to post a result to. All
+        // that is left to do here is pick up the rating and badge the server already wrote.
+        await session.refresh();
         return;
       }
       setLocal((prev) => {
