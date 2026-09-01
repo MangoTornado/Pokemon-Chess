@@ -619,6 +619,32 @@ export class PokemonChess {
     return safe.length > 0 ? safe : all;
   }
 
+  /**
+   * The moves the variant considers, which is orthodox-legal chess plus one exception.
+   *
+   * A move that captures the enemy king ends the game in your favour on the spot (R1), so it cannot sensibly be
+   * illegal — yet the orthodox generator dropped it whenever you were in check, because taking the enemy king does
+   * not evade your own. That is not a defensible reading of any rule: it refused a move that wins immediately, and
+   * online it was worse than refused, because the server validates against this same list and answered "Illegal
+   * move." to a winning action.
+   *
+   * Deliberately narrow. This does *not* relax the rest of orthodox legality — pins, king-into-attack and castling
+   * through check all still apply, which is the wider R2 question and a design decision rather than a bug.
+   */
+  private candidateMoves(): Move[] {
+    const legal = this.position.generateMoves();
+    // Both generators materialise objects before returning, so they can be called in sequence despite sharing a
+    // scratch buffer.
+    const enemy: Side = this.position.turn === 'white' ? 'black' : 'white';
+    const seen = new Set(legal.map((m) => m.encoded));
+    for (const move of this.position.generatePseudoLegalMoves()) {
+      if (move.captured?.cls !== 'king' || move.captured.side !== enemy) continue;
+      if (seen.has(move.encoded)) continue;
+      legal.push(move);
+    }
+    return legal;
+  }
+
   /** Legal actions before the guarded-mode filter. The AI and the banner share this. */
   rawMoves(): VariantMove[] {
     // A captured king ends the game, so a kingless board offers nothing.
@@ -626,7 +652,7 @@ export class PokemonChess {
     const pending = this.pending;
     const out: VariantMove[] = [];
 
-    for (const move of this.position.generateMoves()) {
+    for (const move of this.candidateMoves()) {
       // An extra move belongs to the piece that earned it.
       if (pending) {
         const mover = this.position.pieceAt(move.from);
@@ -763,7 +789,14 @@ export class PokemonChess {
     // Resolve the move on a scratch game at representative luck, then ask whether the opponent has a
     // capture of our king that would succeed.
     const after = this.applyResolved(move, { hits: true, crit: false, momentum: 100 }).game;
-    if (after.kingRemoved(side)) return true; // our own move removed our king → certainly bad
+    if (after.kingRemoved(side)) {
+      // Our own move removed our own king — bad, *unless* it removed theirs in the same resolution. R4 gives that
+      // trade to the mover, so a MUTUAL between kings is a win, not a blunder, and guarded mode must not hide it.
+      // Before R4 was fixed this was unconditionally true, which was consistent with a double removal scoring a
+      // draw; now it would hide a winning move.
+      const enemy: Side = side === 'white' ? 'black' : 'white';
+      return !after.kingRemoved(enemy);
+    }
 
     const enemy: Side = side === 'white' ? 'black' : 'white';
     if (after.turn !== enemy) {
@@ -2020,6 +2053,18 @@ export class PokemonChess {
     const blackKing = !this.kingRemoved('black');
     if (whiteKing && !blackKing) return { kind: 'win', winner: 'white', by: 'king-capture' };
     if (blackKing && !whiteKing) return { kind: 'win', winner: 'black', by: 'king-capture' };
+
+    // R4: one resolution took both kings, so the mover wins (SPEC §12.2).
+    //
+    // This fell through both branches above and landed in the `no-legal-move` draw below — which the SPEC names as
+    // the exact thing not to do: "A draw here would create a degenerate strategy", because a losing player can
+    // always force a draw by trading kings in a MUTUAL. The mover is read from the history rather than from whose
+    // turn it now is: a MUTUAL passes the turn, so board parity names the wrong side.
+    if (!whiteKing && !blackKing) {
+      const last = this.history[this.history.length - 1];
+      // With no history there is no mover — a position constructed kingless, which only a test does.
+      if (last) return { kind: 'win', winner: last.side, by: 'king-capture' };
+    }
 
     if (this.rawMoves().length === 0) return { kind: 'draw', reason: 'no-legal-move' };
     if (this.position.isFiftyMoveDraw()) return { kind: 'draw', reason: 'fifty-move' };
