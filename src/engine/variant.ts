@@ -127,6 +127,15 @@ export interface LiveState {
 export type Verdict = ClashVerdict | 'quiet' | 'blocked';
 
 /**
+ * Actions without progress before the game is a draw.
+ *
+ * Generous on purpose: measured self-play averages around 400 actions a game with a capture every dozen or so, so a
+ * stretch this long with nothing removed and no pawn moved is a stalled position rather than a slow one. It exists
+ * because chess's own fifty-move and threefold rules cannot fire here — see `sinceProgress`.
+ */
+export const ACTION_DRAW_LIMIT = 120;
+
+/**
  * A legal action, with a forecast of what a capture would do at representative luck.
  *
  * The forecast is computed at Momentum 100 with no crit — the plain reading a player should default to.
@@ -241,7 +250,10 @@ export interface ResolvedMove {
 export type GameResult =
   | { readonly kind: 'playing' }
   | { readonly kind: 'win'; readonly winner: Side; readonly by: 'king-capture' }
-  | { readonly kind: 'draw'; readonly reason: 'fifty-move' | 'repetition' | 'no-legal-move' };
+  | {
+      readonly kind: 'draw';
+      readonly reason: 'fifty-move' | 'repetition' | 'no-legal-move' | 'no-progress';
+    };
 
 // ---------------------------------------------------------------------------
 // Rules configuration
@@ -350,6 +362,21 @@ export class PokemonChess {
 
   /** What each transformed piece has become. At most one side's worth, since a side transforms once. */
   private readonly transforms: ReadonlyMap<number, TransformState>;
+
+  /**
+   * Actions since anything irreversible happened, which is the only termination rule this game actually has.
+   *
+   * Chess's own two backstops are both dead here. `withTurnReturned` and `withPieceRemoved` each reset `ply`, and
+   * every action that is not a plain quiet move routes through one of them — repel, rout, mutual, a redirected
+   * attack, an art cast, all four transformations, a bonus move. So `ply` and `halfmoveClock` sit pinned at zero:
+   * measured at 0 and 0 after sixty consecutive art casts, with `repetitionCount()` still 1 and the game still
+   * `playing`. Neither the fifty-move rule nor threefold repetition can ever fire, and a repel loop with Leftovers
+   * healing does not even end by attrition — the game simply never finishes.
+   *
+   * This counts *actions* rather than plies, so nothing can hide from it, and resets only on real progress: a piece
+   * leaving the board, or a pawn moving (neither can be undone).
+   */
+  private readonly sinceProgress: number;
   /**
    * The field move each piece can cast, or null — computed once at creation.
    *
@@ -380,6 +407,7 @@ export class PokemonChess {
     tera: ReadonlySet<number>,
     guards: ReadonlyMap<number, number>,
     transforms: ReadonlyMap<number, TransformState>,
+    sinceProgress: number,
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -398,6 +426,7 @@ export class PokemonChess {
     this.tera = tera;
     this.guards = guards;
     this.transforms = transforms;
+    this.sinceProgress = sinceProgress;
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -450,6 +479,7 @@ export class PokemonChess {
       new Set(), // nobody has Terastallised yet
       new Map(), // nobody is guarding yet
       new Map(), // nobody has transformed yet
+      0, // no actions yet, so no stalling
       new Rng(options.seed).state,
       null,
       [],
@@ -1310,6 +1340,18 @@ export class PokemonChess {
   }
 
   /**
+   * How many actions have passed with nothing irreversible happening.
+   *
+   * Progress means a piece left the board or a pawn moved — the two things no later action can undo. Anything else
+   * (a shuffle, an art, a transformation, a repel) is reversible, so it advances the counter towards the draw.
+   */
+  private progressAfter(resolved: ResolvedMove): number {
+    const removedSomething = resolved.removed.length > 0;
+    const pawnMoved = resolved.move.cls === 'pawn' && resolved.move.to !== resolved.move.from;
+    return removedSomething || pawnMoved ? 0 : this.sinceProgress + 1;
+  }
+
+  /**
    * The successor state, named rather than positional.
    *
    * Every field defaults to this game's current value, so a call site spells out only what its action actually
@@ -1343,6 +1385,9 @@ export class PokemonChess {
       patch.tera ?? this.tera,
       patch.guards ?? this.guards,
       patch.transforms ?? this.transforms,
+      // Every action counts, and only real progress clears it. Derived here rather than passed by each of the
+      // seven action paths, so no path can forget to advance it.
+      this.progressAfter(resolved),
       patch.rngState,
       patch.pending,
       [...this.history, resolved],
@@ -2067,6 +2112,9 @@ export class PokemonChess {
     }
 
     if (this.rawMoves().length === 0) return { kind: 'draw', reason: 'no-legal-move' };
+    // Checked before the chess rules because it is the only one that can actually fire here: `ply` and
+    // `halfmoveClock` are reset by every non-quiet action, so neither chess backstop ever triggers.
+    if (this.sinceProgress >= ACTION_DRAW_LIMIT) return { kind: 'draw', reason: 'no-progress' };
     if (this.position.isFiftyMoveDraw()) return { kind: 'draw', reason: 'fifty-move' };
     if (this.position.isThreefoldRepetition()) return { kind: 'draw', reason: 'repetition' };
     return { kind: 'playing' };

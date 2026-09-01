@@ -25,7 +25,7 @@ export interface GameOutcome {
   readonly winner: GameWinner;
   /** Total sub-moves played (a super-effective chain counts each). */
   readonly plies: number;
-  readonly reason: 'king-capture' | 'fifty-move' | 'repetition' | 'no-legal-move' | 'ply-cap';
+  readonly reason: 'king-capture' | 'fifty-move' | 'repetition' | 'no-legal-move' | 'no-progress' | 'ply-cap';
 }
 
 export interface BatchConfig {
