@@ -32,6 +32,7 @@
 import type { BattleType, SpeciesEntry } from '../data/schema.ts';
 import type { Dex } from '../data/dex.ts';
 import { KING_MOVES, fileOf, squareName } from './board.ts';
+import { zobristWords } from './zobrist.ts';
 import type { PieceClass, Side, Square } from './board.ts';
 import { Position } from './position.ts';
 import {
@@ -134,6 +135,75 @@ export type Verdict = ClashVerdict | 'quiet' | 'blocked';
  * because chess's own fifty-move and threefold rules cannot fire here — see `sinceProgress`.
  */
 export const ACTION_DRAW_LIMIT = 120;
+
+/**
+ * Zobrist words per label, memoised.
+ *
+ * `zobristWords` builds an `Rng` from the label each call, and the labels repeat heavily — the same HP values recur
+ * constantly across a search — so caching turns the fingerprint into map lookups.
+ */
+const WORD_CACHE = new Map<string, readonly [number, number]>();
+function words(label: string): readonly [number, number] {
+  let pair = WORD_CACHE.get(label);
+  if (!pair) {
+    pair = zobristWords(label);
+    WORD_CACHE.set(label, pair);
+  }
+  return pair;
+}
+
+/**
+ * A Zobrist fingerprint of everything about a game state that the chess position does not already say.
+ *
+ * This is what makes threefold repetition mean what it claims. `Position.repetitionCount()` compares a pure chess
+ * key, so a board that returns to a previous arrangement counted as a repetition even when the game was materially
+ * different — proven four separate ways: a king's HP falling 362 -> 318 -> 274 as a burn ticked, a Dynamax lapse
+ * halving a rook's pool mid-"repetition", weather and Reflect timers running down with HP frozen, and Sticky Web
+ * stacking a Speed drop to -2 (which decides who swings first in a Clash). Each declared a draw.
+ *
+ * Only the maps are walked, never all 64 squares: an entry exists only for a piece whose state has left its default,
+ * so two positions where a piece is untouched agree about it for free. In real search states `live` averages two to
+ * five entries and the rest are usually empty, which is why this is affordable per action.
+ *
+ * What is deliberately IN and OUT matters more than the mixing:
+ * - `pending` is in. A state owing a bonus move is genuinely not the same as one that is not.
+ * - `rngState` is OUT. Including it would make every state unique and disable threefold permanently.
+ */
+function variantKeyOf(
+  live: ReadonlyMap<number, LiveState>,
+  statuses: ReadonlyMap<number, PieceStatus>,
+  stages: ReadonlyMap<number, StatStages>,
+  field: Field,
+  tera: ReadonlySet<number>,
+  guards: ReadonlyMap<number, number>,
+  transforms: ReadonlyMap<number, TransformState>,
+  pending: PendingExtraMove | null,
+): readonly [number, number] {
+  let hi = 0;
+  let lo = 0;
+  const mix = (label: string) => {
+    const [h, l] = words(label);
+    hi ^= h;
+    lo ^= l;
+  };
+
+  for (const [id, l] of live) mix(`hp/${id}/${l.hp}/${l.maxHp}`);
+  for (const [id, st] of statuses) mix(`status/${id}/${JSON.stringify(st)}`);
+  for (const [id, st] of stages) mix(`stage/${id}/${JSON.stringify(st)}`);
+  for (const id of tera) mix(`tera/${id}`);
+  for (const [id, turns] of guards) mix(`guard/${id}/${turns}`);
+  for (const [id, t] of transforms) mix(`transform/${id}/${JSON.stringify(t)}`);
+
+  if (field.weather) mix(`weather/${field.weather.kind}/${field.weather.turns}`);
+  for (const side of ['white', 'black'] as Side[]) {
+    const screens = field.screens[side];
+    for (const kind of Object.keys(screens)) mix(`screen/${side}/${kind}/${screens[kind as never] ?? 0}`);
+  }
+  for (const [square, layers] of field.hazards) mix(`hazard/${square}/${JSON.stringify(layers)}`);
+
+  if (pending) mix(`pending/${pending.side}/${pending.pieceId}/${pending.used}`);
+  return [hi, lo];
+}
 
 /**
  * A legal action, with a forecast of what a capture would do at representative luck.
@@ -377,6 +447,10 @@ export class PokemonChess {
    * leaving the board, or a pawn moving (neither can be undone).
    */
   private readonly sinceProgress: number;
+
+  /** The variant fingerprint currently folded into `position`'s key, so the next state can XOR it back out. */
+  private readonly variantKeyHi: number;
+  private readonly variantKeyLo: number;
   /**
    * The field move each piece can cast, or null — computed once at creation.
    *
@@ -408,6 +482,14 @@ export class PokemonChess {
     guards: ReadonlyMap<number, number>,
     transforms: ReadonlyMap<number, TransformState>,
     sinceProgress: number,
+    /**
+     * The variant fingerprint already folded into `position`'s key.
+     *
+     * Passed rather than recomputed, because it must describe what the position *actually carries*, not what this
+     * state would fingerprint to. The root carries none: folding there would mutate a caller's position, and
+     * `replay()` reuses one setup across calls, so it would double-fold.
+     */
+    folded: readonly [number, number],
     rngState: RngState,
     pending: PendingExtraMove | null,
     history: readonly ResolvedMove[],
@@ -427,6 +509,8 @@ export class PokemonChess {
     this.guards = guards;
     this.transforms = transforms;
     this.sinceProgress = sinceProgress;
+    this.variantKeyHi = folded[0];
+    this.variantKeyLo = folded[1];
     this.rngState = rngState;
     this.pending = pending;
     this.history = history;
@@ -480,6 +564,7 @@ export class PokemonChess {
       new Map(), // nobody is guarding yet
       new Map(), // nobody has transformed yet
       0, // no actions yet, so no stalling
+      [0, 0], // the root position carries no fingerprint — see the constructor
       new Rng(options.seed).state,
       null,
       [],
@@ -1362,7 +1447,14 @@ export class PokemonChess {
    */
   private next(
     patch: {
-      readonly position?: Position;
+      /**
+        * Required, not defaulted.
+        *
+        * The fold below mutates the position's running hash, so a path that omitted this and inherited
+        * `this.position` would XOR its child's fingerprint into the *parent's* live object. All seven paths pass a
+        * fresh position today; making it mandatory means none can start sharing one by accident.
+        */
+      readonly position: Position;
       readonly live?: ReadonlyMap<number, LiveState>;
       readonly statuses?: ReadonlyMap<number, PieceStatus>;
       readonly stages?: ReadonlyMap<number, StatStages>;
@@ -1375,8 +1467,29 @@ export class PokemonChess {
     },
     resolved: ResolvedMove,
   ): PokemonChess {
+    // Fold this state's own fingerprint into the position key, replacing the parent's.
+    //
+    // `clone()` copies the running hash, so the child arrives carrying the parent's fingerprint — and that is
+    // load-bearing rather than a bug: `makeMove` writes each undo slot at the top of the call, *before* any chess
+    // XOR, so slot k holds the parent's key. A later recurrence can only match if the snapshot contains the
+    // fingerprint as of that moment. So the correction is a delta: XOR the parent's words out and this state's in.
+    //
+    // Timing matters and nothing else enforces it: the fold must happen after the position exists and before it is
+    // handed on. Doing it at the start of the next action instead would land this fingerprint in the parent's slot,
+    // which yields silently wrong repetition counts rather than an error.
+    const position = patch.position;
+    const live = patch.live ?? this.live;
+    const statuses = patch.statuses ?? this.statuses;
+    const stages = patch.stages ?? this.stages;
+    const field = patch.field ?? this.field;
+    const tera = patch.tera ?? this.tera;
+    const guards = patch.guards ?? this.guards;
+    const transforms = patch.transforms ?? this.transforms;
+    const [keyHi, keyLo] = variantKeyOf(live, statuses, stages, field, tera, guards, transforms, patch.pending);
+    position.xorHash(this.variantKeyHi ^ keyHi, this.variantKeyLo ^ keyLo);
+
     return new PokemonChess(
-      patch.position ?? this.position, this.loadout, this.rules, this.dex, this.stats, this.movesets,
+      position, this.loadout, this.rules, this.dex, this.stats, this.movesets,
       this.arts,
       patch.live ?? this.live,
       patch.statuses ?? this.statuses,
@@ -1388,6 +1501,7 @@ export class PokemonChess {
       // Every action counts, and only real progress clears it. Derived here rather than passed by each of the
       // seven action paths, so no path can forget to advance it.
       this.progressAfter(resolved),
+      [keyHi, keyLo],
       patch.rngState,
       patch.pending,
       [...this.history, resolved],
