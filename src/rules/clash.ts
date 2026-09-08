@@ -1,0 +1,287 @@
+/**
+ * The Clash — how a capture resolves, and the only place an outcome is decided.
+ *
+ * A Clash is a bounded exchange of blows. Blows alternate in Speed order, and the exchange ends the
+ * moment a piece faints or the attacker has swung twice — whichever comes first. That produces exactly
+ * two sequences: attacker-first `A · D · A` (three blows), or defender-first `D · A · D · A` (four). The
+ * attacker always lands the final blow and its edge is exactly one swing, which is what makes initiating
+ * correct by default — a thing chess requires.
+ *
+ * This replaces the σ fudge that a battle-sim design needs to compress a 4–6 turn battle into one chess
+ * action: two swings at the real damage numbers reproduce a single inflated blow almost exactly, in canon
+ * units, with nothing invented. See SPEC §4.
+ *
+ * Pure and deterministic: the randomness (accuracy, momentum, crit) is drawn by the caller and passed in,
+ * so the same inputs always produce the same Clash, which is what replay, server validation and AI search
+ * require. Survive-once clamps (Focus Sash) are wired; the remaining ability/item hooks (thorns, recoil)
+ * compose onto the same `blow` step as they arrive.
+ */
+
+import { computeDamage } from './damage.ts';
+import type { DamageInput } from './damage.ts';
+
+/** A combatant in a Clash. Damage is tracked by mutating `hp` on a copy the caller owns. */
+export interface Combatant {
+  hp: number;
+  readonly maxHp: number;
+  readonly speed: number;
+  /** True until this piece has taken any damage — gates survive-once effects like Focus Sash. */
+  pristine: boolean;
+  /**
+   * True when a held item (Focus Sash) should clamp an otherwise-fatal blow to 1 HP.
+   *
+   * Honoured only if the holder entered the Clash `pristine` — a Sash saves a Pokémon at full health and is
+   * spent by any prior damage — and only once per Clash.
+   */
+  readonly surviveOnce?: boolean;
+}
+
+/**
+ * The randomness for one Clash, drawn once by the caller before resolution.
+ *
+ * Accuracy is resolved up front and per action, because the square must be able to say "this can miss"
+ * before the player commits — a miss may cost tempo but, per the design, never a piece by surprise.
+ */
+export interface ClashRoll {
+  /** False when the attacker's move misses; the Clash becomes a REPEL with no damage. */
+  readonly hits: boolean;
+  /** The attacker's first-swing critical hit. */
+  readonly crit: boolean;
+  /** Momentum, 85..100 — the games' own damage roll, made public. */
+  readonly momentum: number;
+}
+
+/** How a resolved Clash is classified. Maps onto the video's four outcomes plus the failed assault. */
+export type ClashVerdict =
+  /** Defender removed, attacker survives, it was super-effective → attacker takes the square and moves again. */
+  | 'advantage'
+  /** Defender removed, attacker survives → ordinary capture, attacker takes the square. */
+  | 'capture'
+  /** Both removed → the square is left empty. */
+  | 'mutual'
+  /** Attacker removed, defender survives wounded → the defender holds the square. */
+  | 'rout'
+  /** Neither removed → the attacker returns to origin; both keep their damage. */
+  | 'repel';
+
+export interface BlowRecord {
+  readonly by: 'attacker' | 'defender';
+  readonly damage: number;
+  readonly crit: boolean;
+  /** Defender HP (for an attacker blow) or attacker HP (for a defender blow) after the blow. */
+  readonly targetHpAfter: number;
+}
+
+export interface ClashResult {
+  readonly verdict: ClashVerdict;
+  readonly blows: readonly BlowRecord[];
+  /** Damage the attacker did to itself (recoil, Life Orb) or took from a contact item. */
+  readonly recoilTaken: number;
+  readonly attackerHpAfter: number;
+  readonly defenderHpAfter: number;
+  /** Only an `advantage` grants the bonus move. */
+  readonly grantsBonus: boolean;
+  /** True when the attacker moved first, i.e. was faster or had priority. */
+  readonly attackerFirst: boolean;
+}
+
+/**
+ * How the attacker and defender hit each other in a Clash.
+ *
+ * The defender always counters with its own slot-0 (its declared type), because a Clash is a melee
+ * exchange — the defender is not choosing coverage, it is hitting back with what it is. The caller
+ * supplies both damage inputs already parameterised (types, stats, STAB); this module only sequences the
+ * blows and reads the resulting HP.
+ */
+export interface ClashSetup {
+  readonly attacker: Combatant;
+  readonly defender: Combatant;
+  /** The attacker's blow. `crit` and `momentum` are overwritten from the roll per swing. */
+  readonly attackerBlow: DamageInput;
+  /** The defender's counterblow. */
+  readonly defenderBlow: DamageInput;
+  /**
+   * The attacker's move priority. Positive means it strikes first regardless of Speed; a negative-priority
+   * move (Avalanche, Focus Punch) means it strikes last. Zero uses Speed, attacker winning exact ties.
+   */
+  readonly priority?: number;
+  /** True when the defender cannot act this exchange (asleep, paralyzed, flinched). It only takes blows. */
+  readonly defenderIncapacitated?: boolean;
+  /** Whether the attacker's move was super-effective, which distinguishes `advantage` from `capture`. */
+  readonly attackerSuperEffective: boolean;
+  /**
+   * What the attacker pays for its own blows.
+   *
+   * `ofDamage` is a recoil move's share of the damage it dealt (Double-Edge's third); `ofMaxHp` is a flat
+   * cost like Life Orb's tenth. Both are charged per landed blow, as in the games, and neither can reduce the
+   * attacker below 0.
+   */
+  readonly attackerRecoil?: { readonly ofDamage?: number; readonly ofMaxHp?: number };
+  /**
+   * What the defender's held item exacts from an attacker that made contact (Rocky Helmet's sixth).
+   *
+   * A fraction of the *attacker's* max HP, charged once per contact blow — so a two-swing exchange against a
+   * helmeted defender costs the attacker twice, exactly as a two-hit move would in the games.
+   */
+  readonly defenderContact?: { readonly ofAttackerMaxHp: number };
+  /** True when the attacker's move makes contact, which is what a contact-punishing item reacts to. */
+  readonly attackerMakesContact?: boolean;
+  /**
+   * How many times the attacker's move lands per swing (Double Kick's 2, Bullet Seed's rolled 2–5).
+   *
+   * Each strike is its own smaller blow against the same target, which is why a multi-hit move breaks through
+   * a Focus Sash that a single large blow cannot: the first strike spends the clamp and the next finishes.
+   * Resolved by the caller so the count stays part of the replayable roll.
+   */
+  readonly attackerHits?: number;
+}
+
+const MAX_ATTACKER_SWINGS = 2;
+
+/**
+ * Resolves a Clash, mutating the `hp` and `pristine` of the two combatants the caller passes.
+ *
+ * The caller owns the `Combatant` objects and is expected to have cloned them from live pieces, so this
+ * can mutate freely without touching game state.
+ */
+export function resolveClash(setup: ClashSetup, roll: ClashRoll): ClashResult {
+  const { attacker, defender } = setup;
+  const blows: BlowRecord[] = [];
+
+  // A miss is a REPEL: the attacker returns to origin, no one is hurt, the square said so beforehand.
+  if (!roll.hits) {
+    return {
+      verdict: 'repel',
+      blows,
+      recoilTaken: 0,
+      attackerHpAfter: attacker.hp,
+      defenderHpAfter: defender.hp,
+      grantsBonus: false,
+      attackerFirst: true,
+    };
+  }
+
+  const attackerFirst =
+    (setup.priority ?? 0) > 0 ||
+    ((setup.priority ?? 0) === 0 && attacker.speed >= defender.speed);
+
+  let swings = 0;
+  /** Total self-inflicted damage, reported so the UI can show recoil as its own number. */
+  let recoilTaken = 0;
+
+  /**
+   * Whether a survive-once item (Focus Sash) protects each side, decided once from the state *entering*
+   * the Clash.
+   *
+   * It holds for the whole exchange rather than for a single blow, and that is deliberate: a Clash is one
+   * capture action from the player's point of view, and the attacker swings up to twice within it, so a
+   * per-blow clamp would let the second swing undo the save and read as the item not working. "Cannot be
+   * knocked out from full health" is the legible rule and the SPEC's CLAMP-to-1 (§13). The holder is left
+   * on 1 HP, so it is no longer pristine and the next capture attempt finishes it.
+   */
+  const sashed: { attacker: boolean; defender: boolean } = {
+    attacker: attacker.surviveOnce === true && attacker.pristine,
+    defender: defender.surviveOnce === true && defender.pristine,
+  };
+
+  /**
+   * Applies a blow, clamping to 1 HP instead of removing a protected target.
+   *
+   * `spends` distinguishes the two kinds of repeated blow, and the distinction is the whole reason the clamp
+   * behaves as it does. The exchange's own two swings are an *abstraction* of one capture action, so they must
+   * not undo the save — a Sash that failed to save you from the attack you saw would read as broken. But a
+   * multi-hit move's strikes are explicitly several hits, in the games too, and there a Sash genuinely falls
+   * to Bullet Seed. So a multi-hit strike spends the clamp; an ordinary swing does not.
+   */
+  const land = (target: Combatant, who: 'attacker' | 'defender', damage: number, spends = false): void => {
+    if (sashed[who] && damage >= target.hp) {
+      target.hp = 1;
+      if (spends) sashed[who] = false;
+    } else {
+      target.hp = Math.max(0, target.hp - damage);
+    }
+    target.pristine = false;
+  };
+
+  /** Charges the attacker for a blow it just landed: its own recoil, then the defender's contact punish. */
+  const chargeAttacker = (damageDealt: number): void => {
+    let cost = 0;
+    const recoil = setup.attackerRecoil;
+    if (recoil?.ofDamage) cost += Math.max(1, Math.floor(damageDealt * recoil.ofDamage));
+    if (recoil?.ofMaxHp) cost += Math.max(1, Math.floor(attacker.maxHp * recoil.ofMaxHp));
+    if (setup.defenderContact && setup.attackerMakesContact) {
+      cost += Math.max(1, Math.floor(attacker.maxHp * setup.defenderContact.ofAttackerMaxHp));
+    }
+    if (cost <= 0) return;
+    // Recoil is self-inflicted, so a survive-once clamp does not save the attacker from it — the same as in
+    // the games, where a Sash does not prevent recoil KOs.
+    attacker.hp = Math.max(0, attacker.hp - cost);
+    attacker.pristine = false;
+    recoilTaken += cost;
+  };
+
+  const attackerSwing = (): boolean => {
+    swings += 1;
+    // A multi-hit move divides its power across strikes, as in the games — so it is not simply more damage,
+    // it is the same damage delivered in pieces, which is what makes it good against a clamp and bad against
+    // a damage reduction.
+    const strikes = Math.max(1, setup.attackerHits ?? 1);
+    for (let strike = 0; strike < strikes; strike++) {
+      const crit = roll.crit && swings === 1 && strike === 0;
+      const full = computeDamage({ ...setup.attackerBlow, crit, momentum: roll.momentum });
+      const dmg = strikes === 1 ? full : Math.max(1, Math.floor(full / strikes));
+      land(defender, 'defender', dmg, strikes > 1);
+      blows.push({ by: 'attacker', damage: dmg, crit, targetHpAfter: defender.hp });
+      chargeAttacker(dmg);
+      if (defender.hp <= 0 || attacker.hp <= 0) break;
+    }
+    // Recoil can fell the attacker on its own swing, which ends the exchange there.
+    return defender.hp <= 0 || attacker.hp <= 0 || swings >= MAX_ATTACKER_SWINGS;
+  };
+
+  const defenderSwing = (): boolean => {
+    if (setup.defenderIncapacitated) return false;
+    // The defender never crits on the counter and takes the attacker's momentum band too.
+    const dmg = computeDamage({ ...setup.defenderBlow, crit: false, momentum: roll.momentum });
+    land(attacker, 'attacker', dmg);
+    blows.push({ by: 'defender', damage: dmg, crit: false, targetHpAfter: attacker.hp });
+    return attacker.hp <= 0;
+  };
+
+  // The exchange: alternate in order, attacker's swing count is the cap, either faint ends it.
+  const order: ('attacker' | 'defender')[] = attackerFirst
+    ? ['attacker', 'defender']
+    : ['defender', 'attacker'];
+
+  outer: for (;;) {
+    for (const who of order) {
+      if (who === 'attacker') {
+        if (attackerSwing()) break outer;
+      } else {
+        if (defenderSwing()) break outer;
+      }
+    }
+    // A full pass with the attacker not yet at its swing cap and no faint: loop again. In practice the
+    // cap or a faint always ends it, but the guard makes non-termination structurally impossible.
+    if (swings >= MAX_ATTACKER_SWINGS) break;
+  }
+
+  const dDead = defender.hp <= 0;
+  const aDead = attacker.hp <= 0;
+
+  let verdict: ClashVerdict;
+  if (dDead && !aDead) verdict = setup.attackerSuperEffective ? 'advantage' : 'capture';
+  else if (dDead && aDead) verdict = 'mutual';
+  else if (!dDead && aDead) verdict = 'rout';
+  else verdict = 'repel';
+
+  return {
+    verdict,
+    blows,
+    recoilTaken,
+    attackerHpAfter: attacker.hp,
+    defenderHpAfter: defender.hp,
+    grantsBonus: verdict === 'advantage',
+    attackerFirst,
+  };
+}

@@ -1,0 +1,1066 @@
+/**
+ * The playable board.
+ *
+ * Four things here are load-bearing rather than decorative:
+ *
+ * 1. **Outcomes are previewed, not discovered.** Selecting a piece forecasts every capture it could make
+ *    — the verdict it would reach at representative luck — and colours the board by it. Type knowledge is
+ *    the player's edge, and an edge you cannot see before committing is not an edge.
+ * 2. **Refusals are explained in place.** An enemy piece the selected attacker cannot touch is marked and
+ *    captioned. "Why can't I take that?" is the question that makes people quit, and the game always knows
+ *    the answer.
+ * 3. **HP is visible.** Every piece carries a hit-point bar, because a capture is now an exchange of blows
+ *    a piece can survive, and a wounded piece is a real state the player must read.
+ * 4. **Each verdict animates distinctly**, by motion and not by hue alone, and the bonus move a
+ *    super-effective knockout grants — the most consequential event in the game — is impossible to miss.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import type { Dex } from '../data/dex.ts';
+import { ALL_SQUARES, rankOf, squareColor, squareName } from '../engine/board.ts';
+import type { Square } from '../engine/board.ts';
+import { PokemonChess } from '../engine/variant.ts';
+import type { PokemonLoadout, ResolvedMove, Side, Verdict, VariantMove } from '../engine/variant.ts';
+import { ABILITY_IMMUNE_TYPE, WONDER_GUARD } from '../rules/abilities.ts';
+import { IMPLEMENTED_ITEMS } from '../rules/items.ts';
+import { describeStages, hasAnyStage } from '../engine/stages.ts';
+import { HAZARD_LABEL, SCREEN_LABEL, WEATHER_LABEL } from '../engine/field.ts';
+import type { Art } from '../game/arts.ts';
+import type { Position } from '../engine/position.ts';
+import type { Loadout } from '../engine/variant.ts';
+import type { Difficulty } from '../ai/search.ts';
+import { describeGame } from '../ai/gameDescriptor.ts';
+import { useAsyncSearch } from '../ai/useAsyncSearch.ts';
+import { replay } from '../game/replay.ts';
+import { BoardPiece } from './BoardPiece.tsx';
+import { FxLayer, useBattleFx } from './BattleFx.tsx';
+import { PokemonIcon } from './PokemonIcon.tsx';
+import { TIER_PRESENTATION, VERDICT_PRESENTATION, tierOf, verdictCause } from './outcomes.ts';
+import { ROLE_GLYPH, ROLE_LABEL } from './pieceRoles.ts';
+import { TYPE_COLORS, textColorOn } from './typeColors.ts';
+import { isDynamaxMove, isMegaMove } from '../engine/position.ts';
+import { DYNAMAX_TURNS, isTransformItem } from '../game/transform.ts';
+import { abilityDraws } from '../rules/redirect.ts';
+
+/** How long a resolution animation holds the board before it settles. */
+const EFFECT_MS = 760;
+
+type EffectKind = 'advantage' | 'capture' | 'mutual' | 'rout' | 'repel' | 'denied';
+
+interface SquareEffect {
+  readonly square: Square;
+  readonly kind: EffectKind;
+  readonly nonce: number;
+}
+
+
+/**
+ * How each non-board action presents itself: a glyph, an accent colour, and a line on what it does.
+ *
+ * Derived from the offer rather than from a switch on the piece, so a new action shows up correctly by being
+ * generated — the UI has no separate list to keep in step.
+ */
+function selfActionLook(option: VariantMove): { glyph: string; color: string; detail: string } {
+  if (option.art) return { glyph: '✦', color: 'var(--accent)', detail: artDescription(option.art) };
+  if (option.tera) {
+    return {
+      glyph: '💠',
+      color: TYPE_COLORS[option.tera],
+      detail: 'Changes what it resists and what it hits hard — your one transformation.',
+    };
+  }
+  if (isMegaMove(option.move.encoded)) {
+    return {
+      glyph: '🗿',
+      color: '#c792ea',
+      detail: 'Becomes its Mega forme for the rest of the game: new stats, ability, sometimes typing.',
+    };
+  }
+  if (isDynamaxMove(option.move.encoded)) {
+    return {
+      glyph: '🔴',
+      color: '#e05561',
+      detail: `Doubles its HP for ${DYNAMAX_TURNS} turns — long enough that it cannot be traded off.`,
+    };
+  }
+  return { glyph: '⚡', color: '#f0c000', detail: 'Charges its next attack of that type to enormous power.' };
+}
+
+function SelfActionButton({ option, onCast }: { option: VariantMove; onCast: (m: VariantMove) => void }) {
+  const look = selfActionLook(option);
+  return (
+    <button
+      type="button"
+      onClick={() => onCast(option)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '0.4rem', textAlign: 'left',
+        background: `linear-gradient(90deg, ${look.color}33, var(--bg))`,
+        border: `1px solid ${look.color}`,
+        borderRadius: 8, padding: '0.4rem 0.55rem', cursor: 'pointer', color: 'var(--text)', fontSize: '0.78rem',
+      }}
+    >
+      <span aria-hidden>{look.glyph}</span>
+      <span style={{ display: 'grid' }}>
+        <strong>{option.moveName ?? option.art?.name ?? 'Act'}</strong>
+        <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>{look.detail}</span>
+      </span>
+    </button>
+  );
+}
+
+/** One line on what casting this art will do. */
+function artDescription(art: Art): string {
+  if (art.effect.kind === 'weather') return `Sets ${WEATHER_LABEL[art.effect.weather].toLowerCase()} over the board`;
+  if (art.effect.kind === 'screen') {
+    const halves = art.effect.screen === 'reflect' ? 'physical' : 'special';
+    return `${SCREEN_LABEL[art.effect.screen]} — halves ${halves} damage your army takes`;
+  }
+  if (art.effect.kind === 'guard') {
+    return 'Answers every attack on the pieces around it, until the opponent has replied';
+  }
+  return `Lays ${HAZARD_LABEL[art.effect.hazard]} across the enemy's third rank`;
+}
+
+const WEATHER_TINT: Record<string, string> = {
+  sun: '#f5c451', rain: '#6aa9f5', sand: '#d8c59a', snow: '#cfe6f5',
+};
+const WEATHER_ICON: Record<string, string> = { sun: '☀', rain: '🌧', sand: '🌪', snow: '❄' };
+
+/** Colours for hazard pips, so a band of Spikes reads differently from Stealth Rock at a glance. */
+const HAZARD_PIP: Record<string, string> = {
+  spikes: '#b0b7c3', stealthrock: '#b6a136', toxicspikes: '#a33ea1', stickyweb: '#7c9c3f',
+};
+
+function hazardsAt(game: PokemonChess, square: Square): boolean {
+  const at = game.field.hazards.get(square);
+  return at !== undefined && Object.values(at).some((n) => (n ?? 0) > 0);
+}
+
+/** One pip per layer, so three layers of Spikes look worse than one. */
+function hazardPips(game: PokemonChess, square: Square): string[] {
+  const at = game.field.hazards.get(square) ?? {};
+  const out: string[] = [];
+  for (const [kind, layers] of Object.entries(at)) {
+    for (let i = 0; i < (layers ?? 0); i++) out.push(HAZARD_PIP[kind] ?? '#e6edf3');
+  }
+  return out;
+}
+
+function hazardTitle(game: PokemonChess, square: Square): string {
+  const at = game.field.hazards.get(square) ?? {};
+  return Object.entries(at)
+    .filter(([, n]) => (n ?? 0) > 0)
+    .map(([kind, n]) => `${HAZARD_LABEL[kind as keyof typeof HAZARD_LABEL] ?? kind}${(n ?? 0) > 1 ? ` ×${n}` : ''}`)
+    .join(', ');
+}
+
+/** The board-effect class for a resolved verdict; the CSS animations are keyed on it. */
+function effectOf(verdict: Verdict): EffectKind {
+  switch (verdict) {
+    case 'advantage':
+      return 'advantage';
+    case 'mutual':
+      return 'mutual';
+    case 'rout':
+      return 'rout';
+    case 'repel':
+      return 'repel';
+    default:
+      return 'capture';
+  }
+}
+
+export interface GameBoardProps {
+  dex: Dex;
+  seed: string;
+  setup: { position: Position; loadout: Loadout };
+  onLeave: () => void;
+  /** When set, the AI controls this side and plays automatically on its turn. */
+  ai?: { side: Side; difficulty: Difficulty };
+  /**
+   * Tutorial hook: restrict the offered actions to those passing this predicate. Denials are unaffected,
+   * so an immune target still shows its refusal — which is how the "untouchable" lesson works.
+   */
+  allow?: (move: VariantMove) => boolean;
+  /** Tutorial hook: fired after every resolved move, with the resulting game, for goal detection. */
+  onResolved?: (resolved: ResolvedMove, next: PokemonChess) => void;
+  /** Tutorial hook: fired when the player clicks a refused (immune) square. */
+  onDenied?: (square: Square) => void;
+  /** Fired once when the game ends, with the terminal result — the ladder uses it to record a match. */
+  onGameOver?: (result: ReturnType<PokemonChess['result']>) => void;
+  /** Hide the leave button (the tutorial owns its own navigation). */
+  hideLeave?: boolean;
+  /**
+   * Online play. When set, the server's action list is the source of truth: the board is derived by
+   * replaying `actions`, the local player controls `side` only, and a legal move is reported through
+   * `onLocalMove` rather than applied locally — the move returns as a new action. The opponent's label is
+   * shown while it is their turn.
+   */
+  controlled?: {
+    side: Side;
+    actions: readonly number[];
+    opponentName: string;
+    onLocalMove: (encoded: number, plyBefore: number) => void;
+  };
+}
+
+export function GameBoard({
+  dex, seed, setup, onLeave, ai, allow, onResolved, onDenied, onGameOver, hideLeave, controlled,
+}: GameBoardProps) {
+  const [localGame, setLocalGame] = useState(() =>
+    PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }),
+  );
+  const [selected, setSelected] = useState<Square | null>(null);
+  const [effects, setEffects] = useState<readonly SquareEffect[]>([]);
+  const [last, setLast] = useState<ResolvedMove | null>(null);
+  const nonce = useRef(0);
+  const { search } = useAsyncSearch(dex);
+
+  // In controlled (online) mode the game is a pure replay of the shared action list; in local mode it is
+  // the mutated state above.
+  const controlledView = useMemo(
+    () => (controlled ? replay(dex, setup, seed, controlled.actions) : null),
+    [controlled, dex, setup, seed],
+  );
+  const game = controlled ? controlledView!.game : localGame;
+
+  useEffect(() => {
+    setLocalGame(PokemonChess.create({ dex, position: setup.position, loadout: setup.loadout, seed }));
+    setSelected(null);
+    setEffects([]);
+    setLast(null);
+    reportedOver.current = false;
+    appliedPly.current = 0;
+  }, [dex, setup, seed]);
+
+  useEffect(() => {
+    if (effects.length === 0) return;
+    const timer = setTimeout(() => setEffects([]), EFFECT_MS);
+    return () => clearTimeout(timer);
+  }, [effects]);
+
+  // In controlled mode, animate whichever move most recently landed (mine or the opponent's) as the
+  // action list grows, so an arriving move gets the same capture animation a local move would.
+  const appliedPly = useRef(0);
+  useEffect(() => {
+    if (!controlled) return;
+    const n = controlled.actions.length;
+    if (n > appliedPly.current) {
+      const r = controlledView?.last;
+      if (r) {
+        nonce.current += 1;
+        const marks: SquareEffect[] = [];
+        if (r.defender) {
+          marks.push({ square: r.move.to, kind: effectOf(r.verdict), nonce: nonce.current });
+          if (r.verdict === 'mutual') marks.push({ square: r.move.from, kind: 'mutual', nonce: nonce.current });
+        }
+        setEffects(marks);
+        setLast(r);
+      }
+      setSelected(null);
+    }
+    appliedPly.current = n;
+  }, [controlled, controlledView]);
+
+  const legal = useMemo(() => {
+    const all = game.legalMoves();
+    return allow ? all.filter(allow) : all;
+  }, [game, allow]);
+  const result = useMemo(() => game.result(), [game]);
+  const over = result.kind !== 'playing';
+
+  // Report the terminal result exactly once, when the game first ends.
+  const reportedOver = useRef(false);
+  useEffect(() => {
+    if (over && !reportedOver.current) {
+      reportedOver.current = true;
+      onGameOver?.(result);
+    }
+  }, [over, result, onGameOver]);
+
+  // Board destinations only. Every non-board action (an art cast, any of the four transformations) encodes
+  // `from === to`, so keying those by destination would collide them all onto the piece's own square and show
+  // only whichever the generator happened to emit last — which is exactly what used to hide a piece's
+  // Terastallise button whenever it also had an art.
+  const options = useMemo(() => {
+    const map = new Map<Square, VariantMove>();
+    if (selected === null) return map;
+    for (const option of legal) {
+      if (option.move.from === selected && option.move.to !== option.move.from) map.set(option.move.to, option);
+    }
+    return map;
+  }, [legal, selected]);
+
+  /** The selected piece's non-board actions, in offer order, each shown as its own button. */
+  const selfActions = useMemo(() => {
+    if (selected === null) return [] as VariantMove[];
+    return legal.filter((o) => o.move.from === selected && o.move.to === o.move.from);
+  }, [legal, selected]);
+
+  const denied = useMemo(() => {
+    const out = new Map<Square, string>();
+    if (selected === null) return out;
+    const attackerPiece = game.position.pieceAt(selected);
+    if (!attackerPiece) return out;
+
+    for (const { square, piece } of game.position.allPieces()) {
+      if (piece.side === attackerPiece.side) continue;
+      // A king is never immune (R6).
+      if (piece.cls === 'king') continue;
+      // Untouchable only if NO slot — melee or coverage — can hurt it. Coverage may reach what the
+      // declared type cannot, and an ability (Levitate, Volt Absorb…) can grant immunity too, so this asks
+      // the engine for the reason rather than reading the declared type alone.
+      const reason = game.blockedReason(attackerPiece.id, piece.id);
+      if (reason) out.set(square, reason);
+    }
+    return out;
+  }, [game, selected]);
+
+  const movablePieceSquares = useMemo(() => new Set(legal.map((m) => m.move.from)), [legal]);
+
+  const play = useCallback(
+    (option: VariantMove) => {
+      // Online: report the move to the server rather than applying it — it returns as a new action, and the
+      // replay effect above renders and animates it, keeping both clients in lockstep with the server.
+      if (controlled) {
+        controlled.onLocalMove(option.move.encoded, controlled.actions.length);
+        setSelected(null);
+        return;
+      }
+      const { game: next, resolved } = game.play(option.move);
+      nonce.current += 1;
+
+      const marks: SquareEffect[] = [];
+      if (resolved.defender) {
+        marks.push({ square: resolved.move.to, kind: effectOf(resolved.verdict), nonce: nonce.current });
+        // Mutual and rout also destroy the attacker's origin/target square; mark the vacated square.
+        if (resolved.verdict === 'mutual') {
+          marks.push({ square: resolved.move.from, kind: 'mutual', nonce: nonce.current });
+        }
+      }
+
+      setEffects(marks);
+      setLast(resolved);
+      setLocalGame(next);
+      setSelected(resolved.grantsBonus ? resolved.move.to : null);
+      onResolved?.(resolved, next);
+    },
+    [game, onResolved, controlled],
+  );
+
+  const onSquare = useCallback(
+    (square: Square) => {
+      if (over) return;
+      // Not the human's turn while the AI is thinking.
+      if (ai !== undefined && game.turn === ai.side) return;
+      // Online: only act on your own turn, and never touch the board as a spectator.
+      if (controlled && game.turn !== controlled.side) return;
+
+      const option = options.get(square);
+      if (option) {
+        play(option);
+        return;
+      }
+
+      if (denied.has(square)) {
+        nonce.current += 1;
+        setEffects([{ square, kind: 'denied', nonce: nonce.current }]);
+        onDenied?.(square);
+        return;
+      }
+
+      if (movablePieceSquares.has(square)) {
+        setSelected(square);
+        return;
+      }
+      setSelected(null);
+    },
+    [ai, game, denied, movablePieceSquares, options, over, play, onDenied, controlled],
+  );
+
+  // When the AI is on the move, compute and play its move after a short beat — so the human's move
+  // renders and its animation is seen first, and so the board never appears frozen while it thinks.
+  // A seed derived from the move count keeps the AI's play reproducible for a given game.
+  useEffect(() => {
+    if (!ai || controlled || over || game.turn !== ai.side) return;
+    let abandoned = false;
+    const timer = setTimeout(() => {
+      // The search runs in a worker, so a deep Champion search cannot stutter the board mid-animation. The
+      // game is sent as a descriptor (seed + actions), which is all a rebuild needs.
+      const descriptor = describeGame(setup, seed, game);
+      void search(descriptor, ai.difficulty, game.history.length + 1, game).then((encoded) => {
+        if (abandoned || encoded === null) return;
+        const target = game.legalMoves().find((m) => m.move.encoded === encoded);
+        if (target) play(target);
+      });
+    }, effects.length > 0 ? EFFECT_MS + 60 : 220);
+    return () => {
+      abandoned = true;
+      clearTimeout(timer);
+    };
+  }, [ai, controlled, over, game, effects.length, play, search, setup, seed]);
+
+  const effectBySquare = useMemo(() => {
+    const map = new Map<Square, SquareEffect>();
+    for (const e of effects) map.set(e.square, e);
+    return map;
+  }, [effects]);
+
+  // The blow-by-blow layer replays the exchange the engine just resolved. Keyed on the effect nonce so the
+  // same move resolving again (a replayed online action) restarts the sequence.
+  const { fx, motion } = useBattleFx(last, effects[0]?.nonce ?? 0);
+
+  const waitingForOpponent = controlled !== undefined && game.turn !== controlled.side && !over;
+  const humanBlocked = (ai !== undefined && game.turn === ai.side && !over) || waitingForOpponent;
+  const pendingExtra = game.extraMovePieceId !== null;
+  // R8: check is advice, not law — so warn instead of forbidding.
+  //
+  // The side asked about is the one NOT to move. `kingInDanger(x)` answers "can the mover capture x's king",
+  // which is only meaningful about the waiting side; passing `game.turn` asked whether the mover can capture its
+  // own king and so was always false, and this banner has never once rendered. Warning the waiting side is also
+  // the moment that matters: they have just left their king exposed and the opponent is on the clock.
+  const endangered: Side | null = useMemo(() => {
+    const waiting: Side = game.turn === 'white' ? 'black' : 'white';
+    return game.kingInDanger(waiting) ? waiting : null;
+  }, [game]);
+  const rows = [7, 6, 5, 4, 3, 2, 1, 0];
+
+  return (
+    <div style={{ display: 'grid', gap: '1rem' }}>
+      <StatusBar
+        game={game}
+        result={result}
+        pendingExtra={pendingExtra}
+        endangered={endangered}
+        thinking={humanBlocked}
+        aiName={ai?.difficulty.name ?? (waitingForOpponent ? controlled?.opponentName : undefined)}
+        onLeave={onLeave}
+        hideLeave={hideLeave}
+      />
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 268px', gap: '1rem', alignItems: 'start' }}>
+        <div
+          role="grid"
+          aria-label="Pokémon Chess board"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(8, minmax(0, 1fr))',
+            border: '2px solid var(--border)',
+            borderRadius: 10,
+            overflow: 'hidden',
+            aspectRatio: '1 / 1',
+            maxWidth: 620,
+            opacity: over ? 0.8 : 1,
+            // The effects overlay is absolutely positioned against this grid, and container units let the
+            // callout and damage numbers scale with the board rather than the viewport.
+            position: 'relative',
+            containerType: 'inline-size',
+          }}
+        >
+          {rows.flatMap((rank) =>
+            ALL_SQUARES.filter((sq) => rankOf(sq) === rank).map((square) => {
+              const piece = game.position.pieceAt(square);
+              const pokemon = piece ? game.loadoutOf(piece.id) : null;
+              const live = piece ? game.liveOf(piece.id) : null;
+              const status = piece ? game.statusOf(piece.id) : null;
+              const stages = piece ? game.stagesOf(piece.id) : null;
+              const option = options.get(square);
+              const isSelected = square === selected;
+              const denial = denied.get(square);
+              const effect = effectBySquare.get(square);
+              const canMoveHere = option !== undefined;
+              const tier = option?.effectiveness != null ? tierOf(option.effectiveness) : null;
+
+              const label = piece && pokemon && live
+                ? `${squareName(square)}: ${piece.side} ${ROLE_LABEL[piece.cls].toLowerCase()}, ${dex.getSpecies(game.speciesOf(piece.id))?.name ?? pokemon.species}, ${game.battleTypeOf(piece.id)} type, ${live.hp} of ${live.maxHp} HP${
+                    tier ? `. Capture forecast: ${TIER_PRESENTATION[tier].label}` : ''
+                  }${denial ? `. Cannot be captured: ${denial}` : ''}`
+                : `${squareName(square)}: empty${canMoveHere ? '. Legal move' : ''}`;
+
+              return (
+                <button
+                  key={square}
+                  type="button"
+                  onClick={() => onSquare(square)}
+                  aria-label={label}
+                  className={effect ? `pc-effect pc-effect-${effect.kind}` : undefined}
+                  data-nonce={effect?.nonce}
+                  style={{
+                    position: 'relative',
+                    border: 'none',
+                    padding: 0,
+                    containerType: 'size',
+                    cursor: canMoveHere || movablePieceSquares.has(square) ? 'pointer' : 'default',
+                    background: squareColor(square) === 'light' ? 'var(--square-light)' : 'var(--square-dark)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    outline: isSelected ? '3px solid #58a6ff' : 'none',
+                    outlineOffset: -3,
+                  }}
+                >
+                  {piece && pokemon && live && (
+                    <BoardPiece
+                      // The species it currently *is*: a Mega Evolution swaps the sprite, which is the most
+                      // legible signal on the board that the piece changed.
+                      species={dex.requireSpecies(game.speciesOf(piece.id))}
+                      // The type it *fights* as, so a Terastallised piece's ring reads its new type.
+                      type={game.battleTypeOf(piece.id)}
+                      cls={piece.cls}
+                      side={piece.side}
+                      hp={live.hp}
+                      maxHp={live.maxHp}
+                      {...(status ? { status } : {})}
+                      {...(stages ? { stages } : {})}
+                      {...(game.hasTerastallised(piece.id) ? { terastallised: true } : {})}
+                      {...(motion.get(square) ? { motion: motion.get(square)! } : {})}
+                    />
+                  )}
+
+                  {canMoveHere && !piece && (
+                    <span
+                      aria-hidden
+                      style={{
+                        position: 'absolute',
+                        width: '22cqmin',
+                        height: '22cqmin',
+                        borderRadius: '50%',
+                        background: 'rgba(88,166,255,0.75)',
+                        boxShadow: '0 0 0 2cqmin rgba(0,0,0,0.15)',
+                      }}
+                    />
+                  )}
+                  {canMoveHere && piece && tier && (
+                    <span
+                      aria-hidden
+                      style={{
+                        position: 'absolute',
+                        inset: '2%',
+                        borderRadius: 4,
+                        boxShadow: `inset 0 0 0 4cqmin ${TIER_PRESENTATION[tier].color}`,
+                        zIndex: 3,
+                      }}
+                    />
+                  )}
+
+                  {/* A standing guard, so the threat is visible before the player commits to an attack. */}
+                  {piece && game.guardTurnsLeft(piece.id) > 0 && (
+                    <span
+                      aria-hidden
+                      title="Guarding — answers attacks aimed at the pieces around it"
+                      style={{
+                        position: 'absolute', top: '2%', left: '4%', fontSize: '9cqmin', lineHeight: 1,
+                        color: 'var(--accent)', textShadow: '0 0 0.6cqmin rgba(0,0,0,0.9)', zIndex: 2,
+                      }}
+                    >
+                      ⛨
+                    </span>
+                  )}
+
+                  {/* Dynamax and a charged Z-Power: both are invisible in the stats, so they need a mark. */}
+                  {piece && game.dynamaxTurnsLeft(piece.id) > 0 && (
+                    <span
+                      aria-hidden
+                      title={`Dynamaxed — ${game.dynamaxTurnsLeft(piece.id)} turn(s) of doubled HP left`}
+                      style={{
+                        position: 'absolute', top: '2%', right: '4%', fontSize: '8cqmin', lineHeight: 1,
+                        color: '#e05561', textShadow: '0 0 0.6cqmin rgba(0,0,0,0.9)', zIndex: 2,
+                      }}
+                    >
+                      {'\u25CF'.repeat(game.dynamaxTurnsLeft(piece.id))}
+                    </span>
+                  )}
+                  {piece && game.hasZPower(piece.id) && (
+                    <span
+                      aria-hidden
+                      title="Z-Power charged — its next attack of that type hits enormously"
+                      style={{
+                        position: 'absolute', bottom: '2%', right: '4%', fontSize: '9cqmin', lineHeight: 1,
+                        color: '#f0c000', textShadow: '0 0 0.6cqmin rgba(0,0,0,0.9)', zIndex: 2,
+                      }}
+                    >
+                      {'\u26A1'}
+                    </span>
+                  )}
+
+                  {/* Hazards on this square: a small band of pips so the ground itself is readable. */}
+                  {hazardsAt(game, square) && (
+                    <span
+                      aria-hidden
+                      title={hazardTitle(game, square)}
+                      style={{
+                        position: 'absolute', bottom: '2%', left: '4%', display: 'flex', gap: '1.5cqmin',
+                        zIndex: 2,
+                      }}
+                    >
+                      {hazardPips(game, square).map((c, i) => (
+                        <span
+                          key={i}
+                          style={{ width: '7cqmin', height: '7cqmin', background: c, borderRadius: '1cqmin', boxShadow: '0 0 0 0.7cqmin rgba(0,0,0,0.55)' }}
+                        />
+                      ))}
+                    </span>
+                  )}
+
+                  {denial && (
+                    <span
+                      aria-hidden
+                      title={denial}
+                      style={{
+                        position: 'absolute',
+                        inset: '2%',
+                        borderRadius: 4,
+                        boxShadow: `inset 0 0 0 4cqmin ${TIER_PRESENTATION.immune.color}`,
+                        display: 'grid',
+                        placeItems: 'center',
+                        zIndex: 3,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: '34cqmin',
+                          lineHeight: 1,
+                          color: TIER_PRESENTATION.immune.color,
+                          textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+                          fontWeight: 700,
+                        }}
+                      >
+                        ⊘
+                      </span>
+                    </span>
+                  )}
+                </button>
+              );
+            }),
+          )}
+
+          {/* Damage numbers, impacts, the move callout and status pops, over the whole board. */}
+          <FxLayer fx={fx} />
+        </div>
+
+        <SidePanel
+          dex={dex} game={game} last={last} selected={selected}
+          options={options} selfActions={selfActions} onCast={play}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+function StatusBar({
+  game,
+  result,
+  pendingExtra,
+  endangered,
+  thinking,
+  aiName,
+  onLeave,
+  hideLeave,
+}: {
+  game: PokemonChess;
+  result: ReturnType<PokemonChess['result']>;
+  pendingExtra: boolean;
+  /** The side whose king can be taken by the player on the clock, or null. */
+  endangered: Side | null;
+  thinking: boolean;
+  aiName: string | undefined;
+  onLeave: () => void;
+  hideLeave?: boolean | undefined;
+}) {
+  const turnColor = game.turn === 'white' ? '#f6f4ef' : '#15171c';
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.85rem',
+        flexWrap: 'wrap',
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: '0.6rem 0.85rem',
+      }}
+    >
+      {result.kind === 'playing' ? (
+        <>
+          <span
+            aria-hidden
+            style={{ width: 16, height: 16, borderRadius: '50%', background: turnColor, border: '1.5px solid #6b7280' }}
+          />
+          <strong>{game.turn === 'white' ? 'White' : 'Black'} to move</strong>
+          {thinking && (
+            <span style={{ color: 'var(--text-dim)', fontSize: '0.82rem', fontStyle: 'italic' }}>
+              {aiName ?? 'AI'} is thinking…
+            </span>
+          )}
+          {pendingExtra && (
+            <span
+              style={{
+                background: VERDICT_PRESENTATION.advantage.color,
+                color: '#08210e',
+                fontWeight: 750,
+                padding: '0.15rem 0.55rem',
+                borderRadius: 999,
+                fontSize: '0.8rem',
+              }}
+            >
+              ↻ Super effective — move again
+            </span>
+          )}
+          {game.field.weather && (
+            <span
+              title="Weather scales Fire and Water damage; a sandstorm scratches anything that does not resist it."
+              style={{
+                background: WEATHER_TINT[game.field.weather.kind],
+                color: '#0d1117', fontWeight: 750, padding: '0.15rem 0.55rem',
+                borderRadius: 999, fontSize: '0.8rem',
+              }}
+            >
+              {WEATHER_ICON[game.field.weather.kind]} {WEATHER_LABEL[game.field.weather.kind]}
+              {Number.isFinite(game.field.weather.turns) ? ` · ${game.field.weather.turns}` : ''}
+            </span>
+          )}
+          {(['white', 'black'] as const).flatMap((side) =>
+            (Object.entries(game.field.screens[side]) as [keyof typeof SCREEN_LABEL, number][])
+              .filter(([, turns]) => turns > 0)
+              .map(([kind, turns]) => (
+                <span
+                  key={`${side}-${kind}`}
+                  title={`${SCREEN_LABEL[kind]} halves ${kind === 'reflect' ? 'physical' : 'special'} damage for ${side}`}
+                  style={{
+                    fontSize: '0.76rem', padding: '0.12rem 0.5rem', borderRadius: 999,
+                    border: '1px solid var(--border)', color: 'var(--text-dim)',
+                    background: side === 'white' ? 'rgba(246,244,239,0.12)' : 'rgba(21,23,28,0.5)',
+                  }}
+                >
+                  🛡 {SCREEN_LABEL[kind]} · {side === 'white' ? 'W' : 'B'} {turns}
+                </span>
+              )),
+          )}
+          {endangered !== null && (
+            <span
+              style={{
+                background: TIER_PRESENTATION.immune.color,
+                color: '#2a0606',
+                fontWeight: 800,
+                padding: '0.15rem 0.55rem',
+                borderRadius: 999,
+                fontSize: '0.8rem',
+              }}
+            >
+              {/* Named rather than "your": the warning is about the side *not* on the clock, and in a
+                  hot-seat game "your" would be ambiguous about which player it addresses. */}
+              ⚠ {endangered === 'white' ? "White's" : "Black's"} king can be taken
+            </span>
+          )}
+        </>
+      ) : (
+        <strong style={{ color: 'var(--accent)' }}>
+          {result.kind === 'win'
+            ? `${result.winner === 'white' ? 'White' : 'Black'} wins — king captured`
+            : `Draw by ${result.reason.replace(/-/g, ' ')}`}
+        </strong>
+      )}
+      <span style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem' }}>move {game.position.fullmoveNumber}</span>
+        {!hideLeave && (
+          <button
+            type="button"
+            onClick={onLeave}
+            style={{
+              background: 'var(--accent)',
+              color: '#1a1500',
+              border: 'none',
+              borderRadius: 6,
+              padding: '0.35rem 0.8rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            Leave match
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * The selected piece's ability and held item.
+ *
+ * Only the ones that currently do something are called out as active; the rest are shown greyed with a
+ * "flavour only" note, which is honest about what the engine runs today rather than implying an effect the
+ * game will not deliver.
+ */
+function KitRow({
+  dex,
+  pokemon,
+  ability,
+}: {
+  dex: Dex;
+  pokemon: PokemonLoadout;
+  /** The ability the piece has *now* — a Mega forme brings its own, replacing the drafted one. */
+  ability: string | undefined;
+}) {
+  const item = pokemon.item;
+  if (!ability && !item) return null;
+
+  const immuneTo = ability ? ABILITY_IMMUNE_TYPE[ability] : undefined;
+  const abilityActive = ability === WONDER_GUARD || immuneTo !== undefined || abilityDraws(ability) !== null;
+  // A mega stone and a Z-crystal have no turn-to-turn effect, so they are absent from IMPLEMENTED_ITEMS — but
+  // calling them "flavour only" would be wrong twice over: they are the only route to two transformations.
+  const itemActive = item !== undefined
+    && (IMPLEMENTED_ITEMS.includes(item) || isTransformItem(dex, item));
+
+  const chip = (label: string, detail: string, active: boolean) => (
+    <span
+      key={label}
+      title={detail}
+      style={{
+        display: 'inline-flex', gap: '0.3rem', alignItems: 'baseline', fontSize: '0.72rem',
+        padding: '0.15rem 0.4rem', borderRadius: 6,
+        border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+        color: active ? 'var(--text)' : 'var(--text-dim)',
+      }}
+    >
+      <strong>{label}</strong>
+      <span style={{ color: 'var(--text-dim)' }}>{detail}</span>
+    </span>
+  );
+
+  return (
+    <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+      {ability && chip(
+        dex.getAbility(ability)?.name ?? ability,
+        abilityActive
+          ? (ability === WONDER_GUARD ? 'only super-effective hits land' : `immune to ${immuneTo}`)
+          : 'flavour only',
+        abilityActive,
+      )}
+      {item && chip(
+        dex.getItem(item)?.name ?? item,
+        itemActive ? 'in effect' : 'flavour only',
+        itemActive,
+      )}
+    </div>
+  );
+}
+
+function SidePanel({
+  dex,
+  game,
+  last,
+  selected,
+  options,
+  selfActions,
+  onCast,
+}: {
+  dex: Dex;
+  game: PokemonChess;
+  last: ResolvedMove | null;
+  selected: Square | null;
+  options: ReadonlyMap<Square, VariantMove>;
+  /** The selected piece's actions with no board destination: an art cast, and each transformation. */
+  selfActions: readonly VariantMove[];
+  /** Plays an action from the panel — the only route for an action that has no square to click. */
+  onCast: (option: VariantMove) => void;
+}) {
+  const selectedPiece = selected === null ? null : game.position.pieceAt(selected);
+  const selectedPokemon = selectedPiece ? game.loadoutOf(selectedPiece.id) : null;
+  const selectedLive = selectedPiece ? game.liveOf(selectedPiece.id) : null;
+  const captureOptions = [...options.values()].filter((o) => o.effectiveness !== null);
+
+  return (
+    <aside style={{ display: 'grid', gap: '0.75rem' }}>
+      {last && <ResolutionCard dex={dex} resolved={last} />}
+
+      <Panel title={selectedPokemon ? 'Selected' : 'Select a piece'}>
+        {selectedPiece && selectedPokemon && selectedLive ? (
+          <div style={{ display: 'grid', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <PokemonIcon species={dex.requireSpecies(game.speciesOf(selectedPiece.id))} />
+              <div style={{ display: 'grid' }}>
+                <strong style={{ fontSize: '0.9rem' }}>
+                  {dex.getSpecies(game.speciesOf(selectedPiece.id))?.name ?? selectedPokemon.species}
+                </strong>
+                <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+                  {ROLE_GLYPH[selectedPiece.cls]} {ROLE_LABEL[selectedPiece.cls]} · {selectedLive.hp}/
+                  {selectedLive.maxHp} HP
+                </span>
+              </div>
+              <TypePill type={game.battleTypeOf(selectedPiece.id)} />
+            </div>
+
+            {/* Ability and item change how a capture resolves, so they belong on the piece card — an effect
+                the player cannot see is an effect they will read as a bug. */}
+            <KitRow dex={dex} pokemon={selectedPokemon} ability={game.abilityOf(selectedPiece.id)} />
+
+            {/* Every action that has no destination — an art cast, and each transformation the piece can
+                reach. Rendered from one list so a piece with several never silently loses one. */}
+            {selfActions.map((option) => (
+              <SelfActionButton key={option.move.encoded} option={option} onCast={onCast} />
+            ))}
+
+            {game.hasTerastallised(selectedPiece.id) && (
+              <span style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
+                💠 Terastallised — fighting as {game.battleTypeOf(selectedPiece.id)}
+              </span>
+            )}
+
+            {/* Stat stages, with the effective Speed spelled out: Speed decides who swings first, so a drop
+                is the difference between winning and losing the next exchange. */}
+            {hasAnyStage(game.stagesOf(selectedPiece.id)) && (
+              <div style={{ display: 'grid', gap: '0.15rem', fontSize: '0.76rem' }}>
+                <span style={{ color: 'var(--text-dim)' }}>Stat changes</span>
+                <strong style={{ color: '#f0883e' }}>{describeStages(game.stagesOf(selectedPiece.id))}</strong>
+                <span style={{ color: 'var(--text-dim)' }}>
+                  Speed now {game.effectiveSpeed(selectedPiece.id)} (base {game.statsOf(selectedPiece.id).spe})
+                </span>
+              </div>
+            )}
+
+            {captureOptions.length > 0 && (
+              <div style={{ display: 'grid', gap: '0.25rem' }}>
+                <span style={{ color: 'var(--text-dim)', fontSize: '0.75rem' }}>Captures available</span>
+                {captureOptions.map((o) => {
+                  const p = TIER_PRESENTATION[tierOf(o.effectiveness!)];
+                  const v = VERDICT_PRESENTATION[o.forecast];
+                  return (
+                    <div key={o.move.to} style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', fontSize: '0.76rem' }}>
+                      <span style={{ color: p.color, fontWeight: 700, minWidth: 24 }}>{p.glyph}</span>
+                      <span style={{ color: 'var(--text-dim)', minWidth: 24 }}>{squareName(o.move.to)}</span>
+                      <span style={{ color: v.color }}>{v.label}</span>
+                      {o.moveName && <span style={{ color: 'var(--text-dim)', marginLeft: 'auto' }}>{o.moveName}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.82rem' }}>
+            Click one of your pieces. Captures are colour-coded by what they would do, and pieces you
+            cannot touch are marked ⊘.
+          </p>
+        )}
+      </Panel>
+
+      <Panel title="Recent">
+        {game.history.length === 0 ? (
+          <p style={{ margin: 0, color: 'var(--text-dim)', fontSize: '0.82rem' }}>No moves yet.</p>
+        ) : (
+          <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: '0.2rem' }}>
+            {game.history.slice(-7).reverse().map((h, i) => {
+              const p = VERDICT_PRESENTATION[h.verdict];
+              return (
+                <li key={game.history.length - i} style={{ fontSize: '0.76rem', display: 'flex', gap: '0.35rem' }}>
+                  <span style={{ color: 'var(--text-dim)', minWidth: 62 }}>
+                    {squareName(h.move.from)}→{squareName(h.move.to)}
+                  </span>
+                  <span style={{ color: p.color }}>{p.label}</span>
+                  {h.intercepted && (
+                    <span style={{ color: 'var(--accent)' }}>
+                      {h.intercepted.kind === 'draw' ? 'drawn' : 'guarded'}
+                    </span>
+                  )}
+                  {h.crit && <span style={{ color: VERDICT_PRESENTATION.advantage.color }}>crit</span>}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </Panel>
+    </aside>
+  );
+}
+
+function ResolutionCard({ dex, resolved }: { dex: Dex; resolved: ResolvedMove }) {
+  const p = VERDICT_PRESENTATION[resolved.verdict];
+  const cause = verdictCause(resolved.verdict, resolved.crit, resolved.momentum);
+  return (
+    <div
+      style={{
+        background: 'var(--bg-raised)',
+        border: `1px solid ${p.color}`,
+        borderLeft: `4px solid ${p.color}`,
+        borderRadius: 8,
+        padding: '0.6rem 0.75rem',
+        display: 'grid',
+        gap: '0.3rem',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+        <span style={{ color: p.color, fontWeight: 800 }}>{p.glyph}</span>
+        <strong style={{ color: p.color, fontSize: '0.88rem' }}>{p.label}</strong>
+        {resolved.kingCaptured && (
+          <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontWeight: 800, fontSize: '0.78rem' }}>
+            king taken
+          </span>
+        )}
+      </div>
+      {resolved.defender && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
+          {dex.getSpecies(resolved.attacker.species)?.name} ({resolved.attacker.type}
+          {resolved.attackerHpAfter > 0 ? `, ${resolved.attackerHpAfter}/${resolved.attackerMaxHp} HP` : ', fainted'})
+          {' vs '}
+          {dex.getSpecies(resolved.defender.species)?.name} ({resolved.defender.type}
+          {resolved.defenderHpAfter > 0 ? `, ${resolved.defenderHpAfter}/${resolved.defenderMaxHp} HP` : ', fainted'})
+          {resolved.effectiveness !== null && ` · ${resolved.effectiveness}×`}
+        </div>
+      )}
+      {resolved.intercepted && (
+        <div style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
+          {resolved.intercepted.kind === 'draw'
+            ? `${dex.getSpecies(resolved.defender!.species)?.name} drew the attack meant for ${dex.getSpecies(resolved.intercepted.insteadOf.species)?.name} and absorbed it`
+            : `${dex.getSpecies(resolved.defender!.species)?.name} took the hit meant for ${dex.getSpecies(resolved.intercepted.insteadOf.species)?.name}`}
+          {' · '}
+          {squareName(resolved.move.to)} was never contested, so the attacker holds its square
+        </div>
+      )}
+      {cause && <div style={{ fontSize: '0.74rem', color: 'var(--text-dim)' }}>{cause}</div>}
+    </div>
+  );
+}
+
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section
+      style={{
+        background: 'var(--bg-raised)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: '0.6rem 0.75rem',
+        display: 'grid',
+        gap: '0.4rem',
+      }}
+    >
+      <h2 style={{ fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-dim)' }}>
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function TypePill({ type }: { type: Parameters<typeof textColorOn>[0] }) {
+  return (
+    <span
+      style={{
+        marginLeft: 'auto',
+        background: TYPE_COLORS[type],
+        color: textColorOn(type),
+        padding: '0.1rem 0.45rem',
+        borderRadius: 999,
+        fontSize: '0.68rem',
+        fontWeight: 800,
+        textTransform: 'uppercase',
+      }}
+    >
+      {type}
+    </span>
+  );
+}

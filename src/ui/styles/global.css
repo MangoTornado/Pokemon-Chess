@@ -1,0 +1,345 @@
+:root {
+  --bg: #0e1116;
+  --bg-raised: #161b22;
+  --border: #2b323c;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #f7d02c;
+
+  --square-light: #ebd4a7;
+  --square-dark: #a97a52;
+
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  padding: 2rem 1rem 4rem;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 0.9em;
+}
+
+/*
+ * Capture-outcome animations.
+ *
+ * Each of the four outcomes gets a visually distinct motion, not just a distinct colour, so a player can
+ * tell what happened without reading and without relying on hue. The super-effective flash is the loudest
+ * of them on purpose: the free extra move it grants is the most consequential event in the game.
+ */
+
+.pc-effect {
+  animation-duration: 700ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  animation-fill-mode: both;
+}
+
+/* Captured and continuing: a bright expanding bloom that draws the eye back to the piece. */
+/* ADVANTAGE — a super-effective knockout that grants a bonus move: the loudest effect on purpose. */
+.pc-effect-advantage {
+  animation-name: pc-super;
+}
+
+@keyframes pc-super {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba(63, 185, 80, 0.95);
+    filter: brightness(1.6);
+  }
+  45% {
+    box-shadow: inset 0 0 0 14px rgba(63, 185, 80, 0.55);
+    filter: brightness(1.25);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(63, 185, 80, 0);
+    filter: brightness(1);
+  }
+}
+
+/* CAPTURE — an ordinary knockout: a brief, unshowy settle. */
+.pc-effect-capture {
+  animation-name: pc-neutral;
+}
+
+@keyframes pc-neutral {
+  0% {
+    box-shadow: inset 0 0 0 10px rgba(230, 237, 243, 0.5);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(230, 237, 243, 0);
+  }
+}
+
+/* Both destroyed: an amber shudder, so a trade never reads as a clean capture. */
+.pc-effect-mutual {
+  animation-name: pc-mutual;
+}
+
+@keyframes pc-mutual {
+  0% {
+    box-shadow: inset 0 0 0 12px rgba(227, 160, 8, 0.9);
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-3px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-2px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(227, 160, 8, 0);
+    transform: translateX(0);
+  }
+}
+
+/* ROUT — the attacker died in a failed assault: a sharp red inward strike on the square it fell to. */
+.pc-effect-rout {
+  animation-name: pc-rout;
+}
+
+@keyframes pc-rout {
+  0% {
+    box-shadow: inset 0 0 0 14px rgba(248, 81, 73, 0.9);
+    filter: brightness(0.8);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(248, 81, 73, 0);
+    filter: brightness(1);
+  }
+}
+
+/* REPEL — the attack bounced, nobody fell: a soft orange ripple that settles without drama. */
+.pc-effect-repel {
+  animation-name: pc-repel;
+}
+
+@keyframes pc-repel {
+  0% {
+    box-shadow: inset 0 0 0 8px rgba(240, 136, 62, 0.7);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(240, 136, 62, 0);
+  }
+}
+
+/* Refused: a hard red pulse that reads as a rejection rather than as nothing happening. */
+.pc-effect-denied {
+  animation-name: pc-denied;
+  animation-duration: 420ms;
+}
+
+@keyframes pc-denied {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(248, 81, 73, 0);
+  }
+  30%,
+  70% {
+    box-shadow: inset 0 0 0 8px rgba(248, 81, 73, 0.85);
+  }
+}
+
+@keyframes pc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Battle effects — the blow-by-blow layer.
+ *
+ * The square tints above say what a capture *meant*; these say what *happened*: the attacker lunges, each
+ * blow lands with a type-coloured impact and a damage number, the target recoils, and a status mark pops.
+ * Everything is a transform or an opacity so it composes on the GPU and never reflows the board.
+ * --------------------------------------------------------------------------- */
+
+/* A damage number rising off the struck piece and fading. */
+.pc-dmg {
+  animation: pc-dmg-float 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes pc-dmg-float {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.7);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -22%) scale(1.12);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -95%) scale(1);
+  }
+}
+
+/* A crit number is bigger and lands harder. */
+.pc-dmg-crit {
+  animation-name: pc-dmg-float-crit;
+  animation-duration: 1050ms;
+}
+
+@keyframes pc-dmg-float-crit {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.6);
+  }
+  14% {
+    opacity: 1;
+    transform: translate(-50%, -18%) scale(1.5);
+  }
+  30% {
+    transform: translate(-50%, -30%) scale(1.2);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -110%) scale(1.1);
+  }
+}
+
+/* The impact flash: a type-coloured burst on the struck square. */
+.pc-impact {
+  animation: pc-impact-burst 420ms ease-out both;
+}
+
+@keyframes pc-impact-burst {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.35);
+  }
+  60% {
+    opacity: 0.5;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+/* The struck piece recoils — a short, sharp shake distinct from the mutual-destruction shudder. */
+.pc-hit {
+  animation: pc-hit-recoil 320ms ease-out both;
+}
+
+@keyframes pc-hit-recoil {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(7%, -4%);
+  }
+  55% {
+    transform: translate(-5%, 2%);
+  }
+  80% {
+    transform: translate(2%, 0);
+  }
+}
+
+/* The attacker lunges at its target and returns. The direction comes from --pc-dx/--pc-dy. */
+.pc-lunge {
+  animation: pc-lunge-strike 460ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes pc-lunge-strike {
+  0% {
+    transform: translate(0, 0);
+  }
+  38% {
+    transform: translate(calc(var(--pc-dx, 0) * 34%), calc(var(--pc-dy, 0) * 34%));
+  }
+  100% {
+    transform: translate(0, 0);
+  }
+}
+
+/* The move's name, called out over the board as the blow lands. */
+.pc-callout {
+  animation: pc-callout-in 1100ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes pc-callout-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 6px) scale(0.94);
+  }
+  12% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -6px) scale(1);
+  }
+}
+
+/* A status mark landing: it pops in so the new pip or tilt is noticed. */
+.pc-status-pop {
+  animation: pc-status-pop-in 800ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes pc-status-pop-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.5);
+  }
+  25% {
+    opacity: 1;
+    transform: translate(-50%, -30%) scale(1.15);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -70%) scale(1);
+  }
+}
+
+/* Healing (Leftovers at the Checkup) drifts upward in green. */
+.pc-heal {
+  animation: pc-dmg-float 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

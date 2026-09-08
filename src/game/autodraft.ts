@@ -1,0 +1,124 @@
+/**
+ * Deterministic army drafting.
+ *
+ * A placeholder for the real draft, which is a designed strategic phase rather than a dice roll — but a
+ * placeholder with real teeth, because everything downstream needs armies: the playable board, the
+ * tutorial, the sandbox, and the batch simulator that will test the balance claims.
+ *
+ * Seeded throughout, so a surprising army can be reproduced and shared, and so a simulation run is
+ * repeatable.
+ */
+
+import type { Dex } from '../data/dex.ts';
+import type { BattleType, SpeciesEntry } from '../data/schema.ts';
+import { PIECE_CLASSES, STARTING_SQUARES } from '../engine/board.ts';
+import type { PieceClass, Side } from '../engine/board.ts';
+import { Position } from '../engine/position.ts';
+import { Rng } from '../engine/rng.ts';
+import type { Loadout, PokemonLoadout } from '../engine/variant.ts';
+import { pickHeldItem } from './heldItems.ts';
+import { chooseTransformItem } from './transform.ts';
+import type { TransformCandidate } from './transform.ts';
+import { buildMoveset } from './moveset.ts';
+import { pickTeraType } from './tera.ts';
+
+/**
+ * How wide a net to cast when picking for a role.
+ *
+ * Narrow enough that a rook is recognisably bulky and a bishop recognisably a special attacker, wide
+ * enough that two games do not look the same.
+ */
+const CANDIDATE_POOL = 60;
+
+/** Base-stat-total bands per role, so a pawn is not a legendary and a queen is not a Caterpie. */
+function isEligible(species: SpeciesEntry, cls: PieceClass): boolean {
+  if (cls === 'pawn') return species.bst <= 420;
+  if (cls === 'queen') return species.bst >= 520;
+  if (cls === 'king') return species.bst >= 480;
+  return species.bst >= 380 && species.bst <= 600;
+}
+
+function pickForRole(dex: Dex, cls: PieceClass, rng: Rng, taken: Set<string>): SpeciesEntry {
+  const available = dex.baseFormes.filter((s) => !taken.has(s.id) && s.types.length > 0);
+  const eligible = available.filter((s) => isEligible(s, cls));
+
+  // Fall back to the whole pool rather than failing if a band runs dry.
+  const candidates = (eligible.length >= 20 ? eligible : available)
+    .map((s) => ({ species: s, score: dex.roleAffinity(s)[cls] }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, CANDIDATE_POOL)
+    .map((c) => c.species);
+
+  const chosen = rng.pick(candidates);
+  taken.add(chosen.id);
+  return chosen;
+}
+
+export interface DraftedPiece {
+  readonly side: Side;
+  readonly cls: PieceClass;
+  readonly square: number;
+  readonly species: SpeciesEntry;
+  readonly type: BattleType;
+}
+
+export interface DraftResult {
+  readonly position: Position;
+  readonly loadout: Loadout;
+  /** Everything drafted, for a team-sheet view. */
+  readonly drafted: readonly DraftedPiece[];
+}
+
+/**
+ * Drafts two full armies onto a standard starting position.
+ *
+ * A dual-typed species is a genuine choice rather than a coin flip in the real draft — Lapras as Water is
+ * a different piece from Lapras as Ice. Here it is chosen at random, which is exactly the decision the
+ * player will make for themselves later.
+ */
+export function autodraft(dex: Dex, seed: string | number): DraftResult {
+  const rng = new Rng(seed);
+  const position = Position.fromStartingPosition();
+  const taken = new Set<string>();
+  const loadout = new Map<number, PokemonLoadout>();
+  const drafted: DraftedPiece[] = [];
+
+  for (const side of ['white', 'black'] as const) {
+    /** This side's pieces, collected so exactly one of them can be given the transformation item. */
+    const candidates: TransformCandidate[] = [];
+    for (const cls of PIECE_CLASSES) {
+      for (const square of STARTING_SQUARES[side][cls]) {
+        const species = pickForRole(dex, cls, rng, taken);
+        const type = rng.pick(species.types);
+        const piece = position.pieceAt(square);
+        if (!piece) throw new Error(`expected a ${side} ${cls} on square ${square}`);
+        // Each piece fights with one of its species' real abilities (the first non-hidden slot) and a
+        // role-appropriate held item, so ability and item effects are grounded in the actual Pokémon.
+        const ability = species.abilities[0];
+        const item = pickHeldItem(species, cls, type, rng);
+        // The Tera type is derived from the kit the piece will actually carry, so Terastallising turns its
+        // best coverage move into STAB. The moveset is built with the same seed the engine will use.
+        const moveset = buildMoveset(dex, species, type, `${seed}:${piece.id}`);
+        const teraType = pickTeraType(species, type, moveset);
+        loadout.set(piece.id, {
+          species: species.id, type,
+          ...(ability ? { ability } : {}),
+          ...(item ? { item } : {}),
+          ...(teraType ? { teraType } : {}),
+        });
+        drafted.push({ side, cls, square, species, type });
+        candidates.push({ pieceId: piece.id, species, type });
+      }
+    }
+
+    // Exactly one piece per side carries a mega stone or a Z-crystal, matching the one transformation a side
+    // can spend. Any more would be dead weight in place of a real item — see chooseTransformItem.
+    const grant = chooseTransformItem(dex, candidates, rng);
+    if (grant) {
+      const entry = loadout.get(grant.pieceId)!;
+      loadout.set(grant.pieceId, { ...entry, item: grant.item });
+    }
+  }
+
+  return { position, loadout, drafted };
+}

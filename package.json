@@ -1,0 +1,41 @@
+{
+  "name": "pokemon-chess",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Chess played with Pokemon, where type matchups decide what a capture means.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "gen:data": "node scripts/gen-data.ts",
+    "serve": "node server/main.ts",
+    "serve:build": "npm run build && node server/main.ts",
+    "test:balance": "vitest run --config vitest.balance.config.ts"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@pkmn/data": "^0.10.11",
+    "@pkmn/dex": "^0.10.11",
+    "@pkmn/img": "^0.3.4",
+    "@pkmn/sim": "^0.10.11",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "chess.js": "^1.4.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}

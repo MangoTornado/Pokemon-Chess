@@ -1,0 +1,19 @@
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+.DS_Store
+.vite/
+build.log
+*.tsbuildinfo
+.playwright-mcp/
+
+# Vendored sprite cache (regenerate with `npm run vendor:sprites`)
+public/sprites/
+
+# Server runtime data (SQLite database and WAL files)
+data/
+*.db
+*.db-wal
+*.db-shm
