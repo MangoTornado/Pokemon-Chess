@@ -12,6 +12,9 @@ build.log
 # Vendored sprite cache (regenerate with `npm run vendor:sprites`)
 public/sprites/
 
+# Kamal deploy secrets (registry credentials). `.kamal/secrets.sample` is committed as the template.
+.kamal/secrets
+
 # Server runtime data (SQLite database and WAL files)
 data/
 *.db

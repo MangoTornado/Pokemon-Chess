@@ -1,0 +1,68 @@
+# Kamal 2 deployment config.
+# See https://kamal-deploy.org/docs/configuration for all options.
+#
+# Fill in the TODO(...) markers before first deploy:
+#   - servers.web[]  -> the VM this app runs on
+#   - proxy.host     -> the hostname it answers on (see the note under `proxy`)
+#   - registry       -> your container registry credentials, via .kamal/secrets
+
+service: pokemon-chess
+image: mangotornado/pokemon-chess
+
+servers:
+  web:
+    # TODO(host): the Oracle Cloud VM. Set to 150.136.52.129 to share the box with flight-search, but read the
+    # `proxy.host` note first — two Kamal apps on one host must answer on different hostnames or they will fight
+    # over the root route.
+    - TODO_SERVER_IP
+
+ssh:
+  user: ubuntu
+
+registry:
+  server: registry.gitlab.com        # change to docker.io, registry.cloud.oracle.com, etc.
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: amd64            # set to arm64 if the VM is an Oracle Ampere A1
+
+# kamal-proxy listens on :80 on the host; Cloudflare Tunnel forwards to it, so TLS terminates at Cloudflare's edge
+# and 443 is never exposed here. Same arrangement as flight-search.
+proxy:
+  ssl: false
+  app_port: 8080
+  # TODO(host): required if this shares a VM with another Kamal app. kamal-proxy routes by Host header, and an app
+  # with no `host` claims every request — so deploying a second app without one silently steals the first app's
+  # traffic. Give each a hostname (e.g. chess.example.com) and point both Cloudflare Tunnel routes accordingly.
+  # host: chess.example.com
+  #
+  # `/` is the built client's index.html, which is served as soon as the process is listening. There is no
+  # dedicated health endpoint, and `/api/me` is deliberately not used: it answers 401 when nobody is signed in,
+  # which a health check would read as failure.
+  healthcheck:
+    path: /
+    interval: 3
+
+# Accounts, profiles, collections, trades and the badge case all live in one SQLite file. Without this volume every
+# deploy would hand players a brand-new empty database, which is the one piece of state this app cannot rebuild.
+volumes:
+  - "pokemon_chess_data:/app/data"
+
+env:
+  clear:
+    NODE_ENV: production          # also what makes the session cookie `Secure`
+    PORT: 8080
+    # Inside the mounted volume, so it survives a deploy.
+    DB_PATH: /app/data/pokemon-chess.db
+    STATIC_DIR: /app/dist
+  # No secrets are required to run. There is no third-party API and no signing key: session tokens are generated
+  # with node:crypto and stored hashed, so the database is the only thing worth protecting and it never leaves the
+  # volume. Registry credentials are the sole secret, and they belong to the builder rather than the app.
+
+# Sizing note, not a setting: the Gym Leader's AI search runs on a worker pool sized `availableParallelism() - 1`
+# (server/aiPool.ts), so a 1-OCPU VM gets a single worker and a deep gym (Blaine, Giovanni) costs seconds of CPU
+# per move. The pool queues past that and answers "the Gym is busy" rather than falling over, but if gym battles
+# feel slow under load, cores are the lever.

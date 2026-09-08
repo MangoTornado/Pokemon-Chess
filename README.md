@@ -62,6 +62,34 @@ npm run gen:data   # regenerate the dex bundles (needs network)
 The generated dex bundles under `src/data/generated/` are **committed on purpose**, so a clean checkout
 builds and tests offline without hitting the network. Regenerate them only when bumping the dex version.
 
+## Deploying
+
+[Kamal 2](https://kamal-deploy.org) ships it to a single VM, the same arrangement as the flight-search app:
+`kamal-proxy` listens on :80 and Cloudflare Tunnel forwards to it, so TLS terminates at Cloudflare's edge and 443
+is never exposed on the host.
+
+```sh
+cp .kamal/secrets.sample .kamal/secrets   # registry credentials, the only secrets needed
+$EDITOR config/deploy.yml                 # fill in the TODO(...) markers
+make setup                                # first time: build, push, boot
+make deploy                               # thereafter
+make logs                                 # tail
+```
+
+Three things about this app in particular:
+
+- **The database is the state that matters.** Accounts, collections, trades and the badge case live in one SQLite
+  file, mounted as the `pokemon_chess_data` volume at `/app/data`. Without that volume every deploy hands players
+  an empty database, and it is the one thing here that cannot be rebuilt from source. `make db-pull` takes a copy.
+- **The runtime image carries no `node_modules`.** The server's whole dependency graph is its own TypeScript plus
+  `node:` builtins — `react` is client-only and `chess.js` is test-only — so the runner stage copies `server/`,
+  `src/`, `dist/` and `package.json` and nothing else. Verified by running it from exactly that tree.
+- **Node 24 is not a preference.** The server is started as `node server/main.ts` with no build step, and stores
+  accounts in the built-in `node:sqlite`. On Node 20 it fails twice over.
+
+Sharing a host with another Kamal app needs a `proxy.host` for each: `kamal-proxy` routes by `Host` header, and an
+app without one claims every request, so a second app deployed without a hostname silently takes the first's traffic.
+
 ## How it is put together
 
 ```

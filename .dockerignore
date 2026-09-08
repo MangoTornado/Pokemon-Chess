@@ -1,0 +1,27 @@
+node_modules
+dist
+dist-ssr
+coverage
+.git
+.gitignore
+README.md
+.env
+.env.local
+.env.*.local
+.vscode
+.idea
+*.log
+build.log
+*.tsbuildinfo
+.vite
+.playwright-mcp
+
+# Never bake the local database into an image — it is mounted as a volume at runtime, and copying a dev copy in
+# would both leak local accounts and be shadowed by the mount anyway.
+data
+*.db
+*.db-wal
+*.db-shm
+
+# Vendored sprite cache: regenerated, not shipped.
+public/sprites
